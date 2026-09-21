@@ -52,6 +52,24 @@ class Completion:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class Embedding:
+    """Day 5 §3 — one text → one vector, reusing the Day 4 `Usage`.
+
+    `usage` is the *request-level* accounting (embeddings bill per token of
+    the whole batch); it is repeated on each member so callers never have to
+    guess where the receipt lives.
+    """
+
+    text: str
+    vector: list[float]
+    model: str
+    usage: Usage
+
+    def __post_init__(self) -> None:
+        self.vector = [float(x) for x in self.vector]
+
+
 class ProviderError(Exception):
     """Base of the error taxonomy. `retryable` drives the gateway's retry
     policy — only transient errors (an identical retry can succeed) get one.

@@ -27,7 +27,7 @@ from typing import Any, Iterator
 from urllib import error as urlerror
 
 from ai_os.contract import (
-    Completion, ProviderError, ProviderTimeout, RateLimitError,
+    Completion, Embedding, ProviderError, ProviderTimeout, RateLimitError,
 )
 from ai_os.ledger import Ledger
 
@@ -65,6 +65,9 @@ class ModelGateway:
         self.last_latency_ms: float = 0.0
         self.last_attempts: int = 0
         self.last_error: ProviderError | None = None
+        self.last_embeddings: list[Embedding] | None = None
+        self.last_embed_provider: str | None = None
+        self.last_embed_latency_ms: float = 0.0
 
     # ------------------------------------------------------------------ chat
 
@@ -202,6 +205,88 @@ class ModelGateway:
                     time.sleep(delay)
 
         raise last_err or ProviderError("gateway", "no providers configured")
+
+    # ---------------------------------------------------------------- embed
+
+    def embed(self, inputs: list[str]) -> list[Embedding]:
+        """Day 5 §3 — `Provider.embed()` through the full Day 4 machinery.
+
+        Identical policy to `chat()`: retry transient errors, never retry 401,
+        exponential backoff honoring `Retry-After`, ordered fallback to the
+        next provider, one `CallRecord` per attempt (success *and* failure).
+        Providers without an `embed` capability are skipped in the chain.
+        """
+        deadline = (time.monotonic() + self.total_budget_s
+                    if self.total_budget_s else None)
+        last_err: ProviderError | None = None
+        attempts_total = 0
+
+        for provider in self.providers:
+            embed_call = getattr(provider, "embed", None)
+            if embed_call is None:
+                continue                     # chat-only provider (e.g. Anthropic)
+            for attempt in range(1, self.max_attempts + 1):
+                attempts_total += 1
+                if deadline is not None and time.monotonic() >= deadline:
+                    err = ProviderTimeout(
+                        "gateway", f"total budget of {self.total_budget_s}s exceeded")
+                    self.ledger.record(provider=provider.name,
+                                       model=getattr(provider, "embedding_model", ""),
+                                       ok=False, error=f"budget: {last_err or err}")
+                    self.last_error = err
+                    raise err
+
+                t0 = time.perf_counter()
+                try:
+                    embeddings = embed_call(inputs)
+                except ProviderError as e:
+                    last_err = e
+                    self.last_error = e
+                    latency_ms = (time.perf_counter() - t0) * 1000
+                    self.ledger.record(provider=provider.name,
+                                       model=getattr(provider, "embedding_model", ""),
+                                       latency_ms=latency_ms, ok=False, error=str(e))
+                    self._log_failure(provider, attempt, e, latency_ms)
+                    if not e.retryable or attempt == self.max_attempts:
+                        break                  # 401/400 never retried
+                    delay = _backoff(attempt, e, self.base_delay, self.max_delay)
+                    log.info("%s embed attempt %d/%d -> %s; sleeping %.2fs",
+                             provider.name, attempt, self.max_attempts,
+                             type(e).__name__, delay)
+                    time.sleep(delay)
+                except urlerror.URLError as e:
+                    wrapped = ProviderError(provider.name, f"network error: {e.reason}",
+                                            retryable=True)
+                    last_err = wrapped
+                    self.last_error = wrapped
+                    latency_ms = (time.perf_counter() - t0) * 1000
+                    self.ledger.record(provider=provider.name,
+                                       model=getattr(provider, "embedding_model", ""),
+                                       latency_ms=latency_ms, ok=False, error=str(wrapped))
+                    if attempt == self.max_attempts:
+                        break
+                    delay = _backoff(attempt, wrapped, self.base_delay, self.max_delay)
+                    time.sleep(delay)
+                else:
+                    latency_ms = (time.perf_counter() - t0) * 1000
+                    usage = embeddings[0].usage if embeddings else None
+                    self.ledger.record(
+                        provider=provider.name, model=embeddings[0].model,
+                        input_tokens=usage.input_tokens if usage else 0,
+                        output_tokens=0,
+                        latency_ms=latency_ms, ok=True)
+                    self.last_embeddings = embeddings
+                    self.last_embed_provider = provider.name
+                    self.last_embed_latency_ms = latency_ms
+                    self.last_error = None
+                    log.info("%s embed ok model=%s attempts=%d latency=%.1fms inputs=%d",
+                             provider.name, embeddings[0].model, attempts_total,
+                             latency_ms, len(inputs))
+                    return embeddings
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+
+        raise last_err or ProviderError("gateway", "no provider supports embedding")
 
     # ------------------------------------------------------------------ misc
 
