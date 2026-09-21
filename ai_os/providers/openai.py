@@ -13,8 +13,8 @@ from urllib import error as urlerror, request
 from urllib.parse import urljoin
 
 from ai_os.contract import (
-    Completion, ProviderError, InvalidKeyError,
-    ProviderTimeout, NetworkError,
+    Completion, Embedding, ProviderError, InvalidKeyError,
+    ProviderTimeout, NetworkError, Usage,
     usage_from_dict,
 )
 from ai_os.providers import register
@@ -26,13 +26,16 @@ class OpenAIProvider:
     name = "openai"
     DEFAULT_BASE_URL = "https://api.openai.com/v1"
     DEFAULT_MODEL = "gpt-4o-mini"
+    DEFAULT_EMBED_MODEL = "text-embedding-3-small"
 
     def __init__(self, api_key: str, model: str = DEFAULT_MODEL,
-                 base_url: str = DEFAULT_BASE_URL, timeout_s: float = 60.0):
+                 base_url: str = DEFAULT_BASE_URL, timeout_s: float = 60.0,
+                 embedding_model: str = DEFAULT_EMBED_MODEL):
         if not api_key:
             raise InvalidKeyError(self.name, "no api_key supplied")
         self.api_key = api_key
         self.model = model
+        self.embedding_model = embedding_model
         self.base_url = base_url.rstrip("/")
         self.timeout_s = float(timeout_s)
 
@@ -82,13 +85,57 @@ class OpenAIProvider:
         data = self._post("chat/completions", body)
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
+        text = message.get("content", "")
+        if not text.strip():
+            # A 200 that carries nothing (seen on OpenAI-compatible endpoints
+            # under throttling) is a transient glitch, not a refusal worth
+            # surfacing raw — the gateway should retry/fall back, bounded.
+            raise ProviderError(self.name, "empty completion (no content returned)",
+                                retryable=True)
         return Completion(
-            text=message.get("content", ""),
+            text=text,
             model=data.get("model", self.model),
             finish_reason=choice.get("finish_reason") or "stop",
             usage=usage_from_dict(data.get("usage") or {}),
             raw=data,
         )
+
+    # -- interface: embeddings (Day 5 §3) -----------------------------------
+
+    def embed(self, inputs: list[str]) -> list[Embedding]:
+        """Day 5 §3 — text → vectors, the same wire format the client wraps.
+
+        `POST /v1/embeddings` with `{"model", "input"}` → `{data: [{index,
+        object, embedding}], usage}`. `usage.prompt_tokens` normalizes into
+        the Day 4 `Usage` shape (output_tokens = 0) so the ledger prices an
+        embed call like any input-token bill.
+        """
+        data = self._post("embeddings", {"model": self.embedding_model, "input": inputs})
+        usage = usage_from_dict(data.get("usage") or {})
+        # Normalize usage: embeddings report prompt_tokens as the whole batch's
+        # input; `usage_from_dict` already maps prompt_tokens → input_tokens.
+        rows = [r for r in data.get("data") or [] if isinstance(r.get("embedding"), list)]
+        if not rows:
+            raise NetworkError(self.name, "embedding response had no data rows")
+        # Some OpenAI-compatible endpoints (e.g. Gemini/Palm) omit `index`;
+        # fall back to response order rather than crashing on a missing key.
+        def _index(r: dict[str, Any] | tuple, fallback: int) -> int:
+            idx = r.get("index")
+            try:
+                return int(idx)
+            except (TypeError, ValueError):
+                return fallback
+
+        rows = sorted(enumerate(rows), key=lambda ir: _index(ir[1], ir[0]))
+        return [
+            Embedding(
+                text=inputs[i] if i < len(inputs) else inputs[0],
+                vector=[float(x) for x in r["embedding"]],
+                model=data.get("model", self.embedding_model),
+                usage=Usage(usage.input_tokens, 0, usage.total_tokens),
+            )
+            for i, r in rows
+        ]
 
     def stream(self, messages: list[dict[str, str]], *, temperature: float = 0.0,
                max_tokens: int = 512) -> Iterator[dict[str, Any]]:

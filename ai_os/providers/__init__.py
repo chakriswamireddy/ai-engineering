@@ -12,7 +12,7 @@ import json
 from typing import Any, Iterator, Protocol
 
 from ai_os.contract import (
-    Completion, ProviderError,
+    Completion, Embedding, ProviderError,
     BadRequestError, InvalidKeyError, RateLimitError, ProviderTimeout,
 )
 
@@ -25,6 +25,8 @@ class Provider(Protocol):
 
     def stream(self, messages: list[dict[str, str]], *, temperature: float = 0.0,
                max_tokens: int = 512) -> Iterator[dict[str, Any]]: ...
+
+    def embed(self, inputs: list[str]) -> list[Embedding]: ...
 
 
 def parse_sse_line(line: str, carry: str) -> tuple[str | None, str]:

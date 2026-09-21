@@ -24,6 +24,10 @@ from ai_os.config import build_gateway_from_env
 from ai_os.contract import (
     ProviderError, RateLimitError, InvalidKeyError, BadRequestError, ProviderTimeout,
 )
+from ai_os.rag import (
+    RagStore, DimensionMismatch, StoreVersionError,
+    run_rag, store_path_from_env,
+)
 
 try:
     gateway = build_gateway_from_env()
@@ -40,6 +44,13 @@ class ChatRequest(BaseModel):
     temperature: float = 0.0
     max_tokens: int = 2048
     stream: bool = False
+
+
+class RagRequest(BaseModel):
+    question: str
+    k: int | None = None
+    budget_chars: int = 1200
+    max_tokens: int = 2048
 
 
 def _error_response(err: ProviderError) -> dict[str, Any]:
@@ -120,3 +131,39 @@ def ledger_endpoint() -> dict[str, Any]:
     if gateway is None:
         return {"error": _build_error}
     return gateway.ledger.summary()
+
+
+def _rag_store() -> RagStore | None:
+    try:
+        return RagStore.load(store_path_from_env())
+    except (FileNotFoundError, StoreVersionError, json.JSONDecodeError) as e:
+        return None
+
+
+@app.post("/rag")
+def rag_endpoint(req: RagRequest) -> dict[str, Any]:
+    """Day 6 §6 — question → embed → retrieve → context → chat → answer.
+
+    `citations` is the retrieved set itself (with scores), so every claim
+    the model makes is traceable to a chunk — or it isn't RAG. Retrieval
+    and generation keep separate cost lines: they are different bills.
+    """
+    if gateway is None:
+        return {"error": _build_error}
+    store = _rag_store()
+    if store is None:
+        return {"error": "no RAG store at the configured RAG_STORE_PATH",
+                "hint": "run `python tools/build_rag_store.py` (against the "
+                        "stub for a deterministic demo, or a real API for "
+                        "the real corpus)"}
+    try:
+        result = run_rag(gateway, store, req.question, k=req.k,
+                         budget_chars=req.budget_chars,
+                         max_tokens=req.max_tokens)
+    except ProviderError as e:
+        return _error_response(e)
+    except DimensionMismatch as e:
+        return {"error": str(e)}
+    except ValueError as e:
+        return {"error": str(e)}
+    return result

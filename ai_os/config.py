@@ -7,6 +7,7 @@ OPENAI_BASE_URL=...     ANTHROPIC_BASE_URL=...
 LLM_MAX_ATTEMPTS=3      LLM_TIMEOUT_S=60
 LLM_BASE_DELAY_S=1.0    LLM_MAX_DELAY_S=30.0
 LLM_TOTAL_BUDGET_S=0    # seconds for whole chain; 0 = unlimited
+EMBEDDING_MODEL=...     # day 6: embeddings model for providers that embed
 ```
 
 "which model, in what order" is runtime configuration, not code.
@@ -59,8 +60,16 @@ def provider_from_spec(provider: str, model: str):
     api_key = os.getenv(f"{provider.upper()}_API_KEY", "").strip() or os.getenv("OPENAI_API_KEY", "").strip()
     base_url = (os.getenv(f"{provider.upper()}_BASE_URL", "").strip()
                 or (default_url or "https://api.openai.com/v1"))
+    kwargs = {}
+    if hasattr(cls, "DEFAULT_EMBED_MODEL"):
+        kwargs["embedding_model"] = (os.getenv(f"{provider.upper()}_EMBEDDING_MODEL", "").strip()
+                                     or os.getenv("EMBEDDING_MODEL", "").strip()
+                                     or getattr(cls, "DEFAULT_EMBED_MODEL"))
+    if provider == "cloudflare":
+        kwargs["account_id"] = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
     return cls(api_key=api_key, model=model or default_model,
-               base_url=base_url, timeout_s=float(os.getenv("LLM_TIMEOUT_S", "60")))
+               base_url=base_url, timeout_s=float(os.getenv("LLM_TIMEOUT_S", "60")),
+               **kwargs)
 
 
 def build_gateway_from_env() -> ModelGateway:

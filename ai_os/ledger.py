@@ -19,6 +19,10 @@ MODEL_PRICES: dict[str, tuple[float, float]] = {
     "gpt-4o": (2.50, 10.00),
     "claude-3-5-haiku-latest": (0.80, 4.00),
     "claude-3-5-sonnet-latest": (3.00, 15.00),
+    # Day 6 — embeddings bill twice: the corpus embed is a per-token cost
+    # (output_tokens = 0), so the ledger prices it like any input token.
+    "text-embedding-3-small": (0.02, 0.0),
+    "text-embedding-3-large": (0.13, 0.0),
 }
 
 
