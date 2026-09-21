@@ -1,0 +1,101 @@
+# Day 7 §3 — the nine pre-registered questions (expected sources written
+# BEFORE running; pre-registration is the line between a report and
+# curve-fitting).
+#
+# Fields:
+#   question   the natural-language query as the user would type it
+#   expected   doc_ids the corpus must surface to answer it (pre-registered
+#              from the corpus structure, not from retrieval output)
+#   must_not   the WRONG sense a one-hot query might retrieve instead (Family C)
+#   must_refuse  E-family: no page answers it; correct behaviour is refusal
+#   tau        similarity gate for a must_refuse question. PLACEHOLDER — to be
+#              CALIBRATED (PENDING) from the top-1 score separation between
+#              Family A (known answerable) and Family E (known unanswerable).
+#   predicted  the hypothesis this question is expected to indict, from the
+#              Day 7 notes §5 table — written to be confirmed or killed.
+#   fix        the fix the predicted class routes to (Day 8/9's backlog).
+#
+# Run:  python tools/rag_debug.py --stub      (offline mechanics)
+#       python tools/rag_debug.py             (real store + gateway; chat
+#                                              skipped when quota is spent)
+
+tau: 0.55          # to be calibrated, not trusted: see day-7-notes.md §6
+budget_chars: 1200
+
+questions:
+  - id: A1
+    family: "A — obvious (control)"
+    question: "What is a checkout in Saleor?"
+    expected: ["quickstart/api#create-a-checkout"]
+    predicted: "none (control)"
+    fix: null
+
+  - id: B1
+    family: "B — multi-document (the seam)"
+    question: "How does a checkout become an order, and what changes after?"
+    expected:
+      - "quickstart/api#create-a-checkout"
+      - "developer/checkout/lifecycle#completing-checkout"
+      - "developer/order/overview#lifecycle"
+    predicted: "missing retrieval (partial) — one query lands in one region"
+    fix: "multi-query decomposition (Day 8)"
+
+  - id: B2
+    family: "B — multi-document (the seam)"
+    question: "What must be set before checkoutComplete succeeds, and what does it return?"
+    expected:
+      - "developer/checkout/api-guide#completing-checkout"
+      - "developer/checkout/lifecycle#completing-checkout"
+    predicted: "excessive context + partial retrieval"
+    fix: "rerank + context ordering (Day 9)"
+
+  - id: C1
+    family: "C — ambiguous terminology"
+    question: "How do apps work in Saleor?"
+    expected: ["developer/extending/apps/overview#apps-overview"]
+    must_not:
+      - "developer/app-store/overview#saleor-app-store"
+      - "developer/app-store/overview#extensions"
+    predicted: "irrelevant retrieval — one vector averaged across the senses of 'app'"
+    fix: "query rewriting / metadata filter (Day 8)"
+
+  - id: C2
+    family: "C — ambiguous terminology"
+    question: "What is the difference between an attribute and a field?"
+    expected:
+      - "developer/attributes/overview#attributes-and-types-overview"
+      - "developer/attributes/api#input-types"
+    predicted: "wrong entity (rung 4) — GraphQL field docs outrank product attribute docs"
+    fix: "query rewriting (Day 8)"
+
+  - id: D1
+    family: "D — similar documents"
+    question: "How do I complete a checkout?"
+    expected: ["developer/checkout/api-guide#completing-checkout"]
+    predicted: "duplicated context — 4 of 5 slots are near-dupes of one meaning"
+    fix: "rerank + diversity/MMR (Day 9)"
+
+  - id: D2
+    family: "D — similar documents"
+    question: "How do I create a checkout in Saleor?"
+    expected:
+      - "quickstart/api#create-a-checkout"
+      - "developer/checkout/api-guide#creating-a-checkout-session"
+    predicted: "duplicated context — the same fact served twice"
+    fix: "context dedup (Day 9)"
+
+  - id: E1
+    family: "E — out of corpus"
+    question: "How much does Saleor Cloud cost?"
+    expected: []
+    must_refuse: true
+    predicted: "hallucination — K neighbours are returned anyway; no gate"
+    fix: "similarity gate (shippable today)"
+
+  - id: E2
+    family: "E — out of corpus (near-miss)"
+    question: "How do I integrate Saleor with Shopify?"
+    expected: []
+    must_refuse: true
+    predicted: "hallucination via near-miss — adjacent docs score plausibly"
+    fix: "gate + threshold calibration"

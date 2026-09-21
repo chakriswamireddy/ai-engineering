@@ -1,0 +1,382 @@
+"""Day 7 §4 — the per-query retrieval trace and the verdict decision tree.
+
+Day 6 produced fluent, cited answers and declared their semantics
+`PENDING`. This module is the observability seam that turns a wrong answer
+into evidence: one record per question carrying the retrieval top-K
+(doc/heading/score/rank), the pre-registered expected doc set, every
+mechanical metric the notes mark `MECH`, and the run's answer/citations.
+
+From the outside a retrieval miss and a generation failure are
+indistinguishable — same fluent, confident, cited output. The trace exists
+so the two are separated by experiment, not opinion:
+
+  - `retrieve_trace` is the retrieval-only half (no LLM): does the expected
+    doc rank? At what rank? Which chunks survive the context budget?
+  - `run_trace` adds the run's own answer/citations from the *same* retrieval.
+  - `classify_trace` walks the §4 decision tree and returns a verdict. Every
+    branch before "is the answer right?" is `MECH`; the last one needs the
+    oracle test (`oracle.py`) or a real reading — and is the only place the
+    verdict is allowed to be `PENDING`.
+
+Convention: a trace is a plain dict (JSON-serializable) so a run can dump
+the whole thing next to the report.
+"""
+from __future__ import annotations
+
+from typing import Any, Iterable, Sequence
+
+from ai_os.gate import score_gap, should_refuse, top_score
+from ai_os.rag import (
+    Chunk,
+    NOT_COVERED,
+    SYSTEM_PROMPT,
+    build_context,
+    citation,
+    k_from_budget,
+)
+
+# --------------------------------------------------------------- verdicts
+# The §4 decision tree's terminals. Each routes to exactly one owning day.
+
+VERDICT_OK = "ok"
+VERDICT_MISSING_RETRIEVAL = "missing-retrieval"
+VERDICT_CONTEXT = "context"
+VERDICT_CONTEXT_QUALITY = "context-quality"
+VERDICT_GENERATION = "generation"
+VERDICT_CORPUS_GAP = "corpus-gap"
+VERDICT_PENDING = "pending"
+
+VERDICTS: dict[str, str] = {
+    VERDICT_OK: "answerable and expected docs grounded the answer",
+    VERDICT_MISSING_RETRIEVAL:
+        "expected doc absent from top-K → retrieval (Day 8)",
+    VERDICT_CONTEXT:
+        "expected retrieved but dropped by the budget floor → "
+        "context construction (Day 9)",
+    VERDICT_CONTEXT_QUALITY:
+        "expected present but near-duplicates crowd it → "
+        "context quality (Day 9)",
+    VERDICT_GENERATION:
+        "expected in context yet the answer is wrong / refused → "
+        "generation (Day 20/21)",
+    VERDICT_CORPUS_GAP:
+        "no page answers the question; refusing is the correct behaviour",
+    VERDICT_PENDING:
+        "needs a real run / semantic judgement (or oracle) to decide",
+}
+
+# ≥ this duplicate ratio in the *kept* context counts as context pollution
+# (a Day 9 problem) rather than an isolated coincidence.
+DUP_RATIO_HIGH = 0.35
+
+# ------------------------------------------------------------- mechanics
+
+def duplicate_ratio(texts: Sequence[str]) -> float:
+    """MECH: 1 − distinct/total texts. 0.0 for < 2 chunks.
+
+    Both duplication sources land here: the overlap *seam* (the same 40 chars
+    in two adjacent chunks) and *near-duplicate pages* (different chunks, the
+    same fact served twice). The ratio is arithmetic; whether the duplicated
+    span is the answer is semantic and stays `PENDING`.
+    """
+    if len(texts) < 2:
+        return 0.0
+    return 1.0 - len(set(texts)) / len(texts)
+
+
+def duplicate_count(texts: Sequence[str]) -> int:
+    """MECH: how many texts repeat a text that appeared earlier."""
+    seen: set[str] = set()
+    repeats = 0
+    for t in texts:
+        if t in seen:
+            repeats += 1
+        seen.add(t)
+    return repeats
+
+
+def expected_stats(expected: Iterable[str],
+                   doc_ids: Sequence[str]) -> dict[str, Any]:
+    """MECH: rank each expected doc inside a retrieved/kept doc list.
+
+    Returns per-expected membership booleans, best rank, recall@K and MRR
+    over `doc_ids` — the machine half of the failure taxonomy.
+    """
+    rank: dict[str, int] = {}
+    for i, d in enumerate(doc_ids):
+        rank.setdefault(d, i + 1)
+    in_list: list[bool] = []
+    best_rank: list[int | None] = []
+    for e in expected:
+        r = rank.get(e)
+        in_list.append(r is not None)
+        best_rank.append(r)
+    exp = list(expected)
+    recall = float(sum(in_list)) / len(in_list) if exp else None
+    first = [r for r in best_rank if r]
+    mrr = 1.0 / min(first) if first else 0.0
+    return {
+        "in_list": in_list,
+        "best_rank": best_rank,
+        "recall_at_k": recall,
+        "mrr": mrr,
+    }
+
+
+def all_expected(store, expected: Iterable[str]) -> list[Chunk]:
+    """Chunks whose doc_id is in `expected`, in store order.
+
+    Used by the oracle and by rare callers that want the full text of the
+    expected documents without guessing positions.
+    """
+    want = set(expected)
+    if not want:
+        return []
+    return [c for c in store.chunks if c.doc_id in want]
+
+
+# ---------------------------------------------------------------- traces
+
+def _retrieve(gateway, store, question: str, *, k: int | None,
+              budget_chars: int, tau: float | None):
+    """Shared retrieval: embed, scan, budget-slice, and return everything the
+    trace and the generation half need (kept chunks included, model-free)."""
+    q = question.strip()
+    if not q:
+        raise ValueError("question must not be empty")
+
+    emb = gateway.embed([q])[0]
+    if store.dimension and len(emb.vector) != store.dimension:
+        from ai_os.rag import DimensionMismatch
+        raise DimensionMismatch(
+            f"query dim {len(emb.vector)} != store dim {store.dimension}")
+
+    if k is None:
+        k = k_from_budget(budget_chars, store.avg_chunk_len(), len(store))
+    results = store.retrieve(emb.vector, k)
+    context, used, kept = build_context(results, budget_chars)
+    return emb, k, results, context, used, kept
+
+
+def _score_dicts(results: Sequence[tuple[float, Chunk]]
+                 ) -> list[dict[str, Any]]:
+    """Serializable top-K table used by the trace and by `cited ⊆ retrieved`."""
+    return [
+        {"rank": i + 1, "score": float(s),
+         "doc_id": c.doc_id, "chunk_id": c.chunk_id,
+         "heading": c.heading, "chars": len(c.text)}
+        for i, (s, c) in enumerate(results)
+    ]
+
+
+def retrieve_trace(gateway, store, question: str, *,
+                   expected: Iterable[str] = (), k: int | None = None,
+                   budget_chars: int = 1200, tau: float | None = None,
+                   ) -> dict[str, Any]:
+    """Test 1 — retrieval-only trace: embed the query, scan the index, build
+    the context. No LLM, fully deterministic: the retrieval half of every
+    verdict and the model-free source for the report's `Retrieved documents`
+    column.
+    """
+    emb, k, results, context, used, kept = _retrieve(
+        gateway, store, question, k=k, budget_chars=budget_chars, tau=tau)
+    expected = list(expected)
+    kept_docs = [c.doc_id for _, c in kept]
+    kept_texts = [c.text for _, c in kept]
+    ret = expected_stats(expected, [c.doc_id for _, c in results])
+    ctx = expected_stats(expected, kept_docs)
+
+    return {
+        "id": None,
+        "family": None,
+        "question": question,
+        "k": k,
+        "embed_model": emb.model,
+        "embed_input_tokens": emb.usage.input_tokens,
+
+        "retrieved": _score_dicts(results),
+        "top1": top_score(results),
+        "top1_minus_topK": score_gap(results, k),
+        "scores": [float(s) for s, _ in results],
+
+        "expected": expected,
+        "expected_in_retrieved": ret["in_list"],
+        "expected_best_rank": ret["best_rank"],
+        "recall_at_k": ret["recall_at_k"],
+        "mrr": ret["mrr"],
+
+        "context_chars": used,
+        "context_budget": budget_chars,
+        "context_utilization": (used / budget_chars if budget_chars else 0.0),
+        "kept_doc_ids": kept_docs,
+        "expected_in_context": ctx["in_list"],
+        "kept_duplicate_ratio": duplicate_ratio(kept_texts),
+        "duplicate_chunks": duplicate_count(kept_texts),
+        "retrieved_duplicate_ratio": duplicate_ratio(
+            [c.text for _, c in results]),
+
+        "gate_refused": (should_refuse(results, tau) if tau is not None
+                         else None),
+
+        "answer": None,
+        "citations": [],
+        "refused": None,
+        "generation": None,
+        "oracle": None,
+        "verdict": VERDICT_PENDING,
+    }
+
+
+def run_trace(gateway, store, question: str, *,
+              expected: Iterable[str] = (), k: int | None = None,
+              budget_chars: int = 1200, tau: float | None = None,
+              max_tokens: int = 2048, temperature: float = 0.0,
+              with_generation: bool = True) -> dict[str, Any]:
+    """A trace plus the run's own answer and citations from the *same*
+    retrieval — so `cited ⊆ retrieved` holds by construction and the verdict
+    blames the layer it can prove.
+
+    The similarity gate (`tau`) is *recorded* as `gate_refused` but not yet
+    enforced: Day 7 measures what the gate would have done next to what the
+    model actually did; Day 21 flips the decision into the pipeline.
+    """
+    emb, k, results, context, used, kept = _retrieve(
+        gateway, store, question, k=k, budget_chars=budget_chars, tau=tau)
+    expected = list(expected)
+    kept_docs = [c.doc_id for _, c in kept]
+    kept_texts = [c.text for _, c in kept]
+    ret = expected_stats(expected, [c.doc_id for _, c in results])
+    ctx = expected_stats(expected, kept_docs)
+
+    trace = {
+        "id": None,
+        "family": None,
+        "question": question,
+        "k": k,
+        "embed_model": emb.model,
+        "embed_input_tokens": emb.usage.input_tokens,
+        "retrieved": _score_dicts(results),
+        "top1": top_score(results),
+        "top1_minus_topK": score_gap(results, k),
+        "scores": [float(s) for s, _ in results],
+        "expected": expected,
+        "expected_in_retrieved": ret["in_list"],
+        "expected_best_rank": ret["best_rank"],
+        "recall_at_k": ret["recall_at_k"],
+        "mrr": ret["mrr"],
+        "context_chars": used,
+        "context_budget": budget_chars,
+        "context_utilization": (used / budget_chars if budget_chars else 0.0),
+        "kept_doc_ids": kept_docs,
+        "expected_in_context": ctx["in_list"],
+        "kept_duplicate_ratio": duplicate_ratio(kept_texts),
+        "duplicate_chunks": duplicate_count(kept_texts),
+        "retrieved_duplicate_ratio": duplicate_ratio(
+            [c.text for _, c in results]),
+        "gate_refused": (should_refuse(results, tau) if tau is not None
+                         else None),
+        "answer": None,
+        "citations": [],
+        "refused": None,
+        "generation": None,
+        "oracle": None,
+        "verdict": VERDICT_PENDING,
+    }
+
+    if not with_generation:
+        return trace
+    if not kept:
+        trace["answer"] = NOT_COVERED
+        trace["citations"] = [dict(r) for r in _score_dicts(results)]
+        trace["refused"] = True  # empty context → honest refusal *by code*
+        trace["verdict"] = classify_trace(trace)
+        return trace
+
+    system = SYSTEM_PROMPT.format(used=used, not_covered=NOT_COVERED,
+                                  context=context)
+    try:
+        completion = gateway.chat(
+            [{"role": "system", "content": system},
+             {"role": "user", "content": question}],
+            temperature=temperature, max_tokens=max_tokens)
+    except Exception:
+        # chat is the quota-limited half of the free tier — a trace must not
+        # die for it. answer stays None; the verdict falls back to PENDING and
+        # the retrieval half (the part this module guarantees) is complete.
+        return trace
+
+    trace["answer"] = completion.text
+    trace["citations"] = _score_dicts(results)
+    trace["refused"] = False
+    trace["generation"] = {
+        "model": completion.model,
+        "provider": getattr(gateway, "last_provider", None),
+        "input_tokens": completion.usage.input_tokens,
+        "output_tokens": completion.usage.output_tokens,
+        "attempts": getattr(gateway, "last_attempts", None),
+    }
+    trace["verdict"] = classify_trace(trace)
+    return trace
+
+
+# --------------------------------------------------------- the decision tree
+
+def classify_trace(trace: dict[str, Any], oracle: dict[str, Any] | None = None
+                   ) -> str:
+    """The §4 decision tree as a function of the trace (+ optional oracle).
+
+    Expected docs non-empty:
+        ∉ top-K                      → MISSING RETRIEVAL  (Day 8)  [MECH]
+        ∈ top-K, ∉ prompt            → CONTEXT            (Day 9)  [MECH]
+        ∈ prompt, model refused      → GENERATION (false refusal)  [MECH]
+    Expected docs empty (E-family):
+        refused                      → CORPUS GAP — refusing is correct
+        answered                     → GENERATION (invented an answer)
+    Expected ∈ prompt, answer given:
+        oracle wrong too             → GENERATION         (Day 20/21)
+        oracle right + dupes crowd   → CONTEXT QUALITY    (Day 9)
+        oracle right                 → OK
+        no oracle                    → PENDING (needs a real reading)
+
+    Returns a VERDICT_* key (VERDICTS maps keys to human text).
+    """
+    expected = list(trace.get("expected") or [])
+    refused = bool(trace.get("refused"))
+
+    if expected:
+        if not all(trace["expected_in_retrieved"]):
+            return VERDICT_MISSING_RETRIEVAL
+        if not all(trace["expected_in_context"]):
+            return VERDICT_CONTEXT
+        if refused:
+            return VERDICT_GENERATION  # evidence was in the prompt anyway
+    else:
+        # E-family: no page can answer. Refusing (by code, by gate, or by the
+        # model) is correct; answering is an invented answer (generation).
+        if refused:
+            return VERDICT_CORPUS_GAP
+        if trace.get("answer") is not None:
+            return VERDICT_GENERATION
+        if trace.get("gate_refused"):
+            return VERDICT_CORPUS_GAP
+        return VERDICT_PENDING
+
+    if oracle is not None:
+        if oracle.get("ok"):
+            if (trace.get("kept_duplicate_ratio") or 0.0) >= DUP_RATIO_HIGH:
+                return VERDICT_CONTEXT_QUALITY
+            return VERDICT_OK
+        return VERDICT_GENERATION
+    return VERDICT_PENDING
+
+
+def attach_oracle(trace: dict[str, Any], oracle: dict[str, Any]) -> dict[str, Any]:
+    """Mutate a trace in place with its oracle verdict and return the trace.
+
+    The run's own answer stays in `answer` (that is the behaviour being
+    debugged); the oracle's answer lives under `oracle.answer` so the report
+    can compare the two. Only the *verdict* is recomputed.
+    """
+    trace["oracle"] = oracle
+    trace["verdict"] = classify_trace(trace, oracle)
+    return trace
