@@ -1,10 +1,10 @@
-# Progress — ai-layer (Days 2–7)
+# Progress — ai-layer (Days 2–8)
 
 > Live status of what is implemented, verified, and still open in this repo.
 > Kept up to date as days are worked; the canonical per-day detail lives in
 > `docs/day-plan/day-N-notes.md`.
 
-Updated: 2026-09-21
+Updated: 2026-09-22
 
 ## Status legend
 
@@ -25,12 +25,14 @@ Updated: 2026-09-21
 | 5 | Embeddings + brute-force vector search | DONE | `ai_os/search.py`, `test_search.py` |
 | 6 | First RAG pipeline | PARTIAL (mechanics green; real store built, chat quota-blocked) | `chunk/ingest/rag`, `build_rag_store.py`, `rag_semantic_smoke.py`, `rag_smoke.py` |
 | 7 | RAG debugging / failure report | DONE (MECH half; semantic cells `PENDING` until a real run) | `ai_os/gate.py`, `ai_os/trace.py`, `ai_os/oracle.py`, `ai_os/fixtures.py`, `ai_os/questions.yaml`, `tools/rag_debug.py`, `test_day7.py`, `docs/failures/rag-naive.md` |
+| 8 | Retrieval improvements | PARTIAL (MECH green; semantic confirmation + τ recalibration `PENDING` real run) | `ai_os/lexicon.py`, `ai_os/retrieval.py`, `test_day8.py`, `tools/retrieval_day8.py`, `docs/concepts/retrieval.md`, `docs/evaluations/retrieval-day8*.md` |
 
 ---
 
 ## Day 4 — Model Gateway `DONE`
 
-Committed only as `35a1e72` — **nothing after Day 4 is committed yet**.
+(committed `35a1e72`; Days 5–7 code + docs are also committed now — HEAD is
+`2252f07`, the Day-7 harness. Day 8 is the current uncommitted change.)
 
 - `ai_os/contract.py`, `gateway.py`, `ledger.py`, `config.py`,
   `providers/openai.py`, `providers/anthropic.py`, `ai_os/server.py`
@@ -144,17 +146,48 @@ the deterministic (`MECH`) half verified offline — the semantic cells stay
   duplicate/rank metrics, all verdict-tree branches, budget-floor → context,
   empty-context refusal, fixture mechanics, oracle membership/budget guards).
 
-## Day 8 — Retrieval Improvements `NOTES ONLY`
+## Day 8 — Retrieval Improvements `PARTIAL`
 
-- Nothing implemented yet; Day 8's fix list is the `Proposed fix` column of
-  `docs/failures/rag-naive.md` §7 (shortlist), nothing else.
+Day 8's fix list is the `Proposed fix` column of `docs/failures/rag-naive.md`
+§7 (shortlist) — now implemented with the MECH half verified offline:
+`docs/concepts/retrieval.md` (concept), `docs/evaluations/retrieval-day8*.md`
+(run records).
+
+- `ai_os/lexicon.py` — deterministic keyword scorer: `STOP`, `tokenize()`,
+  `Lexicon.idf` (smoothed, built once at construct), `score`/`normalized`
+  (set-membership saturation at both ends, corpus-max normalization → [0, 1],
+  all-zero for out-of-corpus queries).
+- `ai_os/retrieval.py` — `Retriever`; `rewrite()` (deterministic rule table for
+  the token-gap families), `decompose()` (coordinated multi-intent split on
+  `and/then/but/or`, capped at 3), `rule_section()` (metadata filter that only
+  fires when the query names *one* section; `SECTION_PREFIXES` covers every
+  live folder including `quickstart/api`), `fuse_score(α, semantic, lexical)`
+  (α-weighted linear fusion), max-score per-chunk merge + dedup, Day-6
+  tie-breaks preserved for `mode="semantic"`. Retrieval-only — zero chat.
+- `tools/retrieval_day8.py` — baseline-vs-improved runner: `--stub` (offline
+  mechanics) or `--store data/store.json`; `--k`, `--tau`, `--alpha`, `--sweep`
+  (α set recorded per setting), `--no-rewrite` (isolates the filter as the
+  C1 fix), `--report PATH`.
+- `test_day8.py` — **29 MECH checks pass**: lexicon math/saturation,
+  rewrite/decompose/rule rules, lexical-gap fix (baseline picks refund doc;
+  hybrid + pure lexical + tied-α-average all pick the `orderCancel` doc),
+  multiquery both-intents + embed ledger, explicit-filter-wins + filter-miss
+  annotation, gate-survives-fusion, mode-semantic ≡ Day-6 seam, and the
+  nine-fixture regression (baseline still fails C1; improved keeps 7/7 green,
+  red→green exactly `["C1"]`, moves-alone keeps A1).
+- Stub run (k=5, τ=0.05): recall 1.0 either way; MRR 0.6667 → **0.6905**
+  (α=0.5); C1 red→green; E-family still refuses **0/2** → τ recalibration onto
+  the fused score is `PENDING` (needs a real gateway, recorded in the eval doc,
+  not papered over).
+- `--no-rewrite` isolates the attribution: without the section filter C1 fails
+  again — the *filter* fixed C1, not fusion alone.
 
 ---
 
 ## Known gaps (what blocks "everything green for real")
 
-1. **Git:** only Day 4 is committed. Days 5–7 (code + `docs/` + `corpus/` +
-   `data/`) are uncommitted working-tree changes.
+1. **Git:** Day 8 (code + docs) is the uncommitted working-tree change. Days
+   4–7 are committed (`35a1e72`, `1cf945d`, `7eb4031`, `2252f07` — HEAD).
 2. **Real run quota:** real chat runs live via OpenRouter (free models,
    verified), but the key hit its **free-tier cap — 50 free requests/day**.
    Embeddings now run through Cloudflare (free tier, full store built).
@@ -166,12 +199,18 @@ the deterministic (`MECH`) half verified offline — the semantic cells stay
    a real gateway run (`python tools/rag_debug.py --store data/store.json`)
    once chat quota is available. Re-run after the daily reset
    (`X-RateLimit-Reset` ~daily on the OpenRouter key).
+4. **Day 8 semantics + τ recalibration** — the MECH half is green
+   (`test_day8.py`); the improved run's `⟨run⟩` cells and the E-family
+   refusal threshold must be re-fit onto the *real* corpus fused scores
+   (`python tools/retrieval_day8.py --store data/store.json        # real runs
+   python tools/retrieval_day8.py --store data/store.json --sweep # α fit`).
 
 ## How to re-verify, in one line
 
 ```bash
-python test_chunk.py && python test_search.py && python test_rag.py && python test_day7.py
+python test_chunk.py && python test_search.py && python test_rag.py && python test_day7.py && python test_day8.py
 python tools/gateway_smoke.py
 python tools/rag_smoke.py
-python tools/rag_debug.py --stub     # day 7 offline mechanics
+python tools/rag_debug.py --stub       # day 7 offline mechanics
+python tools/retrieval_day8.py --stub  # day 8 offline comparison (6/9 → 7/9)
 ```
