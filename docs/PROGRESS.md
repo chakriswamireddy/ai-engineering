@@ -26,14 +26,15 @@ Updated: 2026-09-22
 | 6 | First RAG pipeline | PARTIAL (mechanics green; real store built, chat quota-blocked) | `chunk/ingest/rag`, `build_rag_store.py`, `rag_semantic_smoke.py`, `rag_smoke.py` |
 | 7 | RAG debugging / failure report | DONE (MECH half; semantic cells `PENDING` until a real run) | `ai_os/gate.py`, `ai_os/trace.py`, `ai_os/oracle.py`, `ai_os/fixtures.py`, `ai_os/questions.yaml`, `tools/rag_debug.py`, `test_day7.py`, `docs/failures/rag-naive.md` |
 | 8 | Retrieval improvements | PARTIAL (MECH green; semantic confirmation + τ recalibration `PENDING` real run) | `ai_os/lexicon.py`, `ai_os/retrieval.py`, `test_day8.py`, `tools/retrieval_day8.py`, `docs/concepts/retrieval.md`, `docs/evaluations/retrieval-day8*.md` |
-| 9 | Reranking and context construction | PARTIAL (all MECH green; ranking verified on the stub, semantic verdicts `PENDING` real run) | `ai_os/rerank.py`, `ai_os/context.py`, `test_day9.py`, `tools/retrieval_day9.py`, `docs/concepts/reranking.md`, `docs/evaluations/rerank-day9.md` |
+| 9 | Reranking and context construction | PARTIAL (all MECH green; **real-corpus comparison made** — envelope-blocked at Day 8, C2 partial move, D2 regression; τ/LOM/cross-encoder verdicts `PENDING` Day 20/21) | `ai_os/rerank.py`, `ai_os/context.py`, `test_day9.py`, `tools/retrieval_day9.py`, `docs/concepts/reranking.md`, `docs/evaluations/rerank-day9.md` |
 
 ---
 
 ## Day 4 — Model Gateway `DONE`
 
-(committed `35a1e72`; Days 5–8 committed — HEAD is `c0fcbe2`, the Day-8
-evaluation rollup. Day 9 is the current uncommitted change.)
+(committed `35a1e72`; Days 5–9 committed — HEAD is `d62acda`, the Day-9
+evaluation rollup. The Day-9 knob additions (`--weights` / `--dedup-first`,
+sweep focus) and the real-run records are the current uncommitted change.)
 
 - `ai_os/contract.py`, `gateway.py`, `ledger.py`, `config.py`,
   `providers/openai.py`, `providers/anthropic.py`, `ai_os/server.py`
@@ -187,8 +188,11 @@ Day 8's fix list is the `Proposed fix` column of `docs/failures/rag-naive.md`
 
 Day 9 owns the second half Day 8 deferred: given the right chunks in top-K,
 decide *which wins, where it sits, and what survives the budget*. All MECH
-green offline; the semantic verdicts need a real chat run. Concept +
-learning record: `docs/concepts/reranking.md`, `docs/day-plan/day-9-notes.md`.
+green offline; the **real-corpus comparison is now made** (11,061 Saleor
+chunks) — the findings land loudly in Day 8's backlog. Semantic verdicts
+(answer correctness per slot, τ on the fused score, the cross-encoder
+paid-vs-free question) still need Day 20/21. Concept + learning record:
+`docs/concepts/reranking.md`, `docs/day-plan/day-9-notes.md`.
 
 - `ai_os/rerank.py` — pointwise reranker, two seams kept narrow:
   `rel(c) = w_fused·fused + w_rare·rare + w_heading·heading + w_pos·pos`
@@ -205,61 +209,76 @@ learning record: `docs/concepts/reranking.md`, `docs/day-plan/day-9-notes.md`.
   evidence-weighted compression (`budget_fill` drops lowest-rel chunks with a
   `reason:"budget"` record; Day-6 rank-order truncation retired as a policy).
 - `tools/retrieval_day9.py` — Day 8 vs Day 9 runner: `--stub` (table below),
-  `--sweep` ({λ, sim_tau, best_first}), `--lom` (lost-in-the-middle protocol,
-  MECH; verdict PENDING), `--report` markdown writer.
+  `--sweep` ({λ, sim_tau, best_first} **plus the pre-registered weights ×
+  mmr/dedup-order focus** — the fourth swept knob, `--weights` /
+  `--dedup-first` now wired through the pipeline), `--lom` (lost-in-the-middle
+  protocol, MECH; verdict PENDING), `--report` markdown writer.
 - `test_day9.py` — **all DAY 9 (MECH) CHECKS PASSED**: matcher + IDF math,
   heading/rare/position signals, rerank flip (B2-style), MMR culls the twin +
   the B1 guard case, dedup guard (top chunk never similarity-dropped), budget
   floor/reporting, the two instance-cost ledgers (2 embeds, 0 chat), E1/E2
-  still refuse with the gate reading the *fused* score, and the nine-fixture
-  regression (green rows stay green, no context leaks).
+  still refuse with the gate reading the *fused* score, the nine-fixture
+  regression (green rows stay green, no context leaks), **and the knobs: the
+  weights vector reaches rerank, dedup-first is a config (not a crash), and
+  the knobbed pipeline keeps the zero-ledger story**.
 - Stub run (λ=0.7, τ=0.05): **Σ ΔMRR +1.000** across the answerable rows,
   2 rows moved, **0 leaks**. B2 0.5→1.0 (rerank lifts completing-checkout),
   D2 0.5→1.0 (heading lifts quickstart), A1/B1/C1/C2/D1 held. E1/E2 still 0/2
   refusals at the stub τ — τ recalibration on the fused score carries as
-  `PENDING` from Day 8. D1's near-duplicate ratio *did not drop on the stub*
-  (no how-to-vs-twin structure exists there) — the cull mechanism is proved by
-  test_day9's hand-vector fixture, the real-corpus verdict needs the real run.
-- Sweep: `λ=0.7, sim_tau=0.5–0.6` is the widest safe corner — ΣΔMRR +1.000,
-  0 leaks; λ≤0.6 leaks B1's quickstart (the recorded B1 trap); λ≥0.8 recovers
-  it but rounds to +0.917. `best_first` is inert on the stub (budget room).
+  `PENDING` from Day 8. Stub weights×order focus: default weights are the widest
+  no-leak corner (heading-heavy +1.500 but leaks 1 expected doc; rare-heavy
+  +1.000 but leaks 1) — recorded as the knob's honest trade-off.
+- **Real-corpus run** (`--store data/store.json`, 11,061 chunks,
+  bge-base-en-v1.5): **the envelope is the bottleneck and it is Day 8's door.**
+  Seven of nine expected docs never reach the rerank top-8 (fused ranks 16–20
+  at k=30; A1's expected doc is not in the top-30), so Day 9 moved nothing on
+  them — per §7's re-attribution rule they return to the Day 8 backlog. **C2
+  partially moved (D9 MRR 0.500):** the rerank lifted the one expected doc that
+  reached the envelope (5→2). **D2 is Day 9's own regression on real data**
+  (D8 0.200 → D9 0.000): MMR at λ=0.7 dropped a marginal expected doc; the
+  real sweep shows λ=0.6 recovers it. **E-family τ data exists for the first
+  time**: fused top-1 0.854 / 0.874 on the real store — overlapping the
+  answerable family, so a fused-score τ *cannot* separate E; the refusal
+  signal must move semantic (Day 21).
+- Sweep: `λ=0.7, sim_tau=0.5–0.6` is the widest safe corner on the stub —
+  ΣΔMRR +1.000, 0 leaks; λ≤0.6 leaks B1's quickstart (the recorded B1 trap);
+  λ≥0.8 recovers it but rounds to +0.917. On the real corpus weights/order are
+  inert (envelope-bound: every combo +0.1, 7 leaks); the λ-Sim sweep tops out
+  at +0.4333 (λ=0.6 or 0.9, sim_tau=0.4) — D2's recovery, nothing more.
 - Latency/cost: rerank+MMR+dedup+budget ≈ **0.57 ms/query** on the stub
-  (`/tmp` probe ×2000), against **zero** new embed/chat calls vs Day 8 — an
-  improvement that costs the ledger nothing until you opt into the `PENDING`
-  cross-encoder (+N chat calls/candidate, price recorded in the eval doc).
+  (`/tmp` probe ×2000); real pipeline end-to-end ≈ 0.3 s/question on 11,061
+  chunks (dominated by retrieval fusion), against **zero** new embed/chat calls
+  vs Day 8 — an improvement that costs the ledger nothing until you opt into
+  the `PENDING` cross-encoder (+N chat calls/candidate, price recorded in the
+  eval doc).
 
 ---
 
 ## Known gaps (what blocks "everything green for real")
 
-1. **Git:** Day 9 (code + docs: `ai_os/rerank.py`, `ai_os/context.py`,
-   `tools/retrieval_day9.py`, `test_day9.py`, `docs/concepts/reranking.md`,
-   `docs/evaluations/rerank-day9.md`) is the uncommitted working-tree change.
-   Days 4–8 are committed (`c0fcbe2` — HEAD).
-2. **Real run quota:** real chat runs live via OpenRouter (free models,
-   verified), but the key hit its **free-tier cap — 50 free requests/day**.
-   Embeddings now run through Cloudflare (free tier, full store built).
-   Fix: ≥$10 credits on the key (→ 1,000 free requests/day) or wait for the
-   daily reset — then re-run the R3–R5 chat checks
-   (`python tools/rag_semantic_smoke.py --store data/store.json`).
+1. **Git:** Day 9 is committed (`39285dd`, `76af2e0`, `37bd8d9`, `d62acda`);
+   the newly added knobs + real-run docs are the uncommitted working-tree
+   change alongside the Day 11–15 plans.
+2. **Chat quota / rate limits:** live chat now works via OpenRouter free models
+   (`nex-agi/nex-n2.5-pro:free`, daily free cap ~50 req); embeddings via
+   Cloudflare, free tier. Full semantic sweeps stay budgeted, not assumed.
 3. **Day 7 semantics** — the MECH half is implemented and green
    (`test_day7.py`); the report's `⟨run⟩` cells and τ calibration still need
-   a real gateway run (`python tools/rag_debug.py --store data/store.json`)
-   once chat quota is available. Re-run after the daily reset
-   (`X-RateLimit-Reset` ~daily on the OpenRouter key).
-4. **Day 8 semantics + τ recalibration** — the MECH half is green
-   (`test_day8.py`); the improved run's `⟨run⟩` cells and the E-family
-   refusal threshold must be re-fit onto the *real* corpus fused scores
-   (`python tools/retrieval_day8.py --store data/store.json        # real runs
+   graded gateway runs (`python tools/rag_debug.py --store data/store.json`).
+4. **Day 8 semantics + the real envelope** — the MECH half is green
+   (`test_day8.py`), but the **real-corpus run exposes that Day 9's expected
+   docs mostly never reach the fused top-8** (ranks 16–20 at k=30; A1's not in
+   top-30). τ recalibration and the Day-8 comparison must be re-run on the real
+   store (`python tools/retrieval_day8.py --store data/store.json   # real runs
    python tools/retrieval_day8.py --store data/store.json --sweep # α fit`).
-5. **Day 9 semantics** — the MECH half is green (`test_day9.py`); the ranking
-   was verified on the stub (B2/D2 flipped, everything held, 0 leaks). What
-   still needs a real gateway: re-run on the real corpus
-   (`python tools/retrieval_day9.py --store data/store.json`) to see whether
-   D1's near-duplicate ratio actually drops and whether the flips serve
-   *better answers*; the lost-in-the-middle *verdict* (slot 1 vs slot K
-   correctness); the `PENDING` cross-encoder question (does its N
-   chat-calls/candidate beat free rel() on the same table).
+5. **Day 9 semantics** — the MECH half is green (`test_day9.py`), and **the
+   real-corpus comparison is made** (`python tools/retrieval_day9.py --store
+   data/store.json`): C2 partially moved (0.2→0.5), D2 regressed (0.2→0.0, MMR
+   λ), everything else is envelope-blocked and re-attributed to Day 8. What
+   still needs graded chat runs: the lost-in-the-middle *verdict* (only C2 is
+   even exercisable today), τ-separation for E (real data recorded: fused top-1
+   0.854/0.874 overlaps the answerable family), and the `PENDING` cross-encoder
+   question (does its N chat-calls/candidate beat free rel() on this table).
 
 ## How to re-verify, in one line
 
@@ -269,5 +288,9 @@ python tools/gateway_smoke.py
 python tools/rag_smoke.py
 python tools/rag_debug.py --stub       # day 7 offline mechanics
 python tools/retrieval_day8.py --stub  # day 8 offline comparison (6/9 → 7/9)
-python tools/retrieval_day9.py --stub  # day 9 offline comparison (both rows move; ΣΔMRR +1.000)
+python tools/retrieval_day9.py --stub  # day 9 offline comparison (ΣΔMRR +1.000, 0 leaks)
+python tools/retrieval_day9.py --stub --sweep   # λ×sim_tau×best_first + weights×order focus
+python tools/retrieval_day9.py --stub --lom     # lost-in-the-middle protocol (MECH)
+python tools/retrieval_day9.py --store data/store.json    # real-corpus comparison
+python tools/retrieval_day9.py --store data/store.json --sweep --lom  # real knobs + LOM
 ```
