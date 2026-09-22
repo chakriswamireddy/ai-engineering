@@ -80,6 +80,31 @@ on the stub only matters when a true text dupe exists (the D2 fixture);
 room is ample), so it stays `True` — the default that keeps the top chunk in
 slot 1, pending the lost-in-the-middle verdict below.
 
+### The weights × mmr/dedup-order focus (§7's fourth knob, on the stub)
+
+`--sweep` now also runs the two pre-registered knobs the runner was missing —
+the reranker **weights** vector and the MMR/dedup **order** — at default
+λ/sim_tau. Three weight presets × `{mmr-first, dedup-first}`:
+
+| weights | order | Σ ΔMRR | rows moved | leaks |
+|---|---|---|---|---|
+| default (0.5/0.25/0.2/0.05) | mmr-first | +1.000 | 2 | 0 |
+| default | dedup-first | +1.000 | 2 | 0 |
+| heading-heavy (0.3/0.2/0.45/0.05) | mmr-first | +1.500 | 3 | **1** |
+| heading-heavy | dedup-first | +1.500 | 3 | **1** |
+| rare-heavy (0.3/0.45/0.2/0.05) | mmr-first | +1.000 | 2 | **1** |
+| rare-heavy | dedup-first | +1.000 | 2 | **1** |
+
+The heading-heavy row is the day's most honest knob lesson: it flips a *third*
+row (+1.500) **but leaks one expected doc** — the stronger heading vote lifted
+a different doc into the budget at the answer's expense. The default weights
+stay because they are the widest no-leak corner; the sweep records that a
+louder reranker wins rows *and* costs one, exactly Rule 4's "by which metric,
+at what cost". MM-order is inert on the stub (no text-identical neighbors
+survive selection there), so both orders plate at the same numbers — the knob
+exists and is measurable, and the real run below shows it stays inert when
+the envelope is the bottleneck.
+
 ## Latency + cost delta vs Day 8
 
 - **Zero new pay-per-call traffic.** Ledger-measured on the stub: one pipeline
@@ -106,20 +131,88 @@ pipeline tells it to). Whether slot 1 beats slot 3 for the model's correctness
 is a semantic question and stays `PENDING` until a real chat run (Day 21 owns
 it). The protocol and its runner are the deliverable today.
 
+## Real-corpus run — the same nine on 11,061 Saleor chunks
+
+The Day-8-vs-Day-9 table on the actual store (`data/store.json`, Cloudflare
+`@cf/baai/bge-base-en-v1.5`, dim 768, 11,061 chunks; retrieval-only, zero chat):
+
+| ID | D8 MRR | D9 MRR | Δrank | D8 ndup | D9 ndup | util | expected in context | status / note |
+|---|---|---|---|---|---|---|---|---|
+| A1 | 0.000 | 0.000 | – | 0.00 | 0.00 | 0.90 | none | **LEAK** — expected doc not in top-8 (not even top-30) |
+| B1 | 0.000 | 0.000 | – | 0.00 | 0.00 | 0.83 | none | **LEAK** — best expected doc at fused rank 20 |
+| B2 | 0.000 | 0.000 | – | 0.00 | 0.00 | 0.90 | none | **LEAK** — best expected doc at fused rank 18 |
+| C1 | 0.000 | 0.000 | – | 0.00 | 0.00 | 0.75 | none | **LEAK** — best expected doc at fused rank 16 |
+| C2 | 0.200 | 0.500 | −3 | 0.00 | 0.00 | 0.75 | `attributes/overview` | LEAK (partial) — rerank lifted the one doc that reached the envelope (5→2); `api#input-types` never reached it |
+| D1 | 0.000 | 0.000 | – | 0.00 | 0.00 | 0.92 | none | **LEAK** — best expected doc at fused rank 16 |
+| D2 | 0.200 | 0.000 | +0 | 0.00 | 0.00 | 0.88 | none | **LEAK + regression** — the one expected doc reached fused rank 5, and Day 9's MMR dropped it before the budget |
+| E1 | n/a | n/a | — | 0.00 | 0.00 | 0.80 | — | gate reads fused score (top1 **0.854** → refuse False at τ=0.55) |
+| E2 | n/a | n/a | — | 0.00 | 0.00 | 0.89 | — | gate reads fused score (top1 **0.874** → refuse False at τ=0.55) |
+
+**What the real run says** (this is the honest half Day 9's stub table could not
+say):
+
+1. **The envelope is the bottleneck, and it is Day 8's door, not Day 9's.**
+   Seven of the nine expected docs never reach the top-8 rerank candidate set
+   with the *real* embedder; ranks at k=30 are 16–20 (A1's expected doc is not
+   in the top-30 at all). Per Day 9 §7's own re-attribution rule ("expected doc
+   still missing → retrieval owns it after all; return it to the Day 8
+   backlog"), these rows re-enter Day 8's queue — Day 9 moved nothing because
+   it was handed an empty envelope. This is the planned, pre-registered
+   outcome; the stub numbers were always the mechanism proof, not the verdict.
+2. **C2 is the one row Day 9 actually moved on the real corpus**: the fused
+   list's `attributes/configuration` leads because checkout/attributes senses
+   collide; once the real `attributes/overview` doc reached rank 5 inside the
+   envelope, rel() (heading + rare vote) took it to rank 2 → D9 MRR 0.500. The
+   second expected doc never made the envelope, so the row stays a partial —
+   the *fixed half is a rerank win, the open half is a retrieval miss.*
+3. **D2 is Day 9's own regression on real data**: the expected doc reached
+   fused rank 5 (D8 MRR 0.200) and the rerank held it there (Δrank +0) — but
+   MMR's diversity pick then excluded it at λ=0.7, so D9 MRR 0.000. The sweep
+   shows λ=0.6 recovers it (+ΔMRR 0.4333) — the first real data point that the
+   λ knob is *not* inert where a marginal expected doc exists. Recorded, not
+   papered over; the owner is the MMR λ choice on real candidate distributions.
+4. **E-family τ data now exists for the first time.** E1/E2 fused top-1 scores
+   on the real store are 0.854 / 0.874 — *higher* than the stub's, and utterly
+   unseparated from the answerable family's top-1 (~0.7–0.9). At the fixture
+   τ=0.55 the gate silently passes both. The pre-registered worry is confirmed
+   on real numbers: **a fused-score τ cannot separate E on this corpus**; the
+   refusal signal needs the semantic tier (or a different score) — Day 21's
+   calibration question now has its first real data.
+5. **Weights × order are inert on the real corpus** (every focus combo lands at
+   ΣΔMRR +0.1, 1 moved, 7 leaks) because selection happens above them. They are
+   knobs that matter *once the envelope is populated* — the stub proved they
+   can re-rank; the real corpus proves they cannot manufacture an envelope.
+6. **Real LOM (MECH)**: only C2's answer doc survives into the evidence, and
+   the slot sweep places it at presentation slots 1..5 exactly as asked — the
+   ordering knob demonstrably works on a real store. The *semantic validity*
+   of the LOM copy (does the answer actually get read better at slot 1?) still
+   needs a graded chat run — Day 21 owns that verdict; today owns the protocol
+   having run on a real store.
+
 ## Negatives → Day 10's backlog (the `Owner if open` column, revisited)
 
 - **D1's near-duplicate ratio did not drop on the stub** (0.75 → 0.75). The
   9-chunk stub's "twins" are genuinely different texts whose rel is genuinely
   high; MMR's cull needs a distinct how-to page opposed by crowding twins, which
   is exactly the **D1 fixture** in `test_day9.py` (hand vectors: the distinct doc
-  out-ranks the twin at λ=0.6 — the mechanism is proved). Owner: real run on the
-  Saleor corpus, where 4-of-5-slot crowding is the measured disease. **Open.**
-- **C2 held on the stub** because the stub corpus has no GraphQL-field page to
-  outrank the reference; the heading-signal mechanism is unit-tested against a
-  crafted wrong-entity page (`developer/graphql/guide#input-types`). Owner:
-  real run, C-ambiguity section. **Open until the real corpus run.**
-- **E1/E2** — refusal not re-fit onto the fused score. Owner: Day 21 (τ
-  calibration). **Open (PENDING), unchanged from Day 8.**
+  out-ranks the twin at λ=0.6 — the mechanism is proved). **On the real corpus
+  D1's expected doc never even reaches the envelope (fused rank ~16)**, so the
+  real verdict is: retrieval owns D1 today; the MMR cull is proven and waiting
+  for an envelope that contains the twin structure. Owner: Day 8 retrieval, then
+  real-λ sweep. **Open.**
+- **C2 partially moved on the real corpus** (MRR 0.2 → 0.5): the rerank lifted
+  the one expected doc that reached the envelope; the second documented the same
+  heading signal in action on a real store. Still open because `input-types`
+  never reaches the envelope (retrieval), and the reference-vs-reference-page
+  ordering across the full attributes section needs the full real run. **Open.**
+- **D2 is the day's real regression**: D8 0.200 → D9 0.000 on the real corpus —
+  MMR at λ=0.7 dropped a marginal expected doc. λ=0.6 recovers it in the sweep.
+  Owner: λ against real candidate distributions. **Open (new, Day-9-owned).**
+- **E1/E2** — refusal not re-fit onto the fused score: on the real corpus the
+  E-family fused top-1 (0.854 / 0.874) overlaps the answerable family's, so a
+  fused-score τ cannot separate them — the refusal signal must move to the
+  semantic tier. Owner: Day 21 (τ calibration). **Open (PENDING), with the
+  first real τ data now recorded above.**
 - **B1 holds, not improves** — its ordering was already fused-correct; the
   λ=0.7 choice is about *keeping* it green, and the deeper B1 gain (which
   chunk to present first within a legitimately-similar family) needs the
@@ -129,7 +222,10 @@ it). The protocol and its runner are the deliverable today.
 
 ```bash
 python test_day7.py && python test_day8.py && python test_day9.py
-python tools/retrieval_day9.py --stub        # this table
-python tools/retrieval_day9.py --stub --sweep
+python tools/retrieval_day9.py --stub        # this table (MECH, offline)
+python tools/retrieval_day9.py --stub --sweep # λ×sim_tau×best_first + weights×order
 python tools/retrieval_day9.py --stub --lom
+python tools/retrieval_day9.py --store data/store.json          # real table
+python tools/retrieval_day9.py --store data/store.json --sweep  # real knob sweep
+python tools/retrieval_day9.py --store data/store.json --lom    # real LOM protocol
 ```
