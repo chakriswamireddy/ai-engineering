@@ -504,6 +504,52 @@ def cost_test():
           pipe.run("What is a checkout in Saleor?")["latency_us"] >= 0)
 
 
+def knob_tests():
+    print("\n== day9 — the pre-registered knobs: weights + mmr/dedup order")
+    gw = _rd.StubGateway(extra_vocab=_rd._STUB_EXTRA_VOCAB)
+    store = _rd.build_stub_store(gw)
+
+    default = Day9Pipeline(gw, store)
+    t = default.run("What is a checkout in Saleor?",
+                    expected=["quickstart/api#create-a-checkout"])
+    check("defaults unchanged: mmr_first, default weights (control still held)",
+          t["d8_mrr"] == t["d9_mrr"] and not t["any_delta"] and default.mmr_first
+          and default.weights["fused"] == 0.5,
+          str(default.weights))
+
+    heading = Day9Pipeline(gw, store, weights={"fused": 0.3, "rare": 0.2,
+                                               "heading": 0.45, "pos": 0.05})
+    th = heading.run("How do I create a checkout in Saleor?",
+                     expected=["quickstart/api#create-a-checkout",
+                               "developer/checkout/api-guide#creating-a-checkout-session"])
+    check("weights knob reaches rerank: heading-heavy still lifts quickstart",
+          near(th["d9_mrr"], 1.0) and th["any_delta"], f"MRR={th['d9_mrr']}")
+
+    dedup_first = Day9Pipeline(gw, store, mmr_first=False)
+    td = dedup_first.run("How do I complete a checkout?",
+                         expected=["developer/checkout/api-guide#completing-checkout"])
+    check("dedup-first order is a config, not a crash: expected doc survives",
+          not td["missing_in_kept"] and not td["any_delta"] is None,
+          f"kept={td['kept_ids']}")
+
+    no_dupes = Day9Pipeline(gw, store, mmr_first=False)
+    ta = no_dupes.run("What is a checkout in Saleor?",
+                      expected=["quickstart/api#create-a-checkout"])
+    check("dedup-first keeps the control green (no doubling the D1 double)",
+          not ta["missing_in_kept"])
+
+    inner = _rd.StubGateway(extra_vocab=_rd._STUB_EXTRA_VOCAB)
+    s2 = _rd.build_stub_store(inner)
+    g2 = RecordingGateway(inner)
+    p = Day9Pipeline(g2, s2, weights={"fused": 0.3, "rare": 0.45,
+                                      "heading": 0.2, "pos": 0.05},
+                     mmr_first=False)
+    p.run("How does a checkout become an order, and what changes after?")
+    check("knobbed pipeline keeps the zero-ledger story (2 embeds, 0 chat)",
+          g2.embed_calls == 2 and g2.chat_calls == 0,
+          f"embeds={g2.embed_calls} chat={g2.chat_calls}")
+
+
 def hold_green_test():
     print("\n== day9 — Day 8's green rows stay green (retrieved contract)")
     gw = _rd.StubGateway(extra_vocab=_rd._STUB_EXTRA_VOCAB)
@@ -549,6 +595,7 @@ def main() -> None:
     pipeline_stories()
     gate_untouched_test()
     cost_test()
+    knob_tests()
     hold_green_test()
 
     print()
