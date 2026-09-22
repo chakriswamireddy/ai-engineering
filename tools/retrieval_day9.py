@@ -47,7 +47,12 @@ from ai_os.fixtures import load_questions  # noqa: E402
 from ai_os.gate import should_refuse  # noqa: E402
 from ai_os.lexicon import Lexicon  # noqa: E402
 from ai_os.rag import load_store_from_env  # noqa: E402
-from ai_os.rerank import delta_ranks, mmr, rerank  # noqa: E402
+from ai_os.rerank import (  # noqa: E402
+    DEFAULT_RERANK_WEIGHTS,
+    delta_ranks,
+    mmr,
+    rerank,
+)
 from ai_os.retrieval import Retriever  # noqa: E402
 from ai_os.search import dot  # noqa: E402
 from ai_os.trace import expected_stats  # noqa: E402
@@ -67,6 +72,16 @@ SWEEP_LAMS = [0.5, 0.6, 0.7, 0.8, 0.9]
 SWEEP_SIM_TAUS = [0.4, 0.5, 0.6]
 SWEEP_BEST_FIRST = [True, False]
 
+# The reranker's weight vector is the fourth swept knob (§7). Three presets —
+# the defaults, a heading-heavy vote (C2's wrong-entity fixer), and a rare-
+# heavy vote (D1's twin demoter) — swept against the MMR/dedup *order* (the
+# §3/§5 knob the runner was missing: MMR before dedup or dedup before MMR).
+WEIGHT_SETS: dict[str, dict[str, float]] = {
+    "default": DEFAULT_RERANK_WEIGHTS,
+    "heading": {"fused": 0.3, "rare": 0.2, "heading": 0.45, "pos": 0.05},
+    "rare": {"fused": 0.3, "rare": 0.45, "heading": 0.2, "pos": 0.05},
+}
+
 
 class Day9Pipeline:
     """The evidence pipeline behind seam 1, one object, fully deterministic.
@@ -82,7 +97,9 @@ class Day9Pipeline:
                  k_recall: int = K_RECALL, k_final: int = K_FINAL,
                  lam: float = DEFAULT_LAM, sim_tau: float = DEFAULT_SIM_TAU,
                  cos_tau: float = DEFAULT_COS_TAU,
-                 best_first: bool = True, budget_chars: int = 1200) -> None:
+                 best_first: bool = True, budget_chars: int = 1200,
+                 weights: dict[str, float] | None = None,
+                 mmr_first: bool = True) -> None:
         self.retriever = Retriever(gateway, store, alpha=alpha)
         self.lexicon = Lexicon(store.chunks) if store.chunks else None
         self.k_recall = k_recall
@@ -92,6 +109,8 @@ class Day9Pipeline:
         self.cos_tau = cos_tau
         self.best_first = best_first
         self.budget_chars = budget_chars
+        self.weights = dict(DEFAULT_RERANK_WEIGHTS if weights is None else weights)
+        self.mmr_first = mmr_first
         self.gateway = gateway
 
     # ------------------------------------------------------------- helpers
@@ -119,15 +138,21 @@ class Day9Pipeline:
         if must_refuse and tau is not None:
             gate_refused = should_refuse(fused, tau)
 
-        reranked, rows = rerank(fused, question, self.lexicon)
+        reranked, rows = rerank(fused, question, self.lexicon,
+                                weights=self.weights)
         reranked_ids = [c.doc_id for _, c in reranked]
 
-        div, mmr_trace = mmr(reranked, lam=self.lam, k=self.k_final)
+        if self.mmr_first:
+            selected, mmr_trace = mmr(reranked, lam=self.lam, k=self.k_final)
+            evidence, drops = dedup(selected, sim_tau=self.sim_tau)
+        else:
+            deduped, drops = dedup(reranked, sim_tau=self.sim_tau)
+            evidence, mmr_trace = mmr(deduped, lam=self.lam, k=self.k_final)
+        div = evidence
         div_ids = [c.doc_id for _, c in div]
 
-        kept, drops = dedup(div, sim_tau=self.sim_tau)
         context, used, keptc, budget_drops = budget_fill(
-            kept, self.budget_chars, best_first=self.best_first)
+            evidence, self.budget_chars, best_first=self.best_first)
         kept_ids = [c.doc_id for _, c in keptc]
         self._last_kept = keptc           # post-budget evidence, for the LOM probe
 
@@ -231,12 +256,14 @@ def grade(fx: dict, t: dict, *, tau: float) -> dict:
 
 
 def run_all(gw, store, *, lam=None, sim_tau=None, best_first=True,
-            budget_chars=1200, tau=0.05) -> tuple[list[dict], dict]:
+            budget_chars=1200, tau=0.05, weights=None,
+            mmr_first=True) -> tuple[list[dict], dict]:
     """Nine rows: pipeline for every fixture, graded. Returns (rows, agg)."""
     data = load_questions()
     pipe = Day9Pipeline(gw, store, lam=lam or DEFAULT_LAM,
                         sim_tau=sim_tau or DEFAULT_SIM_TAU,
-                        best_first=best_first, budget_chars=budget_chars)
+                        best_first=best_first, budget_chars=budget_chars,
+                        weights=weights, mmr_first=mmr_first)
     rows: list[dict] = []
     for fx in data["questions"]:
         t = pipe.run(fx["question"], expected=fx["expected"],
@@ -347,6 +374,13 @@ def main() -> None:
     ap.add_argument("--cos-tau", type=float, default=None)
     ap.add_argument("--tau", type=float, default=None)
     ap.add_argument("--no-best-first", dest="best_first", action="store_false")
+    ap.add_argument("--weights", default=None,
+                    metavar="fused,rare,heading,pos",
+                    help="rerank weight vector, e.g. 0.3,0.2,0.45,0.05")
+    ap.add_argument("--mmr-first", dest="mmr_first", action="store_true",
+                    help="MMR before dedup (the default order)")
+    ap.add_argument("--dedup-first", dest="mmr_first", action="store_false",
+                    help="dedup before MMR (the §3 order knob)")
     ap.add_argument("--sweep", action="store_true")
     ap.add_argument("--lom", action="store_true")
     ap.add_argument("--report", default=None, metavar="PATH")
@@ -370,6 +404,8 @@ def main() -> None:
     lam = args.lam or DEFAULT_LAM
     sim_tau = args.sim_tau or DEFAULT_SIM_TAU
     best_first = args.best_first
+    weights = _parse_weights(args.weights)
+    mmr_first = args.mmr_first
 
     if args.lom:
         out = lom_protocol(gw, store, budget_chars=budget, tau=tau)
@@ -389,10 +425,22 @@ def main() -> None:
                     print(f"{lam_s:<5}{st:<9}{str(bf):<6}"
                           f"{agg['mrr_delta']:<8}{agg['rows_moved']:<10}"
                           f"{agg['expected_left_context']:<6}")
+
+        print(f"\nweights × mmr/dedup order focus at λ={lam} sim_tau={sim_tau}:")
+        print(f"{'weights':<9}{'order':<10}{'ΣΔMRR':<8}"
+              f"{'rowsMoved':<10}{'leaks':<6}")
+        for wname, wset in WEIGHT_SETS.items():
+            for order, mf in (("mmr-first", True), ("dedup-first", False)):
+                rows, agg = run_all(gw, store, lam=lam, sim_tau=sim_tau,
+                                    best_first=best_first, budget_chars=budget,
+                                    tau=tau, weights=wset, mmr_first=mf)
+                print(f"{wname:<9}{order:<10}{agg['mrr_delta']:<8}"
+                      f"{agg['rows_moved']:<10}{agg['expected_left_context']:<6}")
         return
 
     rows, agg = run_all(gw, store, lam=lam, sim_tau=sim_tau,
-                        best_first=best_first, budget_chars=budget, tau=tau)
+                        best_first=best_first, budget_chars=budget, tau=tau,
+                        weights=weights, mmr_first=mmr_first)
     render(rows)
     print("-" * 96)
     print(f"Σ ΔMRR (D9 − D8, answerable rows) = {agg['mrr_delta']:+0.3f};  "
@@ -401,8 +449,20 @@ def main() -> None:
           f"(Day-8 green rows stay green on the *retrieved* contract).")
 
     if args.report:
-        write_report(args.report, rows, gw, store, lam, sim_tau, tau)
+        write_report(args.report, rows, gw, store, lam, sim_tau, tau,
+                     weights=weights, mmr_first=mmr_first)
         print(f"comparison report written → {args.report}")
+
+
+def _parse_weights(spec: str | None) -> dict[str, float] | None:
+    """Parse 'fused,rare,heading,pos' into the weight dict; None → defaults."""
+    if not spec:
+        return None
+    names = ["fused", "rare", "heading", "pos"]
+    vals = [float(x) for x in spec.split(",")]
+    if len(vals) != 4:
+        raise SystemExit("--weights needs 4 floats: fused,rare,heading,pos")
+    return dict(zip(names, vals))
 
 
 def _header(gw, store) -> list[str]:
@@ -417,9 +477,11 @@ def _header(gw, store) -> list[str]:
     ]
 
 
-def write_report(path, rows, gw, store, lam, sim_tau, tau):
+def write_report(path, rows, gw, store, lam, sim_tau, tau, *,
+                 weights=None, mmr_first=True):
     lines = _header(gw, store) + [
-        "", f"`λ={lam}`  `sim_tau={sim_tau}`  `τ={tau}`  `k_final=5`", "",
+        "", f"`λ={lam}`  `sim_tau={sim_tau}`  `τ={tau}`  `k_final=5`  "
+        f"`mmr_first={mmr_first}`  weights={weights or 'default'}", "",
         "| ID | D8 MRR | D9 MRR | Δrank | D8 ndup | D9 ndup | util | "
         "expected in context | status / note |", "|---|---|---|---|---|---|---|---|---|",
     ]
