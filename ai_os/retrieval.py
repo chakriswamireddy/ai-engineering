@@ -31,7 +31,7 @@ from __future__ import annotations
 import re
 from typing import Any, Sequence
 
-from ai_os.lexicon import Lexicon, tokenize
+from ai_os.lexicon import STOP, Lexicon, tokenize
 from ai_os.rag import Chunk, DimensionMismatch
 from ai_os.search import dot, normalize
 
@@ -77,6 +77,43 @@ SECTION_PREFIXES: dict[str, list[str]] = {
 # right — the notes' run used exactly that phrasing for the order-lifecycle
 # half). Fragments with no content (a terminal "?") are dropped.
 SPLIT_RE = re.compile(r"\b(?:and|then|but|or)\b", re.IGNORECASE)
+
+
+# ----------------------------------------------------- Day 10 — code vocabulary
+# The code corpus's dialect. Identifiers are blends (`checkoutComplete`,
+# `complete_checkout`), so the tokenizer must split case and `_` *before* any
+# lexical scoring — that collision (`checkout`+`Complete`+`complete` in one
+# bucket) is the identifier-level version of Day 8's lexical-gap fix.
+_CODE_SPLIT_RE = re.compile(r"[^0-9a-zA-Z]+")
+_CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def code_tokens(text: str) -> list[str]:
+    """Identifier-aware tokenizer: split non-word chars, camelCase, and `_`,
+    then lowercase and drop stopwords. Keeps identifiers as tokens (no
+    word-boundary instinct that would treat `complete_checkout` as one unknown
+    word) so `complete_checkout`, `checkoutComplete`, `CheckoutComplete`, and
+    the user phrase "complete checkout" collide in the same bucket."""
+    out: list[str] = []
+    for raw in _CODE_SPLIT_RE.split(text):
+        if not raw:
+            continue
+        for part in _CAMEL_RE.split(raw):
+            t = part.lower()
+            if len(t) > 1 and t not in STOP:
+                out.append(t)
+    return out
+
+
+# User phrasing → Saleor identifier vocabulary (the `/code` dialect of Day 8's
+# rewrite table). Small, testable, corrigible — a missing rule is exactly the
+# fixture that justifies the `PENDING` gateway-rewrite tier.
+CODE_REWRITES: dict[str, str] = {
+    "checkout complete":    "complete_checkout CheckoutComplete",
+    "complete a checkout":  "complete_checkout CheckoutComplete",
+    "create an order":      "create_order_from_checkout OrderCreateFromCheckout",
+    "is checkout stuck":    "checkout validation errors invalid checkout",
+}
 
 
 # ----------------------------------------------------------------- rules
@@ -144,7 +181,8 @@ class Retriever:
     def __init__(self, gateway, store, *, alpha: float = 0.5,
                  decompose_cap: int = 3, rewrites: dict[str, str] | None = None,
                  sections: dict[str, set[str]] | None = None,
-                 section_prefixes: dict[str, list[str]] | None = None) -> None:
+                 section_prefixes: dict[str, list[str]] | None = None,
+                 tokenizer=None) -> None:
         if not 0.0 <= alpha <= 1.0:
             raise ValueError(f"alpha must be in [0, 1], got {alpha}")
         if decompose_cap < 1:
@@ -158,7 +196,9 @@ class Retriever:
         self.section_prefixes = dict(SECTION_PREFIXES
                                      if section_prefixes is None
                                      else section_prefixes)
-        self.lexicon = Lexicon(store.chunks) if store.chunks else None
+        self.tokenizer = tokenize if tokenizer is None else tokenizer
+        self.lexicon = (Lexicon(store.chunks, tokenizer=self.tokenizer)
+                        if store.chunks else None)
         self.embeds = 0               # ledger: one line per embed() call
         self.filter_misses = 0        # wrong/empty filters, annotated, counted
         self.last_query: dict[str, Any] = {}
@@ -195,15 +235,18 @@ class Retriever:
         subs = decompose(q, self.decompose_cap) if do_decompose else [q]
 
         prefixes: list[str] | None = None
-        if filter and "doc_prefix" in filter:
-            prefixes = [filter["doc_prefix"]]
-        elif filter and "doc_prefixes" in filter:
-            prefixes = list(filter["doc_prefixes"])
+        if filter:
+            # An explicit filter (doc_prefix / module_prefix / kind) wins over
+            # the derived section rule — the caller asked for a specific slice.
+            if "doc_prefix" in filter:
+                prefixes = [filter["doc_prefix"]]
+            elif "doc_prefixes" in filter:
+                prefixes = list(filter["doc_prefixes"])
         elif do_rewrite:
             section = rule_section(q, self.sections)
             if section is not None:
                 prefixes = self.section_prefixes.get(section)
-        candidates, used_filter, filter_miss = self._candidates(prefixes)
+        candidates, used_filter, filter_miss = self._candidates(prefixes, filter)
 
         # max-score merge per chunk id across sub-queries, then dedup+rank.
         best: dict[int, float] = {}
@@ -223,6 +266,7 @@ class Retriever:
             "mode": mode, "alpha": eff_alpha, "original": question,
             "rewritten": q, "sub_queries": subs, "embeds": len(subs),
             "filter": prefixes or None,
+            "filter_spec": filter or None,
             "filter_miss": filter_miss,
         }
         self.embeds += len(subs)
@@ -230,19 +274,47 @@ class Retriever:
 
     # ----------------------------------------------------------- internals
 
-    def _candidates(self, prefixes: list[str] | None
+    def _candidates(self, prefixes: list[str] | None,
+                    filter: dict[str, str] | None = None
                     ) -> tuple[list[int], bool, bool]:
-        """Store indices to score: all chunks, or the ones under any prefix.
+        """Store indices to score: all chunks, or the ones matching a filter.
 
-        A prefix set that matches nothing degrades to the full corpus —
+        Predicates compose with AND. `doc_prefix(es)` filters the prose corpus;
+        `module_prefix(es)` and `kind` are Day 10's code axes — the metadata
+        filter Day 8 built for prose, finally needed for real (filtering
+        `kind=mutation` or `module_prefix=saleor/graphql/checkout` shrinks a
+        symbolic search space before any scoring runs).
+
+        A filter set that matches nothing degrades to the full corpus —
         annotated as a filter-miss, never a crash (a wrong filter is a
         query-classifier failure, and the annotation is exactly what Day 20's
         evaluators need).
         """
-        if not prefixes:
+        preds = []
+        if filter:
+            if "doc_prefix" in filter:
+                p = filter["doc_prefix"]
+                preds.append(lambda c, p=p: c.doc_id.startswith(p))
+            for key in ("doc_prefixes", "module_prefixes"):
+                if key in filter:
+                    ps = list(filter[key])
+                    preds.append(lambda c, ps=ps: any(c.doc_id.startswith(x) or
+                                                      (c.source or "").startswith(x)
+                                                      for x in ps))
+            if "module_prefix" in filter:
+                p = filter["module_prefix"]
+                preds.append(lambda c, p=p: c.doc_id.startswith(p)
+                             or (c.source or "").startswith(p))
+            if "kind" in filter:
+                k = filter["kind"]
+                preds.append(lambda c, k=k: c.kind == k)
+        if not preds and prefixes:
+            preds.append(lambda c, ps=prefixes: any(c.doc_id.startswith(p)
+                                                    for p in ps))
+        if not preds:
             return list(range(len(self.store))), False, False
         idx = [i for i, c in enumerate(self.store.chunks)
-               if any(c.doc_id.startswith(p) for p in prefixes)]
+               if all(pred(c) for pred in preds)]
         if idx:
             return idx, True, False
         self.filter_misses += 1
@@ -268,7 +340,7 @@ class Retriever:
         sem = [dot(qvec, self.store.chunks[i].vector) for i in candidates]
         lex: list[float] = []
         if self.lexicon is not None and query:
-            tokens = tokenize(query)
+            tokens = self.tokenizer(query)
             all_lex = self.lexicon.normalized(tokens)
             lex = [all_lex[i] for i in candidates]
         else:

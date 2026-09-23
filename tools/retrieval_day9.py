@@ -99,9 +99,19 @@ class Day9Pipeline:
                  cos_tau: float = DEFAULT_COS_TAU,
                  best_first: bool = True, budget_chars: int = 1200,
                  weights: dict[str, float] | None = None,
-                 mmr_first: bool = True) -> None:
-        self.retriever = Retriever(gateway, store, alpha=alpha)
-        self.lexicon = Lexicon(store.chunks) if store.chunks else None
+                 mmr_first: bool = True,
+                 tokenizer=None, rewrites: dict[str, str] | None = None,
+                 sections: dict[str, set[str]] | None = None,
+                 section_prefixes: dict[str, list[str]] | None = None) -> None:
+        # `tokenizer`/`rewrites`/`sections` are Day 10's seam: the code corpus
+        # passes the identifier tokenizer + code rewrite table and empty section
+        # maps. All default to the Day-9 prose behaviour, so this is additive.
+        self.retriever = Retriever(gateway, store, alpha=alpha,
+                                   tokenizer=tokenizer, rewrites=rewrites,
+                                   sections=sections,
+                                   section_prefixes=section_prefixes)
+        self.lexicon = (Lexicon(store.chunks, tokenizer=tokenizer)
+                        if store.chunks else None)
         self.k_recall = k_recall
         self.k_final = k_final
         self.lam = lam

@@ -26,7 +26,7 @@ from ai_os.contract import (
 )
 from ai_os.rag import (
     RagStore, DimensionMismatch, StoreVersionError,
-    run_rag, store_path_from_env,
+    code_store_path_from_env, run_rag, store_path_from_env,
 )
 
 try:
@@ -51,6 +51,7 @@ class RagRequest(BaseModel):
     k: int | None = None
     budget_chars: int = 1200
     max_tokens: int = 2048
+    corpus: str = "docs"          # "docs" (Day 6) | "code" (Day 10)
 
 
 def _error_response(err: ProviderError) -> dict[str, Any]:
@@ -133,10 +134,11 @@ def ledger_endpoint() -> dict[str, Any]:
     return gateway.ledger.summary()
 
 
-def _rag_store() -> RagStore | None:
+def _rag_store(corpus: str = "docs") -> RagStore | None:
+    path = code_store_path_from_env() if corpus == "code" else store_path_from_env()
     try:
-        return RagStore.load(store_path_from_env())
-    except (FileNotFoundError, StoreVersionError, json.JSONDecodeError) as e:
+        return RagStore.load(path)
+    except (FileNotFoundError, StoreVersionError, json.JSONDecodeError):
         return None
 
 
@@ -147,15 +149,19 @@ def rag_endpoint(req: RagRequest) -> dict[str, Any]:
     `citations` is the retrieved set itself (with scores), so every claim
     the model makes is traceable to a chunk — or it isn't RAG. Retrieval
     and generation keep separate cost lines: they are different bills.
+
+    Day 10 adds `corpus` ("docs" | "code"): a second store behind the same
+    endpoint, so a code citation is still `cited ⊆ retrieved`.
     """
     if gateway is None:
         return {"error": _build_error}
-    store = _rag_store()
+    store = _rag_store(req.corpus)
     if store is None:
-        return {"error": "no RAG store at the configured RAG_STORE_PATH",
-                "hint": "run `python tools/build_rag_store.py` (against the "
-                        "stub for a deterministic demo, or a real API for "
-                        "the real corpus)"}
+        which = (code_store_path_from_env() if req.corpus == "code"
+                 else store_path_from_env())
+        return {"error": f"no RAG store at {which}",
+                "hint": "run `python tools/build_rag_store.py` (docs) or "
+                        "`python tools/build_code_store.py` (code) first"}
     try:
         result = run_rag(gateway, store, req.question, k=req.k,
                          budget_chars=req.budget_chars,

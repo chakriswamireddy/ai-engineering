@@ -1,0 +1,75 @@
+# Day 10 §7 — the code question set (the code mirror of questions.yaml).
+#
+# Same discipline as Day 7: expected evidence is written as `module#Symbol`
+# sets BEFORE any run, from Saleor's known structure, not from retrieval
+# output. The run's job is to verify the shape, never to invent it.
+#
+# Fields mirror questions.yaml exactly — the harness needed no code dialect:
+#   question     the natural-language query as the user would type it
+#   expected     `module#Symbol` citations the corpus must surface
+#   must_not     the WRONG sense a one-hot identifier might retrieve (Family C)
+#   max_dupes    near-duplicate slot bound (Family D)
+#   must_refuse  E-family: no such symbol exists; correct behaviour is refusal
+#   predicted    the hypothesis this question is expected to indict
+#   fix          the fix the predicted class routes to
+#
+# Run:  python tools/retrieval_day10.py --stub     (offline mechanics)
+#       python tools/retrieval_day10.py --store data/code_store.json
+
+tau: 0.55          # carried from Day 7; the code corpus recalibrates it (Day 21)
+budget_chars: 4000 # code bodies are long; the symbol is the unit, bodies cited
+
+questions:
+  - id: CA1
+    family: "A — obvious (the split-brain double-hit)"
+    question: "Where is checkout completed?"
+    expected:
+      - "saleor/checkout/complete_checkout.py#complete_checkout"
+      - "saleor/graphql/checkout/mutations/checkout_complete.py#CheckoutComplete"
+    predicted: "single-hit — the API mutation and the domain service are one concept, ranked as one"
+    fix: "the double-hit is *correct*: a cross-layer pair is a feature, not a bug"
+
+  - id: CB1
+    family: "B — cross-module flow (the dependency seam)"
+    question: "What happens between checkout completion and order creation?"
+    expected:
+      - "saleor/checkout/complete_checkout.py#create_order_from_checkout"
+    predicted: "the service symbol is retrieved but its imports into order/ are not walked"
+    fix: "imports are stored on the chunk; walking the graph is Day 12/16"
+
+  - id: CB2
+    family: "B — cross-module flow"
+    question: "Which module fires the webhook when a payment succeeds?"
+    expected:
+      - "saleor/payment/gateway.py#process_payment"
+      - "saleor/webhook/event_types.py#WebhookEventAsyncType"
+    predicted: "the payment half is found; the event-type constant is missed (two modules, one answer)"
+    fix: "multi-query decomposition + module filter (Day 8, retargeted)"
+
+  - id: CC1
+    family: "C — name collision"
+    question: "What can the identifier 'checkout' refer to in the codebase?"
+    expected:
+      - "saleor/checkout/models.py#Checkout"
+      - "saleor/graphql/checkout/types.py#Checkout"
+    must_not:
+      - "saleor/checkout/tests/test_checkout_complete.py#test_complete_checkout_when_checkout_doesnt_exists"
+    predicted: "one sense wins — a Django model, a GraphQL type and a module share one identifier"
+    fix: "assert on module#Symbol, never bare names; the module_prefix filter separates the senses"
+
+  - id: CD1
+    family: "D — near-duplicate symbols"
+    question: "Show the test that exercises checkout completion."
+    expected:
+      - "saleor/checkout/tests/test_checkout_complete.py#test_complete_checkout_when_checkout_doesnt_exists"
+    max_dupes: 1
+    predicted: "a family of mock/factory twins crowds the slot"
+    fix: "MMR + dedup cull the twins (Day 9, unchanged)"
+
+  - id: CE1
+    family: "E — out of corpus"
+    question: "Where is the Shopify webhook handler?"
+    expected: []
+    must_refuse: true
+    predicted: "hallucination — a plausible-but-nonexistent symbol is forged"
+    fix: "the fused-score gate refuses; never a forged identifier"

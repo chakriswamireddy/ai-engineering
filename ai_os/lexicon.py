@@ -27,7 +27,7 @@ from __future__ import annotations
 import math
 import re
 from collections import defaultdict
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 # Words that correlate with nothing: how/do/i are question scaffolding,
 # be/of/for are grammar. None of them should contribute IDF.
@@ -54,10 +54,17 @@ class Lexicon:
     then `score` / `normalized` are per-query arithmetic. The chunk term-sets
     are parallel to the store's `chunks` list, so a chunk *index* is a chunk's
     lexical identity — the same index `Retriever` hands back in its results.
+
+    `tokenizer` is Day 10's seam: the default is the prose `tokenize`; the code
+    corpus passes an identifier-aware splitter (`retrieval.code_tokens`) so
+    `checkoutComplete`, `complete_checkout`, and the phrase "complete checkout"
+    fall into the same lexical bucket. The scorer itself does not change.
     """
 
-    def __init__(self, chunks: Iterable[Any]) -> None:
-        self.chunk_terms: list[set[str]] = [set(tokenize(c.text)) for c in chunks]
+    def __init__(self, chunks: Iterable[Any],
+                 tokenizer: Callable[[str], list[str]] | None = None) -> None:
+        tok = tokenize if tokenizer is None else tokenizer
+        self.chunk_terms: list[set[str]] = [set(tok(c.text)) for c in chunks]
         df: dict[str, int] = defaultdict(int)
         for terms in self.chunk_terms:
             for t in terms:

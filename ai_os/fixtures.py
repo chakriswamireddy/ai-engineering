@@ -24,6 +24,7 @@ from ai_os.gate import should_refuse
 from ai_os.trace import duplicate_ratio, retrieve_trace
 
 FIXTURES_PATH = Path(__file__).with_name("questions.yaml")
+CODE_FIXTURES_PATH = Path(__file__).with_name("code_questions.yaml")
 
 
 class FixtureError(Exception):

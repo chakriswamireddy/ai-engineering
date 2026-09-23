@@ -1,6 +1,6 @@
-# ai-layer — Days 4–6: Gateway → Search → RAG
+# ai-layer — Days 4–10: Gateway → Search → RAG → Code RAG
 
-A reusable AI layer built in three layers:
+A reusable AI layer built in layers:
 
 1. **Day 4 — The Model Gateway**: `Application → ModelGateway → Provider → LLM`.
    The gateway owns retries, exponential backoff + jitter, `Retry-After`,
@@ -11,6 +11,12 @@ A reusable AI layer built in three layers:
 3. **Day 6 — First RAG Pipeline**: docs → parse → chunk → embed → store →
    retrieve → context → "answer" from the gateway, with citations and a
    refusal path when the documentation cannot cover the question.
+4. **Days 7–9 — Debug + improve**: failure taxonomy and a similarity gate (7),
+   hybrid lexical+semantic retrieval (8), rerank + MMR + context construction (9).
+5. **Day 10 — Code RAG**: a second corpus (Saleor's *source*) behind the same
+   seams — AST symbol extraction, interface-vs-body embedding, and identifier
+   tokenization — answering **"where is it implemented?"** with `module#Symbol`
+   citations and the identical fixture harness.
 
 ```
 Application
@@ -41,14 +47,19 @@ raw HTTP via `urllib`.
 | `ai_os/search.py` | day 5: `Index`, document scoring, `dot`/`normalize` |
 | `ai_os/chunk.py` | day 6: `chunk_text()` with overlap + tail grace + guards |
 | `ai_os/ingest.py` | day 6: fetch/parse Saleor `llms.txt` docs → `Document`s |
-| `ai_os/rag.py` | day 6: `RagStore` (persistent, dimension-locked), retrieval, `build_context` (budget floor), `run_rag` |
-| `ai_os/server.py` | FastAPI: `/chat`, `/chat/stream`, `/rag`, `/ledger`, `/health` |
+| `ai_os/rag.py` | day 6: `RagStore` (persistent, dimension-locked), retrieval, `build_context` (budget floor), `run_rag`; day 10: channels optional code metadata + `code_store_path_from_env` |
+| `ai_os/ingest_code.py` | day 10: `SymbolExtractor` (stdlib `ast`) + `ingest_code` — the code ingestion seam |
+| `ai_os/code_questions.yaml` | day 10: the pre-registered code fixtures (CA1–CE1), asserting `module#Symbol` sets |
+| `ai_os/server.py` | FastAPI: `/chat`, `/chat/stream`, `/rag` (`corpus="docs"｜"code"`), `/ledger`, `/health` |
 | `tools/mock_gateway.py` | scripted dual-provider stub `:8700`/`:8701` (chat **and** embeddings) |
 | `tools/gateway_smoke.py` | day 4 deliberate-failure suite + token economics |
 | `tools/build_rag_store.py` | embed a `corpus/` of markdown → `data/store.json` |
+| `tools/build_code_store.py` | day 10: embed a Saleor source tree → `data/code_store.json` (interface-only, resumable) |
+| `tools/code_debug.py` | day 10: offline stub code corpus + identifier-hash gateway |
+| `tools/retrieval_day10.py` | day 10: Doc-RAG vs Code-RAG runner (one harness, two datasets) |
 | `tools/rag_smoke.py` | day 6 deliberate-failure suite for the RAG loop |
 | `corpus/`, `data/store.json` | 6 real Saleor doc pages, committed store (250 chunks, stub vectors) |
-| `test_search.py`, `test_chunk.py`, `test_rag.py` | deterministic unit suites (no network) |
+| `test_search.py`, `test_chunk.py`, `test_rag.py`, `test_day10.py` | deterministic unit suites (no network) |
 
 ## Run it for real
 
@@ -78,10 +89,25 @@ curl -s localhost:8023/rag \
 #    generation{...}, citations[{doc_id, heading, position, chunk_id, score}], cost_usd}
 ```
 
-To build the store for real (needs a working embeddings key in `.env`):
+Code RAG — the same endpoint, the *second* corpus, cited `module#Symbol:line`:
 
 ```bash
-python tools/build_rag_store.py --corpus corpus --out data/store.json
+curl -s localhost:8023/rag \
+  -H 'content-type: application/json' \
+  -d '{"question":"Where is checkout completed?","corpus":"code"}'
+# → citations[{doc_id:"saleor/checkout/complete_checkout.py#complete_checkout",
+#              symbol, kind, line, score}, ...]
+```
+
+To build the stores for real (needs a working embeddings key in `.env`). Pin
+`LLM_PROVIDERS` so a store never mixes embedding models — the code store's build
+is resumable and, on Cloudflare's free tier (10k neurons/day ≈ 16k symbols), the
+full Saleor tree simply takes more than one day:
+
+```bash
+python tools/build_rag_store.py  --corpus corpus               --out data/store.json
+LLM_PROVIDERS=cloudflare: python tools/build_code_store.py --corpus corpus_code/saleor \
+    --out data/code_store.json --batch 100                    # resume to finish
 ```
 
 ## Run it locally — no API key, deterministic failures
@@ -90,6 +116,10 @@ python tools/build_rag_store.py --corpus corpus --out data/store.json
 python tools/gateway_smoke.py     # day 4: spawns the stub, all 13 scenarios
 python tools/rag_smoke.py         # day 6: retrieves, budgets, retries, fallbacks
 python test_chunk.py && python test_search.py && python test_rag.py
+python test_day7.py && python test_day8.py && python test_day9.py && python test_day10.py
+python tools/rag_debug.py --stub        # day 7 offline mechanics
+python tools/retrieval_day9.py --stub   # day 9 evidence pipeline (ΣΔMRR +1.000)
+python tools/retrieval_day10.py --stub  # day 10 doc-vs-code (code 6/6, doc 9/9)
 ```
 
 The stub serves both providers on `:8700` (OpenAI) and `:8701` (Anthropic)
@@ -144,7 +174,7 @@ with the provider config it belongs to.
 - `GET /health` → `{ok, providers[], max_attempts, timeout_s, ...}`
 - `POST /chat` — `{messages, temperature, max_tokens}` → `{message, model, finish_reason, usage, cost_usd, latency_ms, provider, attempts}`
 - `POST /chat/stream` — same body, SSE events; first chunk carries `ttft_ms`
-- `POST /rag` — `{question, k?, budget_chars?}` → answer, `refused`, retrieval/generation cost split, citations
+- `POST /rag` — `{question, k?, budget_chars?, corpus?}` → answer, `refused`, retrieval/generation cost split, citations (`corpus="docs"` default, `"code"` for symbols)
 - `GET /ledger` → aggregates: records, ok/failed, tokens, `cost_usd`, by_model, by_day
 
 `usage` is the normalized `{input_tokens, output_tokens, total_tokens}` shape.
@@ -158,5 +188,9 @@ with the provider config it belongs to.
 - Concept docs: `saleor-platform/docs/concepts/model-gateway.md` (+ rag / vector-search concepts).
 - The committed `data/store.json` was built with **stub** vectors (dim 8) so tests
   are deterministic; rebuild it with a real key before trusting answers.
+- Day 10 adds the code corpus behind the *same* seams: `ai_os/ingest_code.py`
+  (stdlib `ast` symbol extraction), `tools/build_code_store.py` (interface-only,
+  resumable), `tools/retrieval_day10.py` (doc-vs-code). See
+  `docs/concepts/code-rag.md` and `docs/evaluations/code-day10.md`.
 - Day 7 (next): semantic end-to-end evals with a real embedder + model, and the
   "not covered" honesty guarantee.

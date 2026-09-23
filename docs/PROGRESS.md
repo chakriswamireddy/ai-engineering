@@ -1,10 +1,10 @@
-# Progress — ai-layer (Days 2–9)
+# Progress — ai-layer (Days 2–10)
 
 > Live status of what is implemented, verified, and still open in this repo.
 > Kept up to date as days are worked; the canonical per-day detail lives in
 > `docs/day-plan/day-N-notes.md`.
 
-Updated: 2026-09-22
+Updated: 2026-09-23
 
 ## Status legend
 
@@ -27,6 +27,7 @@ Updated: 2026-09-22
 | 7 | RAG debugging / failure report | DONE (MECH half; semantic cells `PENDING` until a real run) | `ai_os/gate.py`, `ai_os/trace.py`, `ai_os/oracle.py`, `ai_os/fixtures.py`, `ai_os/questions.yaml`, `tools/rag_debug.py`, `test_day7.py`, `docs/failures/rag-naive.md` |
 | 8 | Retrieval improvements | PARTIAL (MECH green; semantic confirmation + τ recalibration `PENDING` real run) | `ai_os/lexicon.py`, `ai_os/retrieval.py`, `test_day8.py`, `tools/retrieval_day8.py`, `docs/concepts/retrieval.md`, `docs/evaluations/retrieval-day8*.md` |
 | 9 | Reranking and context construction | PARTIAL (all MECH green; **real-corpus comparison made** — envelope-blocked at Day 8, C2 partial move, D2 regression; τ/LOM/cross-encoder verdicts `PENDING` Day 20/21) | `ai_os/rerank.py`, `ai_os/context.py`, `test_day9.py`, `tools/retrieval_day9.py`, `docs/concepts/reranking.md`, `docs/evaluations/rerank-day9.md` |
+| 10 | Code RAG | PARTIAL (all MECH green offline; code fixtures 6/6 + doc nine 9/9 on the stub; real Saleor build + semantic `file:line` verdicts `PENDING` Day 21) | `ai_os/ingest_code.py`, `ai_os/code_questions.yaml`, `ai_os/retrieval.py` (code vocab), `ai_os/rag.py` (code metadata), `tools/build_code_store.py`, `tools/code_debug.py`, `tools/retrieval_day10.py`, `test_day10.py`, `docs/concepts/code-rag.md`, `docs/evaluations/code-day10.md` |
 
 ---
 
@@ -254,6 +255,67 @@ paid-vs-free question) still need Day 20/21. Concept + learning record:
 
 ---
 
+## Day 10 — Code RAG `PARTIAL`
+
+Day 10 changes the **corpus**, not the system: the retriever (Day 8) and the
+evidence engine (Day 9) carry over with **zero lines changed**. The additions are
+two ingestion seams (`ingest_code`, `build_code_store`) and a vocabulary layer
+inside the unchanged `Retriever` contract. Concept + learning record:
+`docs/concepts/code-rag.md`, `docs/evaluations/code-day10.md`,
+`docs/day-plan/day-10-notes.md`.
+
+- `ai_os/ingest_code.py` — `SymbolExtractor` (stdlib `ast`, no parser dep): one
+  `Symbol` per function/class/method with `kind/signature/docstring/imports/
+  dependencies/first_line/last_line/body`; `module#Symbol` ids; top-level
+  statement runs → `kind="module"`. Two defects found at real ingest and fixed:
+  the size bound is now **per chunk** (`MAX_CHUNK_CHARS`, a file-level gate
+  windowed 128 legit modules incl. `complete_checkout.py`/`types.py` — the
+  fixtures' own answers), and **nested classes carry their scope** (`User.Meta`;
+  bare `Meta` gave 233 duplicate ids). The split test ("no chunk starts
+  mid-`def`") is a structural assertion over the whole corpus.
+- `ai_os/rag.py` — `Chunk` gains optional `symbol/kind/signature/docstring/
+  imports/dependencies`; save/load round-trip them (a doc store still loads,
+  defaults fill in); `citation()` adds `symbol/kind/line` for code chunks only,
+  so `doc_id` stays `module#Symbol` and `cited ⊆ retrieved` is untouched;
+  `code_store_path_from_env` / `RAG_CODE_STORE_PATH`.
+- `ai_os/retrieval.py` — `code_tokens` (split non-word chars + camelCase + `_`,
+  lowercase, drop stopwords), `CODE_REWRITES`, and `kind`/`module_prefix`
+  metadata filters; `Retriever` gains a `tokenizer` knob (defaults to the prose
+  `tokenize`). Day 8 behaviour byte-identical when the knob is unused.
+- `ai_os/lexicon.py` — `Lexicon(chunks, tokenizer=...)`: the IDF scorer is
+  retrained for identifiers, not rewritten.
+- `ai_os/code_questions.yaml` — the pre-registered code fixtures (CA1–CE1),
+  asserting on `module#Symbol` sets exactly as Day 7's asserted on `doc_id`s.
+- `tools/build_code_store.py` — mirrors `build_rag_store` over `corpus_code/`
+  (AST + interface-only embedding, resumable, dimension-locked). Hardened: on a
+  mid-build *embedding-space* switch it now stops and **preserves** the partial
+  store instead of wiping (Cloudflare's cap fell through to a dim-2048 model and
+  would have thrown away 16k symbols).
+- `tools/code_debug.py` — offline stub code corpus (14 symbols, real Saleor
+  layout) + identifier-hash gateway; `tools/retrieval_day10.py` — the
+  doc-vs-code runner; `ai_os/server.py` — `/rag` gains `corpus="docs"|"code"`.
+- `test_day10.py` — **ALL DAY 10 (MECH) CHECKS PASSED**: tokenizer collisions,
+  extractor (kinds/signature/docstring/imports/deps/lines/split test/module run/
+  windowed fallback/test-module detection), directory ingest, chunk-metadata
+  round-trip + citation, `kind`/`module_prefix` filters + filter-miss, fixture
+  set-algebra (`must_not`, `must_refuse`), the stub code set (6/6), the doc nine
+  regression (9/9, ΣΔMRR +1.000), the zero-chat-call ledger, and the gate.
+- Stub run (`--stub`): **code 6/6 green, doc nine 9/9 green** — the code corpus
+  is additive, not a rewrite. CA1 surfaces the split-brain double-hit
+  (`CheckoutComplete` + `complete_checkout`, Δrank +1); CB1/CB2/CC1/CD1 rank
+  top-1; CE1 refuses. τ=0.75 is a stub *demo* choice, not a calibration — the
+  stub's answerable top-1s (0.636–0.863) overlap CE1's (0.703), repeating Day 9's
+  real finding that a fused τ cannot separate E. `PENDING`, owner Day 21.
+- **Real corpus (2026-09-23): cloned and ingested — build quota-blocked.** The
+  clone is real (`corpus_code/saleor/`, 4,323 files → **29,156 symbols** / 29,133
+  unique ids) and all eight fixture symbols now resolve. The build hit Cloudflare
+  Workers AI's **daily free cap of 10,000 neurons** at ~16k symbols; the full tree
+  needs ≈18k neurons (**two** free days), the fixture domains ≈6.7k (**one**).
+  Pinning the embed provider and resuming is one command (see the gap below and
+  `docs/evaluations/code-day10.md` → "Real corpus — 2026-09-23").
+
+---
+
 ## Known gaps (what blocks "everything green for real")
 
 1. **Git:** Day 9 is committed (`39285dd`, `76af2e0`, `37bd8d9`, `d62acda`);
@@ -279,11 +341,33 @@ paid-vs-free question) still need Day 20/21. Concept + learning record:
    even exercisable today), τ-separation for E (real data recorded: fused top-1
    0.854/0.874 overlaps the answerable family), and the `PENDING` cross-encoder
    question (does its N chat-calls/candidate beat free rel() on this table).
+6. **Day 10 semantics + the real code corpus** — the MECH half is green
+   (`test_day10.py`; code 6/6, doc 9/9 on the stub) and the real tree is ingested
+   (29,156 symbols). Still `PENDING`: (a) the **real embed build** is
+   **quota-blocked** — Cloudflare's free 10k neurons/day only covers ~16k symbols,
+   so the full tree spans two free days; pin the provider and resume (resume
+   skips what is embedded):
+   ```bash
+   LLM_PROVIDERS=cloudflare: python tools/build_code_store.py \
+       --corpus corpus_code/saleor --out data/code_store.json --batch 100
+   # one-day option — the fixture domains (all CA1–CE1 symbols live here):
+   LLM_PROVIDERS=cloudflare: python tools/build_code_store.py \
+       --corpus corpus_code/saleor --out data/code_store.json --batch 100 \
+       --modules saleor/checkout saleor/order saleor/payment saleor/webhook \
+                 saleor/graphql/checkout saleor/graphql/order saleor/graphql/core \
+                 saleor/graphql/payment saleor/graphql/webhook
+   ```
+   then `python tools/retrieval_day10.py --store data/code_store.json
+   --doc-store data/store.json`; (b) whether a real chat model turns the
+   right symbol into the right `file:line:why` answer (Day 21); (c) E-family τ
+   recalibration on the code corpus (the stub's answerable 0.636–0.863 overlaps
+   CE1's 0.703 — same overlap Day 9 saw on real docs); (d) the interface-vs-body
+   sweep (does body-embedding recover the behaviour-but-not-name symbols?).
 
 ## How to re-verify, in one line
 
 ```bash
-python test_chunk.py && python test_search.py && python test_rag.py && python test_day7.py && python test_day8.py && python test_day9.py
+python test_chunk.py && python test_search.py && python test_rag.py && python test_day7.py && python test_day8.py && python test_day9.py && python test_day10.py
 python tools/gateway_smoke.py
 python tools/rag_smoke.py
 python tools/rag_debug.py --stub       # day 7 offline mechanics
@@ -293,4 +377,7 @@ python tools/retrieval_day9.py --stub --sweep   # λ×sim_tau×best_first + weig
 python tools/retrieval_day9.py --stub --lom     # lost-in-the-middle protocol (MECH)
 python tools/retrieval_day9.py --store data/store.json    # real-corpus comparison
 python tools/retrieval_day9.py --store data/store.json --sweep --lom  # real knobs + LOM
+python tools/retrieval_day10.py --stub  # day 10 doc-vs-code (code 6/6, doc 9/9)
+LLM_PROVIDERS=cloudflare: python tools/build_code_store.py --corpus corpus_code/saleor --out data/code_store.json --batch 100  # real build (resume; see gap 6)
+python tools/retrieval_day10.py --store data/code_store.json --doc-store data/store.json  # real corpora
 ```

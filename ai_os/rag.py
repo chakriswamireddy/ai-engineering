@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ai_os.search import dot, normalize
@@ -52,10 +52,19 @@ class Chunk:
     position: int
     text: str
     vector: list[float]
+    # Day 10 — code metadata. Prose chunks leave these at their defaults, so
+    # the Day-6 shape is unchanged; code chunks carry the symbol facts the
+    # retriever and the citation layer spend without a code-specific dialect.
+    symbol: str | None = None
+    kind: str | None = None
+    signature: str | None = None
+    docstring: str | None = None
+    imports: list[str] = field(default_factory=list)
+    dependencies: list[str] = field(default_factory=list)
 
 
 def citation(chunk: Chunk, score: float | None = None) -> dict[str, Any]:
-    return {
+    out = {
         "chunk_id": chunk.chunk_id,
         "doc_id": chunk.doc_id,
         "source": chunk.source,
@@ -63,6 +72,17 @@ def citation(chunk: Chunk, score: float | None = None) -> dict[str, Any]:
         "position": chunk.position,
         "score": None if score is None else round(float(score), 4),
     }
+    if chunk.symbol:
+        # A code citation is `module#Symbol:line` — the line makes a retrieval
+        # hit a navigation target. `doc_id` stays `module#Symbol` (no line) so
+        # `cited ⊆ retrieved` remains plain set membership (Day 7 MECH).
+        out.update({
+            "symbol": chunk.symbol,
+            "kind": chunk.kind,
+            "signature": chunk.signature,
+            "line": chunk.position,
+        })
+    return out
 
 
 class RagStore:
@@ -135,7 +155,10 @@ class RagStore:
             "chunks": [
                 {"chunk_id": c.chunk_id, "doc_id": c.doc_id, "source": c.source,
                  "heading": c.heading, "position": c.position,
-                 "text": c.text, "vector": c.vector}
+                 "text": c.text, "vector": c.vector,
+                 "symbol": c.symbol, "kind": c.kind, "signature": c.signature,
+                 "docstring": c.docstring, "imports": c.imports,
+                 "dependencies": c.dependencies}
                 for c in self.chunks
             ],
         }
@@ -152,10 +175,13 @@ class RagStore:
                 "re-run ingest+embed to rebuild")
         store = cls(embedding_model=payload.get("embedding_model", ""),
                     dimension=int(payload.get("dimension", 0)))
+        keys = ("chunk_id", "doc_id", "source", "heading", "position", "text",
+                "vector", "symbol", "kind", "signature", "docstring",
+                "imports", "dependencies")
         for c in payload.get("chunks", []):
-            chunk = Chunk(**{k: c.get(k) for k in
-                             ("chunk_id", "doc_id", "source", "heading",
-                              "position", "text", "vector")})
+            # Missing code keys (a Day-6/9 doc store) fall through to the
+            # dataclass defaults, so one loader reads both corpora.
+            chunk = Chunk(**{k: c[k] for k in keys if k in c})
             store.add(chunk)
         return store
 
@@ -265,3 +291,13 @@ def store_path_from_env(default: str = "data/store.json") -> str:
 
 def load_store_from_env(default: str = "data/store.json") -> RagStore:
     return RagStore.load(store_path_from_env(default))
+
+
+def code_store_path_from_env(default: str = "data/code_store.json") -> str:
+    """Day 10 — the second corpus lives in a second file. Same store shape,
+    same dimension lock; the doc store is never invalidated."""
+    return os.getenv("RAG_CODE_STORE_PATH", default).strip() or default
+
+
+def load_code_store_from_env(default: str = "data/code_store.json") -> RagStore:
+    return RagStore.load(code_store_path_from_env(default))
