@@ -119,11 +119,13 @@ class CloudflareProvider:
             retryable=False,
         )
 
-    def chat(self, messages: list[dict[str, str]], *, temperature: float = 0.0,
-             max_tokens: int = 512) -> Completion:
+    def chat(self, messages: list[dict[str, Any]], *, temperature: float = 0.0,
+             max_tokens: int = 512,
+             tools: list[dict[str, Any]] | None = None) -> Completion:
         return self._no_chat()
 
-    def stream(self, messages: list[dict[str, str]], *, temperature: float = 0.0,
-               max_tokens: int = 512) -> Iterator[dict[str, Any]]:
+    def stream(self, messages: list[dict[str, Any]], *, temperature: float = 0.0,
+               max_tokens: int = 512,
+               tools: list[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
         self._no_chat()
         yield {}                               # unreachable; satisfies iterator

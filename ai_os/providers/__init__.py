@@ -20,13 +20,27 @@ from ai_os.contract import (
 class Provider(Protocol):
     name: str
 
-    def chat(self, messages: list[dict[str, str]], *, temperature: float = 0.0,
-             max_tokens: int = 512) -> Completion: ...
+    def chat(self, messages: list[dict[str, Any]], *, temperature: float = 0.0,
+             max_tokens: int = 512,
+             tools: list[dict[str, Any]] | None = None) -> Completion: ...
 
-    def stream(self, messages: list[dict[str, str]], *, temperature: float = 0.0,
-               max_tokens: int = 512) -> Iterator[dict[str, Any]]: ...
+    def stream(self, messages: list[dict[str, Any]], *, temperature: float = 0.0,
+               max_tokens: int = 512,
+               tools: list[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]: ...
 
     def embed(self, inputs: list[str]) -> list[Embedding]: ...
+
+
+def neutral_tool_schema(tool: dict[str, Any]) -> dict[str, Any]:
+    """The `{name, description, parameters}` half of a tool schema.
+
+    Day 11 — `ToolRegistry.schemas()` speaks the neutral/OpenAI dialect
+    (`{"type": "function", "function": {...}}`); a provider that wants a
+    different envelope calls this to unwrap it. The provider owns the dialect,
+    the gateway and the agent own neither.
+    """
+    inner = tool.get("function")
+    return inner if isinstance(inner, dict) else tool
 
 
 def parse_sse_line(line: str, carry: str) -> tuple[str | None, str]:

@@ -18,10 +18,66 @@ from urllib import error as urlerror, request
 
 from ai_os.contract import (
     Completion, ProviderError, InvalidKeyError,
-    ProviderTimeout, NetworkError,
+    ProviderTimeout, NetworkError, ToolCall,
     usage_from_dict,
 )
-from ai_os.providers import register, parse_sse_line, raise_for_status, retry_after_from, try_parse_json_bytes
+from ai_os.providers import (
+    register, neutral_tool_schema, parse_sse_line, raise_for_status,
+    retry_after_from, try_parse_json_bytes,
+)
+
+
+def _to_anthropic_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Neutral `{type:"function", function:{...}}` → Anthropic `{name, description, input_schema}`."""
+    out: list[dict[str, Any]] = []
+    for tool in tools:
+        fn = neutral_tool_schema(tool)
+        out.append({
+            "name": fn.get("name") or "",
+            "description": fn.get("description") or "",
+            "input_schema": fn.get("parameters") or {"type": "object", "properties": {}},
+        })
+    return out
+
+
+def _encode_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Day 11 — the Anthropic dialect of the tool turn, folded in the provider.
+
+    An assistant turn carrying tool calls becomes `tool_use` content blocks
+    (`input` is the parsed object, not a JSON string); a `tool` result message
+    becomes a *user* message holding a `tool_result` block — because Anthropic
+    has no `tool` role. Nothing above the provider ever sees the difference.
+    """
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        role = m.get("role")
+        if role == "assistant" and m.get("tool_calls"):
+            blocks: list[dict[str, Any]] = []
+            if m.get("content"):
+                blocks.append({"type": "text", "text": m["content"]})
+            for tc in m["tool_calls"]:
+                if isinstance(tc, ToolCall):
+                    name, tool_id = tc.name, tc.id
+                    try:
+                        inp = json.loads(tc.arguments) if tc.arguments else {}
+                    except json.JSONDecodeError:
+                        inp = {}
+                else:
+                    fn = neutral_tool_schema(tc)
+                    name, tool_id = fn.get("name") or "", tc.get("id") or ""
+                    inp = fn.get("arguments") or {}
+                blocks.append({"type": "tool_use", "id": tool_id or "toolu_0",
+                               "name": name, "input": inp})
+            out.append({"role": "assistant", "content": blocks})
+        elif role == "tool":
+            out.append({"role": "user", "content": [{
+                "type": "tool_result",
+                "tool_use_id": m.get("tool_call_id") or m.get("id") or "toolu_0",
+                "content": m.get("content") or "",
+            }]})
+        else:
+            out.append({"role": role, "content": m.get("content", "")})
+    return out
 
 
 @register
@@ -50,10 +106,12 @@ class AnthropicProvider:
             "User-Agent": "ai-layer/0.2 (anthropic provider)",
         }
 
-    def _message_body(self, messages: list[dict[str, str]], *, temperature: float,
-                      max_tokens: int, stream: bool) -> dict[str, Any]:
-        system = "\n".join(m["content"] for m in messages if m["role"] == "system")
-        rest = [m for m in messages if m["role"] != "system"]
+    def _message_body(self, messages: list[dict[str, Any]], *, temperature: float,
+                      max_tokens: int, stream: bool,
+                      tools: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        system = "\n".join(m["content"] for m in messages
+                           if m["role"] == "system" and m.get("content"))
+        rest = _encode_messages([m for m in messages if m["role"] != "system"])
         body: dict[str, Any] = {
             "model": self.model,
             "messages": rest,
@@ -63,6 +121,8 @@ class AnthropicProvider:
         }
         if system:
             body["system"] = system
+        if tools:
+            body["tools"] = _to_anthropic_tools(tools)
         return body
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -91,24 +151,35 @@ class AnthropicProvider:
 
     # -- interface: normalized contract --------------------------------------
 
-    def chat(self, messages: list[dict[str, str]], *, temperature: float = 0.0,
-             max_tokens: int = 512) -> Completion:
+    def chat(self, messages: list[dict[str, Any]], *, temperature: float = 0.0,
+             max_tokens: int = 512,
+             tools: list[dict[str, Any]] | None = None) -> Completion:
         data = self._post("/messages", self._message_body(
-            messages, temperature=temperature, max_tokens=max_tokens, stream=False))
+            messages, temperature=temperature, max_tokens=max_tokens, stream=False,
+            tools=tools))
         content = data.get("content") or []
         text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+        tool_calls = [
+            ToolCall(name=b.get("name") or "",
+                     arguments=json.dumps(b.get("input") if b.get("input") is not None else {}),
+                     id=b.get("id") or "")
+            for b in content if b.get("type") == "tool_use"
+        ]
         return Completion(
             text=text,
             model=data.get("model", self.model),
             finish_reason=data.get("stop_reason") or "stop",
             usage=usage_from_dict(data.get("usage") or {}),
             raw=data,
+            tool_calls=tool_calls or None,
         )
 
-    def stream(self, messages: list[dict[str, str]], *, temperature: float = 0.0,
-               max_tokens: int = 512) -> Iterator[dict[str, Any]]:
+    def stream(self, messages: list[dict[str, Any]], *, temperature: float = 0.0,
+               max_tokens: int = 512,
+               tools: list[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
         body = {**self._message_body(messages, temperature=temperature,
-                                     max_tokens=max_tokens, stream=True),
+                                     max_tokens=max_tokens, stream=True,
+                                     tools=tools),
                 "max_tokens": max_tokens}
         req = request.Request(
             f"{self.base_url}/messages",
