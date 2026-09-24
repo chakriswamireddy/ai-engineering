@@ -7,6 +7,7 @@ registry instead of new application code.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -44,12 +45,44 @@ def usage_from_dict(u: dict[str, Any]) -> Usage:
 
 
 @dataclass
+class ToolCall:
+    """Day 11 §2 — one function call the model asked for.
+
+    `arguments` stays the raw JSON *string* the wire carried (OpenAI sends a
+    string; Anthropic sends an object — the provider normalizes to the string).
+    Keeping it verbatim is the point: validation owns "malformed arguments",
+    instead of a provider silently coercing a broken request into a plausible
+    one — the coercion that would make Day 12's self-correction impossible.
+    """
+
+    name: str
+    arguments: str
+    id: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"id": self.id, "name": self.name, "arguments": self.arguments}
+
+    def parsed(self) -> dict[str, Any] | None:
+        """The arguments as a dict, or None when they are not valid JSON."""
+        try:
+            value = json.loads(self.arguments) if self.arguments else {}
+        except json.JSONDecodeError:
+            return None
+        return value if isinstance(value, dict) else None
+
+
+@dataclass
 class Completion:
     text: str
     model: str
     finish_reason: str
     usage: Usage
     raw: dict[str, Any] = field(default_factory=dict)
+    # Day 11 §2 — present when the model asks instead of (or beside) typing.
+    # A tool-turn completion legitimately carries empty `text`, which is why
+    # this is not a second class: it is the same normalized completion with
+    # the model's proposed actions attached.
+    tool_calls: list[ToolCall] | None = None
 
 
 @dataclass
