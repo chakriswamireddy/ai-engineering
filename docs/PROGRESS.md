@@ -28,6 +28,7 @@ Updated: 2026-09-23
 | 8 | Retrieval improvements | PARTIAL (MECH green; semantic confirmation + τ recalibration `PENDING` real run) | `ai_os/lexicon.py`, `ai_os/retrieval.py`, `test_day8.py`, `tools/retrieval_day8.py`, `docs/concepts/retrieval.md`, `docs/evaluations/retrieval-day8*.md` |
 | 9 | Reranking and context construction | PARTIAL (all MECH green; **real-corpus comparison made** — envelope-blocked at Day 8, C2 partial move, D2 regression; τ/LOM/cross-encoder verdicts `PENDING` Day 20/21) | `ai_os/rerank.py`, `ai_os/context.py`, `test_day9.py`, `tools/retrieval_day9.py`, `docs/concepts/reranking.md`, `docs/evaluations/rerank-day9.md` |
 | 10 | Code RAG | PARTIAL (all MECH green offline; code fixtures 6/6 + doc nine 9/9 on the stub; real Saleor build + semantic `file:line` verdicts `PENDING` Day 21) | `ai_os/ingest_code.py`, `ai_os/code_questions.yaml`, `ai_os/retrieval.py` (code vocab), `ai_os/rag.py` (code metadata), `tools/build_code_store.py`, `tools/code_debug.py`, `tools/retrieval_day10.py`, `test_day10.py`, `docs/concepts/code-rag.md`, `docs/evaluations/code-day10.md` |
+| 11 | Tool Calling | PARTIAL (all MECH green offline; T1–T7 + dialect parity + the Day-6 empty-content sibling; real model *tool choice* `PENDING` Day 21) | `ai_os/tools.py`, `ai_os/agent.py`, `ai_os/contract.py` (`ToolCall`), `ai_os/providers/{openai,anthropic}.py` (tool wire), `ai_os/gateway.py` (`chat_with_tools`), `tools/mock_gateway.py` (tc_* scenarios), `tools/tool_smoke.py`, `docs/concepts/tool-calling.md`, `docs/evaluations/tool-day11.md` |
 
 ---
 
@@ -316,6 +317,60 @@ inside the unchanged `Retriever` contract. Concept + learning record:
 
 ---
 
+## Day 11 — Tool Calling `PARTIAL`
+
+Day 11 changes the *interface*, not the engine: the retrieval seams become
+function schemas, the model proposes a call, the harness validates and executes
+it, and the answer is grounded in the tool's evidence. The evidence side
+(`Retriever`, rerank, MMR, dedup, the gate) is **called, never modified** —
+which is why the tool layer is `DONE` mechanically and the retrieval numbers
+do not move. Concept + evaluation:
+`docs/concepts/tool-calling.md`, `docs/evaluations/tool-day11.md`.
+
+- `ai_os/contract.py` — `ToolCall{name, arguments-as-string, id}`;
+  `Completion.tool_calls`. `arguments` stays the raw wire string so validation
+  owns "malformed arguments" instead of a provider coercing.
+- `ai_os/providers/openai.py` — `tools=` body field, `message.tool_calls`
+  parsed, assistant/tool messages re-encoded; **the Day-6 empty-content check
+  gains a sibling** (`content: null` *with* `tool_calls` is a valid tool turn;
+  *without* is still the retryable glitch). The two cases are separate test rows
+  so fixing one can never re-break the other.
+- `ai_os/providers/anthropic.py` — native `tools` (`input_schema`), `tool_use`
+  folded into the same `ToolCall`, `tool_result` carried back in a user message.
+  `cloudflare.py` (embeddings-only) takes the `tools` kwarg so the pass-through
+  cannot `TypeError`.
+- `ai_os/gateway.py` — `chat_with_tools(messages, tools, ...)` = `chat()` + one
+  opaque argument. Retries, backoff+jitter, `Retry-After`, ordered fallback and
+  the per-attempt ledger row are untouched: a tool-turn chat is a chat call.
+- `ai_os/tools.py` — `ToolRegistry` (`register`/`schemas`/`validate_args`/
+  `execute`/`run`), `ToolResult` (`success`/`failure`/`refusal`), the
+  hand-rolled JSON-Schema subset, and the five tools: `search_saleor_docs`,
+  `search_saleor_code` (both built on the unchanged `Retriever`, with per-corpus
+  τ), and `get_product/order/customer` over seeded fixtures tagged
+  `pending_resolver: "day14"`. Refusal is a **return value**; rejection is a
+  **result** naming the field.
+- `ai_os/agent.py` — `run_tool_answer`: tool turn → validate → execute → a
+  second grounded chat turn; `cited ⊆ retrieved` checked on the **tool's**
+  result set (a fabricated `module#Symbol` is caught); refusals surfaced and a
+  restated refusal flagged; `max_tool_turns` cap (a config) recording
+  `loop_deferred: day12`.
+- `tools/mock_gateway.py` — scripted `tc_*` tool-call scenarios and
+  `answer_*` answer turns per dialect, plus an `empty` outcome, so every
+  mechanical row runs offline with zero keys.
+- `tools/tool_smoke.py` — **ALL DAY 11 (MECH) CHECKS PASSED**: T1 selection +
+  split-brain double-hit, T2 by-corpus selection, T3 data tool, T4 the argument
+  matrix (missing / enum / unknown key / malformed JSON, each named), T5 unknown
+  tool, T6 refusal + the fabrication guard, T7 the single-turn cap, Anthropic
+  dialect parity, the Day-6 sibling rows, the 3-bill cost assertion, and the
+  no-regression lines (doc nine 9/9 ΣΔMRR +1.000, code six 6/6).
+- `PENDING`: whether a *real* model chooses the right tool, spells the right
+  args, and uses the result — Day 21's benchmark on this harness. The stub
+  proves the plumbing carries a tool turn; it does not pretend a model drives it
+  well. Streamed tool-call deltas and `arguments` truncation are the real-wire
+  margins that need a key.
+
+---
+
 ## Known gaps (what blocks "everything green for real")
 
 1. **Git:** Day 9 is committed (`39285dd`, `76af2e0`, `37bd8d9`, `d62acda`);
@@ -363,6 +418,17 @@ inside the unchanged `Retriever` contract. Concept + learning record:
    recalibration on the code corpus (the stub's answerable 0.636–0.863 overlaps
    CE1's 0.703 — same overlap Day 9 saw on real docs); (d) the interface-vs-body
    sweep (does body-embedding recover the behaviour-but-not-name symbols?).
+7. **Day 11 semantics** — the MECH half is green (`tools/tool_smoke.py`; T1–T7,
+   Anthropic dialect parity, the Day-6 empty-content sibling, doc nine 9/9 and
+   code six 6/6 through the tools). Still `PENDING`: (a) whether a real model
+   **chooses** `search_saleor_code` over `search_saleor_docs` and spells `kind`
+   right — the stub scripts the call, so tool-selection recall@1 is stub-truth
+   only (Day 21); (b) the real providers' tool-wire margins (streamed tool-call
+   deltas, `arguments` truncation, finite call-id formats); (c) whether a real
+   model *uses* the evidence or paraphrases past it — the fabrication guard
+   catches cited-but-absent ids, not prose that ignores the tool; (d) whether the
+   single-turn cap is the right amount of agency, which Day 12 answers by lifting
+   `TOOL_MAX_TURNS`.
 
 ## How to re-verify, in one line
 
@@ -378,6 +444,7 @@ python tools/retrieval_day9.py --stub --lom     # lost-in-the-middle protocol (M
 python tools/retrieval_day9.py --store data/store.json    # real-corpus comparison
 python tools/retrieval_day9.py --store data/store.json --sweep --lom  # real knobs + LOM
 python tools/retrieval_day10.py --stub  # day 10 doc-vs-code (code 6/6, doc 9/9)
+python tools/tool_smoke.py              # day 11 T1–T7 (calls, validation, cap, parity)
 LLM_PROVIDERS=cloudflare: python tools/build_code_store.py --corpus corpus_code/saleor --out data/code_store.json --batch 100  # real build (resume; see gap 6)
 python tools/retrieval_day10.py --store data/code_store.json --doc-store data/store.json  # real corpora
 ```

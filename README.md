@@ -1,4 +1,4 @@
-# ai-layer — Days 4–10: Gateway → Search → RAG → Code RAG
+# ai-layer — Days 4–11: Gateway → Search → RAG → Code RAG → Tool Calling
 
 A reusable AI layer built in layers:
 
@@ -17,6 +17,13 @@ A reusable AI layer built in layers:
    seams — AST symbol extraction, interface-vs-body embedding, and identifier
    tokenization — answering **"where is it implemented?"** with `module#Symbol`
    citations and the identical fixture harness.
+6. **Day 11 — Tool Calling**: the seams become **declarative** — `ToolRegistry`
+   (schemas + hand-rolled validation + dispatch), the five tools
+   (`search_saleor_docs`, `search_saleor_code`, `get_product/order/customer`),
+   and `run_tool_answer` (one tool turn → one grounded answer). Function calling
+   rides the Day-4 gateway as **one pass-through argument**; the refusal gate
+   becomes a **return value**; and `cited ⊆ retrieved` moves home to where the
+   evidence is produced.
 
 ```
 Application
@@ -26,9 +33,11 @@ AI Layer (ModelGateway)        retries, fallback, budget, ledger
      |
   +--+--+
   |     |
-OpenAI Anthropic              chat (+ OpenAI embeddings)
+OpenAI Anthropic              chat (+ OpenAI embeddings), tools passed through
      |
-RAG loop                      docs → chunk → embed → store → retrieve → prompt
+Tool layer                    schemas → model proposes → validate → execute
+     |
+RAG loop / code RAG           docs → chunk / symbols → retrieve → evidence
 ```
 
 Same interface across chat and embeddings, two real providers, zero SDKs —
@@ -51,7 +60,10 @@ raw HTTP via `urllib`.
 | `ai_os/ingest_code.py` | day 10: `SymbolExtractor` (stdlib `ast`) + `ingest_code` — the code ingestion seam |
 | `ai_os/code_questions.yaml` | day 10: the pre-registered code fixtures (CA1–CE1), asserting `module#Symbol` sets |
 | `ai_os/server.py` | FastAPI: `/chat`, `/chat/stream`, `/rag` (`corpus="docs"｜"code"`), `/ledger`, `/health` |
-| `tools/mock_gateway.py` | scripted dual-provider stub `:8700`/`:8701` (chat **and** embeddings) |
+| `ai_os/tools.py` | day 11: `ToolRegistry` (schemas/validation/dispatch), `ToolResult`, the five tools, the hand-rolled JSON-Schema subset |
+| `ai_os/agent.py` | day 11: `run_tool_answer` — tool turn → validate → execute → grounded answer; `cited ⊆ retrieved` on the tool's evidence |
+| `tools/mock_gateway.py` | scripted dual-provider stub `:8700`/`:8701` (chat, embeddings, **and tool_calls** scenarios) |
+| `tools/tool_smoke.py` | day 11: T1–T7 offline suite (selection, validation matrix, refusal, cap, dialect parity, no-regression) |
 | `tools/gateway_smoke.py` | day 4 deliberate-failure suite + token economics |
 | `tools/build_rag_store.py` | embed a `corpus/` of markdown → `data/store.json` |
 | `tools/build_code_store.py` | day 10: embed a Saleor source tree → `data/code_store.json` (interface-only, resumable) |
@@ -120,12 +132,15 @@ python test_day7.py && python test_day8.py && python test_day9.py && python test
 python tools/rag_debug.py --stub        # day 7 offline mechanics
 python tools/retrieval_day9.py --stub   # day 9 evidence pipeline (ΣΔMRR +1.000)
 python tools/retrieval_day10.py --stub  # day 10 doc-vs-code (code 6/6, doc 9/9)
+python tools/tool_smoke.py              # day 11 T1–T7 (tool calls, validation, cap)
 ```
 
 The stub serves both providers on `:8700` (OpenAI) and `:8701` (Anthropic)
 and can be programmed to return 200 / 429 / 5xx / 401 / 400 / timeouts /
-malformed JSON / mid-SSE cuts — and now hand-rolled embeddings whose vectors
-are sums of a small theme vocabulary:
+malformed JSON / mid-SSE cuts / empty-content 200s — and now hand-rolled
+embeddings whose vectors are sums of a small theme vocabulary **and scripted
+`tool_calls` scenarios** (`tc_code`, `tc_bad_args`, `tc_unknown_tool`,
+`tc_two`, `tc_malformed`, …) so the tool layer is testable with zero keys:
 
 ```bash
 python tools/mock_gateway.py &    # both ports on 127.0.0.1:8700-8701
@@ -150,6 +165,20 @@ Day 6 smoke suite verifies (all mechanics, no real network):
 | identical texts | identical vectors; self-similarity 1.0, cross-theme lower |
 | lost-in-the-middle | all 8 candidates reach the prompt in retrieval order |
 
+Day 11 tool suite (`tools/tool_smoke.py`, T1–T7, offline):
+
+| Fixture | Verified behavior |
+|---|---|
+| T1 tool selection | `search_saleor_code`; evidence = `complete_checkout` + `CheckoutComplete` (split-brain double-hit), all ⊆ store |
+| T2 selection by corpus | `search_saleor_docs`; every result ⊆ the doc store |
+| T3 data tool | `get_order(id="1")` valid; seeded record tagged `pending_resolver: day14` |
+| T4 argument matrix | missing / wrong-enum / unknown-key / malformed-JSON each rejected **by name**, no crash |
+| T5 unknown tool | `get_invoice` → rejection result (never an exception) |
+| T6 refusal | out-of-corpus → `refused`, empty evidence; a restated refusal is flagged; a fabricated `module#Symbol` is caught |
+| T7 single-turn cap | two `tool_calls` → one executed, `loop_deferred: day12` recorded |
+| dialect parity | the same turn over Anthropic's `tool_use`/`tool_result` wire |
+| regression | doc nine 9/9, code six 6/6 through the tools (same `retrieve()`) |
+
 ## Config (via env, never committed)
 
 | Var | Default | Meaning |
@@ -164,6 +193,9 @@ Day 6 smoke suite verifies (all mechanics, no real network):
 | `LLM_TOTAL_BUDGET_S` | `0` | wall-clock budget for the whole chain; `0` = unlimited |
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embeddings model (token-priced in the ledger) |
 | `RAG_STORE_PATH` | `data/store.json` | where `POST /rag` loads the store from |
+| `TOOL_GATE_TAU` | `0.55` | the fused-score gate behind the retrieval tools |
+| `TOOL_TOP_K` | `4` | default `k` when the model does not name one |
+| `TOOL_MAX_TURNS` | `1` | day 11's single-turn cap (day 12 turns this knob) |
 
 Omitted keys are a startup error in `build_gateway_from_env` (fail fast, not a
 runtime 401 surprise). Embedding model is passed per-provider, so the key lives
@@ -192,5 +224,11 @@ with the provider config it belongs to.
   (stdlib `ast` symbol extraction), `tools/build_code_store.py` (interface-only,
   resumable), `tools/retrieval_day10.py` (doc-vs-code). See
   `docs/concepts/code-rag.md` and `docs/evaluations/code-day10.md`.
-- Day 7 (next): semantic end-to-end evals with a real embedder + model, and the
-  "not covered" honesty guarantee.
+- Day 11 adds the action layer: `ai_os/tools.py` (schemas + validation +
+  dispatch), `ai_os/agent.py` (`run_tool_answer`), the providers' tool wire,
+  and `gateway.chat_with_tools` (one pass-through argument). See
+  `docs/concepts/tool-calling.md` and `docs/evaluations/tool-day11.md`. A
+  tool-turn chat is a chat call, so it bills like one; tool execution is free
+  arithmetic. The real model's *choice* of tool is Day 21's measure.
+- Day 12 (next): the loop — `run_tool_answer` generalized by lifting
+  `max_tool_turns` and appending observations instead of terminating.
