@@ -14,6 +14,13 @@ entry is one of:
   malformed   -> HTTP 200 with garbage (non-JSON) body
   hang        -> sleep then answer => client-side timeout
   cut         -> SSE: send a chunk or two, then drop the connection (no [DONE])
+  empty       -> 200 with `content: null` and no `tool_calls` (Day 6's glitch)
+  tc_*        -> Day 11: a scripted `tool_calls` turn (see TOOL_SCENARIOS:
+                 tc_code / tc_code_ooc / tc_docs / tc_order / tc_two /
+                 tc_bad_args / tc_bad_kind / tc_unknown_key / tc_malformed /
+                 tc_unknown_tool)
+  answer_*    -> Day 11: a scripted answer turn (see ANSWER_SCENARIOS:
+                 answer_code / answer_fabricated / answer_refusal_restated)
 
 Admin control (both ports):
   POST /admin/reset {"openai": [...], "anthropic": [...], "retry_after": 0.3}
@@ -37,6 +44,107 @@ ANSWER = (
 CHUNKS = ANSWER.split()
 
 DEFAULTS: dict[str, list[str]] = {"openai": ["ok"], "anthropic": ["ok"]}
+
+# Day 11 — scripted tool-call scenarios. The stub grows a voice: a script entry
+# that names a tool scenario makes the model *ask* instead of type, and the
+# next entry serves the answer turn (a `tool` role message cannot get one
+# otherwise). `(name, args)` pairs are dialect-neutral; each provider renders
+# them in its own wire format below.
+#   args is a dict  → valid JSON arguments (or a deliberate schema violation)
+#   args is None    → a malformed `arguments` string (an OpenAI-wire artifact)
+TOOL_SCENARIOS: dict[str, list[tuple[str, dict | None]]] = {
+    "tc_code": [("search_saleor_code", {"query": "where is checkout completed", "k": 4})],
+    "tc_code_ooc": [("search_saleor_code",
+                     {"query": "debug the shopify webhook handler", "k": 4})],
+    "tc_docs": [("search_saleor_docs",
+                 {"query": "what do the docs say about creating a checkout", "k": 4})],
+    "tc_order": [("get_order", {"id": "1"})],
+    "tc_two": [("search_saleor_code", {"query": "where is checkout completed", "k": 4}),
+               ("get_order", {"id": "1"})],
+    "tc_bad_args": [("search_saleor_code", {})],
+    "tc_bad_kind": [("search_saleor_code", {"query": "checkout", "kind": "banana"})],
+    "tc_unknown_key": [("search_saleor_code", {"query": "checkout", "colour": "blue"})],
+    "tc_malformed": [("search_saleor_code", None)],
+    "tc_unknown_tool": [("get_invoice", {"id": "1"})],
+    # Day 12 — multi-step scenarios: one script entry is one *loop iteration*,
+    # so a script reads turn N, not turn 1. Step 2 is chosen from step 1's
+    # evidence ("walking Day 10's map"): the mutation's imports name the service.
+    "tc_d12_step1": [("search_saleor_code",
+                      {"query": "CheckoutComplete", "kind": "mutation",
+                       "module": "saleor/graphql/checkout", "k": 4})],
+    "tc_d12_step2": [("search_saleor_code",
+                      {"query": "complete_checkout", "kind": "function",
+                       "module": "saleor/checkout", "k": 4})],
+    # Self-correction: step 1 violates the `kind` enum, step 2 fixes *one* word.
+    "tc_d12_fix_step1": [("search_saleor_code",
+                          {"query": "checkout", "kind": "mutations"})],
+    "tc_d12_fix_step2": [("search_saleor_code",
+                          {"query": "where is checkout completed", "k": 4})],
+    # Pivot after refusal: the code tool cannot cover a docs question, step 2
+    # legally switches corpus instead of retrying the refused call.
+    "tc_d12_pivot_step2": [("search_saleor_docs",
+                            {"query": "what do the docs say about creating a checkout",
+                             "k": 4})],
+    # Parallel capacity: three calls in one step — all must be observed.
+    "tc_three": [("search_saleor_code", {"query": "where is checkout completed", "k": 4}),
+                 ("get_order", {"id": "1"}),
+                 ("search_saleor_docs", {"query": "how do I create a checkout", "k": 4})],
+}
+
+# Day 11 — scripted *answer* texts. The grounded one cites the tool's evidence;
+# the fabricated one names a symbol no store holds (the harness must catch it);
+# the restated one answers an out-of-corpus question after every tool refused.
+ANSWER_SCENARIOS: dict[str, str] = {
+    "answer_code": (
+        "Checkout is completed by complete_checkout "
+        "(saleor/checkout/complete_checkout.py#complete_checkout), reached from "
+        "the CheckoutComplete mutation "
+        "(saleor/graphql/checkout/mutations/checkout_complete.py#CheckoutComplete)."
+    ),
+    "answer_fabricated": (
+        "Checkout is handled by saleor/ghost/checkout.py#CompleteCheckoutMagic."
+    ),
+    "answer_refusal_restated": (
+        "Saleor does not appear to have a Shopify webhook handler; nothing in "
+        "the corpus covers it."
+    ),
+    # Day 12 — answers that either ground a multi-step run or say *why* it ended.
+    "answer_multistep": (
+        "CheckoutComplete "
+        "(saleor/graphql/checkout/mutations/checkout_complete.py#CheckoutComplete) "
+        "calls complete_checkout "
+        "(saleor/checkout/complete_checkout.py#complete_checkout), which creates "
+        "the order — cited across both steps."
+    ),
+    "answer_docs": (
+        "Per the docs, a checkout is created with checkoutCreate "
+        "(quickstart/api#create-a-checkout) and completed with checkoutComplete "
+        "(developer/checkout/api-guide#completing-checkout)."
+    ),
+    "answer_parallel": (
+        "Checkout is completed by complete_checkout "
+        "(saleor/checkout/complete_checkout.py#complete_checkout); order 1 is "
+        "UNFULFILLED with total 19.99 (get_order)."
+    ),
+    "answer_limit": (
+        "I reached the step limit before finishing: from the evidence gathered, "
+        "CheckoutComplete "
+        "(saleor/graphql/checkout/mutations/checkout_complete.py#CheckoutComplete) "
+        "is the entry point, but the loop stopped at max_steps and I cannot "
+        "confirm the rest."
+    ),
+    "answer_budget": (
+        "The run budget was exhausted before finishing: from the evidence "
+        "gathered, CheckoutComplete "
+        "(saleor/graphql/checkout/mutations/checkout_complete.py#CheckoutComplete) "
+        "is the entry point, but the budget ended the loop."
+    ),
+    "answer_gaveup": (
+        "I could not fix the rejected call within the self-correction bound: the "
+        "argument kept failing validation, so I am naming the stuck point "
+        "instead of guessing."
+    ),
+}
 
 # Day 6 — scripted embeddings. A tiny vocabulary → vector table lets the
 # stub do *deterministic, controllable* semantics: a text's vector is the
@@ -186,6 +294,80 @@ def anthropic_body(req: dict) -> dict:
     }
 
 
+def openai_tool_body(req: dict, scenario: list[tuple[str, dict | None]]) -> dict:
+    """The OpenAI dialect of "the model asked": content null + `tool_calls`."""
+    model = req.get("model") or "gpt-4o-mini"
+    calls = []
+    for i, (name, args) in enumerate(scenario):
+        arguments = json.dumps(args) if isinstance(args, dict) else '{"query": '
+        calls.append({"id": f"call_stub_{i + 1}", "type": "function",
+                      "function": {"name": name, "arguments": arguments}})
+    return {
+        "id": "chatcmpl-stub-tools",
+        "object": "chat.completion",
+        "model": model,
+        "choices": [{"index": 0, "finish_reason": "tool_calls",
+                     "message": {"role": "assistant", "content": None,
+                                 "tool_calls": calls}}],
+        "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20},
+    }
+
+
+def anthropic_tool_body(req: dict, scenario: list[tuple[str, dict | None]]) -> dict:
+    """The Anthropic dialect: a `tool_use` content block (input is an object)."""
+    model = req.get("model") or "claude-3-5-haiku-latest"
+    blocks = [
+        {"type": "tool_use", "id": f"toolu_stub_{i + 1}", "name": name,
+         "input": args if isinstance(args, dict) else {}}
+        for i, (name, args) in enumerate(scenario)
+    ]
+    return {
+        "id": "msg_stub_tools", "type": "message", "role": "assistant",
+        "model": model, "content": blocks, "stop_reason": "tool_use",
+        "usage": {"input_tokens": 12, "output_tokens": 8},
+    }
+
+
+def openai_answer_body(req: dict, text: str) -> dict:
+    model = req.get("model") or "gpt-4o-mini"
+    return {
+        "id": "chatcmpl-stub-answer", "object": "chat.completion", "model": model,
+        "choices": [{"index": 0, "finish_reason": "stop",
+                     "message": {"role": "assistant", "content": text}}],
+        "usage": {"prompt_tokens": 40, "completion_tokens": 30, "total_tokens": 70},
+    }
+
+
+def anthropic_answer_body(req: dict, text: str) -> dict:
+    model = req.get("model") or "claude-3-5-haiku-latest"
+    return {
+        "id": "msg_stub_answer", "type": "message", "role": "assistant",
+        "model": model, "content": [{"type": "text", "text": text}],
+        "stop_reason": "end_turn", "usage": {"input_tokens": 40, "output_tokens": 30},
+    }
+
+
+def openai_empty_body(req: dict) -> dict:
+    """Day 6's regression hazard, scriptable: a 200 with `content: null` and
+    **no** `tool_calls` — the retryable glitch, distinct from a tool turn."""
+    model = req.get("model") or "gpt-4o-mini"
+    return {
+        "id": "chatcmpl-stub-empty", "object": "chat.completion", "model": model,
+        "choices": [{"index": 0, "finish_reason": "stop",
+                     "message": {"role": "assistant", "content": None}}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 0, "total_tokens": 5},
+    }
+
+
+def anthropic_empty_body(req: dict) -> dict:
+    model = req.get("model") or "claude-3-5-haiku-latest"
+    return {
+        "id": "msg_stub_empty", "type": "message", "role": "assistant",
+        "model": model, "content": [], "stop_reason": "end_turn",
+        "usage": {"input_tokens": 5, "output_tokens": 0},
+    }
+
+
 def openai_sse(req: dict) -> str:
     model = req.get("model") or "gpt-4o-mini"
     events = []
@@ -287,6 +469,25 @@ class Handler(BaseHTTPRequestHandler):
 
         outcome = WORLD.next(self.provider)
         stream = bool(req.get("stream"))
+
+        # Day 11 — scripted tool-call and answer turns, ahead of the plain
+        # outcomes, so one script entry can make the model *ask* and the next
+        # can serve the grounded (or fabricated) answer to the tool result.
+        if outcome in TOOL_SCENARIOS:
+            body = (openai_tool_body if self.provider == "openai"
+                    else anthropic_tool_body)(req, TOOL_SCENARIOS[outcome])
+            self._json(200, body)
+            return
+        if outcome in ANSWER_SCENARIOS:
+            body = (openai_answer_body if self.provider == "openai"
+                    else anthropic_answer_body)(req, ANSWER_SCENARIOS[outcome])
+            self._json(200, body)
+            return
+        if outcome == "empty":
+            body = (openai_empty_body if self.provider == "openai"
+                    else anthropic_empty_body)(req)
+            self._json(200, body)
+            return
 
         if outcome == "ok":
             if stream:
