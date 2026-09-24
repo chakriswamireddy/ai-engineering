@@ -141,6 +141,19 @@ class ModelGateway:
 
     # ---------------------------------------------------------------- stream
 
+    def chat_with_tools(self, messages, tools, **kw) -> Completion:
+        """Day 11 §4 — `chat()` with one extra argument passed straight through.
+
+        That is the whole feature, and that is the point: a tool-turn chat call
+        *is* a chat call, so retries, backoff+jitter, `Retry-After`, ordered
+        fallback, the per-request budget, and the per-attempt ledger row all
+        behave exactly as they do for any chat. The gateway never validates,
+        inspects, or partially forwards `tools` — the provider owns the dialect
+        it is written in, which is Day 4's bet paying out its first real
+        dividend: tool calling arrives as a pass-through, not a subsystem.
+        """
+        return self.chat(messages, tools=tools, **kw)
+
     def stream(self, messages, **kw) -> Iterator[dict[str, Any]]:
         deadline = (time.monotonic() + self.total_budget_s
                     if self.total_budget_s else None)
