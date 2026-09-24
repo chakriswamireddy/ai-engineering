@@ -380,3 +380,83 @@ def attach_oracle(trace: dict[str, Any], oracle: dict[str, Any]) -> dict[str, An
     trace["oracle"] = oracle
     trace["verdict"] = classify_trace(trace, oracle)
     return trace
+
+
+# ======================================================== Day 12 — agent loop
+# Day 7's per-query trace becomes Day 12's per-step trace: a step is as
+# auditable as a single-shot query was, because the row shape is the same. The
+# run object adds the fields the loop owns — why it stopped, how many steps,
+# whether it truncated — so termination is part of the answer, not a debug
+# detail.
+
+AGENT_TERMINATIONS: dict[str, str] = {
+    "answer": "exit 1 — the model answered from the evidence it had (no tool_calls)",
+    "max_steps": "exit 2 — the step cap fired; the loop stopped and said so "
+                 "(why it never converged is Day 13's taxonomy)",
+    "budget": "exit 3 — the run's cost budget was spent; the answer is limited "
+              "to already-gathered evidence",
+    "gave_up": "the self-correction bound was reached; the loop stopped naming "
+               "the stuck point",
+}
+
+
+def step_trace(step: int, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """One loop iteration's row — the unit of per-step attribution.
+
+    `rows` is one record per executed call
+    (`name`/`args_parsed`/`args_valid`/`result_ok`/`refused`/`error`/`evidence_ids`).
+    A step may carry several calls (parallel `tool_calls`), each its own
+    observation; the row aggregates them without dropping one — the cheapest
+    way to "handle" a multi-call step is to execute the first and hope, and
+    this row is what makes that visible.
+
+    `cited` (which of this step's evidence the final answer used) can only be
+    filled once the answer exists, so `grounding_over_transcript` writes it in.
+    """
+    retrieved: list[str] = []
+    for r in rows:
+        for i in r.get("evidence_ids") or []:
+            if i not in retrieved:
+                retrieved.append(i)
+    return {
+        "step": step,
+        "tool_calls": [r["name"] for r in rows],
+        "calls": rows,
+        "args_valid": all(r["args_valid"] for r in rows),
+        "result_ok": all(r["result_ok"] for r in rows),
+        "refused": any(r["refused"] for r in rows),
+        "rejections": sum(1 for r in rows if not r["args_valid"]),
+        "observed_refusals": sum(1 for r in rows if r["refused"]),
+        "retrieved": retrieved,
+        "cited": [],
+        "cited_subset_retrieved": True,
+    }
+
+
+def grounding_over_transcript(mentioned: list[str],
+                              steps: list[dict[str, Any]]) -> dict[str, Any]:
+    """`cited ⊆ retrieved` over the *whole transcript* — Day 12's invariant.
+
+    The union of every step's retrieved evidence is the only source the final
+    answer may cite; an id outside it is a fabrication. Each step row is
+    annotated with the citations that belong to *its* evidence, which is how
+    "the answer cites symbols from ≥ 2 observations" becomes a MECH check and
+    how "the agent lost the thread between steps" is diagnosable per step.
+    """
+    retrieved: list[str] = []
+    for row in steps:
+        for i in row.get("retrieved") or []:
+            if i not in retrieved:
+                retrieved.append(i)
+    evidence = set(retrieved)
+    fabricated = [c for c in mentioned if c not in evidence]
+    for row in steps:
+        own = set(row.get("retrieved") or [])
+        row["cited"] = [c for c in mentioned if c in own]
+        row["cited_subset_retrieved"] = not row["cited"] or set(row["cited"]) <= evidence
+    return {
+        "citations": list(mentioned),
+        "retrieved": retrieved,
+        "fabricated": fabricated,
+        "cited_subset_retrieved": not fabricated,
+    }
