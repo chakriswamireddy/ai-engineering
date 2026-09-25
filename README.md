@@ -180,7 +180,7 @@ Day 11 tool suite (`tools/tool_smoke.py`, T1–T7, offline):
 |---|---|
 | T1 tool selection | `search_saleor_code`; evidence = `complete_checkout` + `CheckoutComplete` (split-brain double-hit), all ⊆ store |
 | T2 selection by corpus | `search_saleor_docs`; every result ⊆ the doc store |
-| T3 data tool | `get_order(id="1")` valid; seeded record tagged `pending_resolver: day14` |
+| T3 data tool | `get_order(id="1")` valid; real resolver returns order 1001 / UNFULFILLED, **no** `pending_resolver` (Day 14 fills the stub) |
 | T4 argument matrix | missing / wrong-enum / unknown-key / malformed-JSON each rejected **by name**, no crash |
 | T5 unknown tool | `get_invoice` → rejection result (never an exception) |
 | T6 refusal | out-of-corpus → `refused`, empty evidence; a restated refusal is flagged; a fabricated `module#Symbol` is caught |
@@ -236,6 +236,9 @@ and exits 2 rather than a false FAIL.
 | `AGENT_BUDGET_CHARS` | `4000` | day 12: per-observation clamp (day 11's `max_chars`, per step) |
 | `AGENT_SELF_CORRECT` | `2` | day 12: re-issues allowed after a rejection, per question |
 | `AGENT_BUDGET_USD` | unset (`0`) | day 12: run-level cost cap → exit 3 |
+| `SALEOR_READONLY_DB_URL` | unset | day 14: the `saleor_read_only` DSN; unset → the offline seeded sqlite stub |
+| `SALEOR_SQL_ROW_LIMIT` | `100` | day 14: rows per data query (truncation is reported) |
+| `SALEOR_SQL_SCHEMA_BUDGET` | `4000` | day 14: chars of schema card (budget-clamped, cut marked) |
 
 Omitted keys are a startup error in `build_gateway_from_env` (fail fast, not a
 runtime 401 surprise). Embedding model is passed per-provider, so the key lives
@@ -281,3 +284,14 @@ with the provider config it belongs to.
   model's *composition* of a multi-step investigation is Day 21's measure, now run
   per request via `python tools/agent_smoke.py --live` — the free model walks the
   map (`complete_checkout` → `create_order_from_checkout` → `process_payment`).
+- Day 14 adds the data corpus: `ai_os/data.py` (read-only seam — `SqliteDataStore`
+  seeded stub / lazy `PostgresDataStore`; the schema card + business glossary; the
+  `SELECT`/`WITH`-only validator seed; the parameterized resolvers), plus
+  `run_saleor_sql` / `describe_saleor_schema` in the registry and the data columns
+  in the trace. The pipeline **is** the loop: the model generates SQL as a tool
+  argument, so it stays visible (repairable, gradable — Day 15's target), and the
+  final answer's numbers must be in the result set (`asserted ⊆ returned`). See
+  `docs/concepts/text-to-sql.md`, `docs/evaluations/data-day14.md`, and
+  `python tools/data_smoke.py` (Q1–Q8: the two read-only guards, the schema card,
+  measured truncation, and the invariant proven both ways). A data answer costs
+  **0 embeds + 2 chats** — exact set logic, no vectors.

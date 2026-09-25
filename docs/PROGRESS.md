@@ -31,6 +31,7 @@ Updated: 2026-09-25
 | 11 | Tool Calling | PARTIAL (all MECH green offline; T1–T7 + dialect parity + the Day-6 empty-content sibling; real model *tool choice* `PENDING` Day 21) | `ai_os/tools.py`, `ai_os/agent.py`, `ai_os/contract.py` (`ToolCall`), `ai_os/providers/{openai,anthropic}.py` (tool wire), `ai_os/gateway.py` (`chat_with_tools`), `tools/mock_gateway.py` (tc_* scenarios), `tools/tool_smoke.py`, `docs/concepts/tool-calling.md`, `docs/evaluations/tool-day11.md` |
 | 12 | Agent Loop | PARTIAL (all MECH green offline; A1–A8 + the `gave_up` bound + the depth-1 line + the cost shape; `--live` real-model *composition* **verified** — the free model walks the map with the reasoning prompt; Day 21 rules cross-model strength) | `ai_os/agent.py` (`run_agent`, `REASONING_PROMPT`), `ai_os/trace.py` (`step_trace`, `grounding_over_transcript`), `tools/mock_gateway.py` (multi-step `tc_*`/`answer_*`), `tools/agent_smoke.py` (`--live`), `docs/concepts/agent-loop.md`, `docs/evaluations/agent-day12.md` |
 | 13 | Agent Failure Modes | PARTIAL (all MECH green offline; F1–F9 with `fabricated? = no` on every row + the timeout wall on an injected clock + the fingerprint firing before the cap + the disclosed fallback ladder + the contradiction flag with its two negative twins; A1–A8 / T1–T7 re-run through the guarded loop; real-model *tripping* and contradiction *adjudication* `PENDING` Day 21, real latency `PENDING` Day 14) | `ai_os/tools.py` (`ToolError`, `error_kind` taxonomy, `REJECTION_KINDS`/`TOOL_ERROR_KINDS`), `ai_os/agent.py` (`execute_bounded`, the fingerprint, the fallback ladder, `_derive_failure_kind`), `ai_os/trace.py` (`fingerprint`/`detect_repeat`/`detect_oscillation`/`contradiction_rows`/`contradiction_coverage`), `tools/mock_gateway.py` (`tc_d13_*`), `tools/failure_smoke.py`, `docs/concepts/agent-failure-modes.md`, `docs/evaluations/failure-day13.md` |
+| 14 | Data Agent | PARTIAL (all MECH green offline; Q1–Q8 with **`asserted ⊆ returned = ok` on every answered row** (the fabricated twin excepted) + the **two independent read-only guards** (validator rejects before execution; the engine refuses a bypassed write) + the schema card (DB schema, not `schema.graphql`) + row-limit/truncation + `no_data` as a finding + the `unknown_column` repair; A1–A8 / T1–T7 / F1–F9 re-run through the same harness; real-model *SQL generation + grounding* `PENDING` Day 21, real Postgres latency/schema reconciliation `PENDING` a live role) | `ai_os/data.py` (new), `ai_os/tools.py` (`run_saleor_sql`, `describe_saleor_schema`, real resolvers), `ai_os/trace.py`/`ai_os/agent.py` (data columns + the invariant), `tools/data_smoke.py`, `tools/mock_gateway.py` (`tc_d14_*`/`answer_d14_*`), `docs/concepts/text-to-sql.md`, `docs/evaluations/data-day14.md` |
 
 ---
 
@@ -520,6 +521,62 @@ not adjudication). Concept + evaluation: `docs/concepts/agent-failure-modes.md`,
 
 ---
 
+## Day 14 — Data Agent `PARTIAL`
+
+- `ai_os/data.py` (new) — the third corpus and the read-only seam. `SqliteDataStore`
+  (stdlib, seeded, `PRAGMA query_only` — the offline engine) and `PostgresDataStore`
+  (lazy `psycopg` over `SALEOR_READONLY_DB_URL`, `default_transaction_read_only` +
+  `statement_timeout`); `SCHEMA_CARD` (seven core tables + FKs + purposes) and the
+  business-definition `GLOSSARY` serialized by `schema_card_text()` (budget-clamped,
+  cut marked); `validate_readonly()` (the §5 seed: single statement, `SELECT`/`WITH`
+  only, DML/DDL denied — **a keyword check, not a parser**); `DataAgent` (the
+  validate → execute seam + the fixed parameterized resolvers); `sql_error_kind`
+  (`invalid_sql` / `unknown_column` / `unknown_table`); `asserted_subset_returned()`
+  (the §7 invariant); `SEED_SQL` (the curated core subset).
+- `ai_os/tools.py` (extended) — `run_saleor_sql(sql)` (the **generated**-query tool,
+  schema card in its description) and `describe_saleor_schema(table)` registered;
+  `get_product/get_order/get_customer(id)` re-pointed at **real parameterized
+  queries** and their `pending_resolver` stub tag removed (the Day 11 interface is
+  *filled*, unchanged). Records carry `query_kind` (`fixed` / `generated`) so the
+  trace distinguishes a parameterized answer from a generated one. **Seven** tools
+  now.
+- `ai_os/trace.py` (extended) — `data_columns()` promotes `gen_sql` / `validation` /
+  `executed` / `query_kind` / `row_count` / `truncated` / `db_elapsed_ms` into the
+  per-call row; `generated_sqls()` collects the generated queries. `ai_os/agent.py`
+  adds the run object's `gen_sql` / `data_records` (`asserted ⊆ returned`) — the loop
+  is otherwise untouched (**the pipeline is the loop**).
+- `tools/mock_gateway.py` — Day 14 scripted turns: `tc_d14_*` (revenue, customers,
+  empty, bad column, fix, lines, delete, order, customer, schema) and `answer_d14_*`
+  (grounded, customers, empty, truncated, error, orders, and the **fabricated** twin).
+- `tools/data_smoke.py` (new) — **ALL DAY 14 (MECH) CHECKS PASSED** (61 checks):
+  Q1 aggregation (four-table join, window + DRAFT from the glossary), Q2 the
+  parameterized tool completed (`query_kind: fixed`, no `pending_resolver`), Q3 the
+  customers ⋈ orders join, Q4 `no_data` as a finding, Q5 **two independent read-only
+  guards** (validator rejects *before* execution; the engine refuses a bypassed write
+  — nothing deleted) + the 10-case validator matrix, Q6 `unknown_column` → self-correct,
+  Q7 measured truncation (`fetch limit+1`), Q8 the invariant proven **both ways**
+  (grounded passes, fabricated fails), the §2 schema-grounding assertions (DB tables,
+  FK joins, glossary, no GraphQL names, budget clamp), and the **no-regression** gate
+  (re-runs `tool_smoke.py` / `agent_smoke.py` / `failure_smoke.py` unchanged).
+- **Headline:** `asserted ⊆ returned = ok` on every answered row (the fabricated twin
+  excepted). Cost shape **differs from retrieval**: **0 embeds + 2 chats** (generate
+  SQL, explain rows; +1 chat on a repair) + the schema card's per-step input tokens —
+  the DB does exact set logic, so no vectors are needed to *find* the data.
+- One deliberate Day 11 edit (recorded): T3's assertion flips from "the fixture says
+  `pending_resolver: day14`" to "the real resolver returned order 1, no
+  `pending_resolver`", and the schema-name check grows from five tools to seven. No
+  retrieval or guard number moved.
+- **No regression:** the Data Agent is **additive** — a fourth corpus behind the same
+  harness. `ai_os/gateway.py`, the retriever, and the loop's control flow are
+  **untouched**; `run_saleor_sql` is just another tool.
+- `PENDING`: whether a *real* model writes the right join and the right window for Q1
+  and grounds its explanation in the rows (Q8 under a real model) — Day 21's benchmark
+  on Day 14's schema card; real Postgres latency and reconciling the curated card
+  against a live `information_schema` need a live `saleor_read_only` role; the
+  validator is defeatable and the hardened parser is **Day 15's**.
+
+---
+
 ## Known gaps (what blocks "everything green for real")
 
 1. **Git:** Day 9 is committed (`39285dd`, `76af2e0`, `37bd8d9`, `d62acda`);
@@ -607,6 +664,20 @@ not adjudication). Concept + evaluation: `docs/concepts/agent-failure-modes.md`,
    (d) slow-but-genuine progress that still ends at `max_steps` — the fingerprint
    cannot see it (Day 16's planner). Re-verify with
    `python tools/failure_smoke.py`.
+10. **Day 14 semantics** — the MECH half is green (`tools/data_smoke.py`; Q1–Q8,
+    `asserted ⊆ returned = ok` on every answered row with the fabricated twin the
+    only `FAIL`, the two independent read-only guards, the schema card, measured
+    truncation, `no_data` as a finding, the `unknown_column` repair, and A1–A8 /
+    T1–T7 / F1–F9 re-run unchanged). Still `PENDING`: (a) whether a *real* model
+    writes the right join and window from the schema card and grounds its
+    explanation in the rows — Day 21's benchmark on Day 14's card and tool; (b)
+    **real Postgres latency** and reconciling the curated card against a live
+    `information_schema` — needs `SALEOR_READONLY_DB_URL` (the driver `psycopg` is
+    declared; the seam is built); (c) the **validator is a keyword check, not a
+    parser** (defeatable; the `saleor_read_only` role is the certain guard) — the
+    real parser + allow/deny + cost guards are **Day 15**; (d) **schema retrieval**
+    for a card that cannot fit the whole DB (Day 16/19). Re-verify with
+    `python tools/data_smoke.py`.
 
 ## How to re-verify, in one line
 
@@ -626,6 +697,7 @@ python tools/tool_smoke.py              # day 11 T1–T7 (calls, validation, cap
 python tools/agent_smoke.py             # day 12 A1–A8 (loop, three exits + gave_up, depth-1, grounding over transcript)
 python tools/agent_smoke.py --live      # day 12 A1/A6/A7 against the real gateway (retrieval on the stub stores)
 python tools/failure_smoke.py           # day 13 F1–F9 (guards + fabricated? column) + A1–A8 / T1–T7 re-run
+python tools/data_smoke.py              # day 14 Q1–Q8 (read-only guards + asserted ⊆ returned) + A1–A8 / T1–T7 / F1–F9 re-run
 LLM_PROVIDERS=cloudflare: python tools/build_code_store.py --corpus corpus_code/saleor --out data/code_store.json --batch 100  # real build (resume; see gap 6)
 python tools/retrieval_day10.py --store data/code_store.json --doc-store data/store.json  # real corpora
 ```
