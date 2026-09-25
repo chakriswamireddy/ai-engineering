@@ -136,7 +136,7 @@ class CountingGateway:
 
 
 def build_registry():
-    """The five tools over the offline stub stores (retrieval side, in-process)."""
+    """The seven tools over the offline stub stores (retrieval side, in-process)."""
     gw_doc = CountingGateway(_rd.StubGateway(extra_vocab=_rd._STUB_EXTRA_VOCAB))
     doc_store = _rd.build_stub_store(gw_doc.inner)
     gw_code = CountingGateway(_cd.HashEmbedGateway())
@@ -216,13 +216,18 @@ def t3_data_tool(reg, gw):
     reset(openai=["tc_order", "ok"])
     res = run("Fetch order 1", reg, gw, expected_tool="get_order")
     row = res["tool_ledger"][0]
+    record = row.get("data") or {}
+    values = dict(zip(record.get("columns") or [], (record.get("rows") or [[]])[0]))
     check("the model asked for get_order", res["tool_calls"][0]["name"] == "get_order")
     check("args validated (id present)", row["valid"] and row["ok"], str(row))
-    check("the seeded record came back",
-          isinstance(row.get("data"), dict) and row["data"].get("number") == "1001",
-          str(row.get("data")))
-    check("the fixture says so: pending_resolver = day14",
-          row["data"].get("pending_resolver") == "day14")
+    check("the real resolver returned order 1 (Day 14 fills the Day 11 stub)",
+          values.get("number") == 1001 and values.get("status") == "UNFULFILLED",
+          str(values))
+    check("the record is the data evidence shape (sql/columns/executed)",
+          bool(record.get("sql")) and record.get("executed") is True
+          and bool(record.get("columns")), str(record.get("columns")))
+    check("no pending_resolver: the stub tag is gone",
+          "pending_resolver" not in record, str(record))
     return res
 
 
@@ -393,9 +398,10 @@ def no_regression(gw_doc, gw_code, doc_store, code_store):
 def tool_schemas(reg):
     print("\n== Day 11 — the schemas are the model's interface (MECH)")
     names = reg.names()
-    check("all five tools registered, curriculum names exact",
+    check("all seven tools registered, curriculum names exact",
           names == ["search_saleor_docs", "search_saleor_code", "get_product",
-                    "get_order", "get_customer"], str(names))
+                    "get_order", "get_customer", "run_saleor_sql",
+                    "describe_saleor_schema"], str(names))
     schemas = reg.schemas()
     check("schemas() speaks the neutral function dialect",
           all(s["type"] == "function" and "name" in s["function"] for s in schemas))
@@ -506,14 +512,15 @@ def live_t3_data_tool(reg, gw):
     row = res["tool_ledger"][0] if res["tool_ledger"] else {}
     check("the id argument was spelled valid (string id)",
           bool(row) and row["valid"] and row["ok"], str(row))
-    check("the seeded record came back",
-          isinstance(row.get("data"), dict) and row["data"].get("number") == "1001",
-          str(row.get("data")))
-    check("the fixture says so: pending_resolver = day14",
-          bool(row.get("data")) and row["data"].get("pending_resolver") == "day14")
+    record = row.get("data") or {}
+    values = dict(zip(record.get("columns") or [], (record.get("rows") or [[]])[0]))
+    check("the real resolver returned order 1 (Day 14 fills the Day 11 stub)",
+          values.get("number") == 1001, str(values))
+    check("no pending_resolver: the stub tag is gone",
+          "pending_resolver" not in record, str(record))
     check("the answer used the record (status/total)",
           res["cited_subset_retrieved"] and not res["fabricated"]
-          and any(k in (res["answer"] or "") for k in ("UNFULFILLED", "19.99", "1001")),
+          and any(k in (res["answer"] or "") for k in ("UNFULFILLED", "59.38", "1001")),
           f"fabricated={res['fabricated']} answer={res['answer']!r}")
     _live_answer(res)
     return res
