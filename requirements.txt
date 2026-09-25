@@ -1,3 +1,6 @@
 fastapi>=0.115
 uvicorn>=0.30
 pyyaml>=6.0
+# Day 14 — the read-only Postgres driver. Imported lazily (only when
+# SALEOR_READONLY_DB_URL is set), so the offline suites never need it.
+psycopg[binary]>=3.1
