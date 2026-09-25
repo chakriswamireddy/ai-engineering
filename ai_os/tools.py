@@ -1,12 +1,14 @@
 """Day 11 §3/§5 — the tool layer: the old seams made declarative.
 
 Days 8–10 built a retriever that answers questions; Day 11 lets the *model*
-ask it. The five tools are not a new subsystem — they are exactly the seams
-that already exist, exposed as function schemas:
+ask it. The tools are not a new subsystem — they are exactly the seams that
+already exist, exposed as function schemas:
 
     search_saleor_docs()  → Day 6/8 retrieve() over data/store.json
     search_saleor_code()  → Day 10 retrieve() over data/code_store.json
-    get_product/order/customer() → seeded fixtures (the real resolver is Day 14)
+    get_product/order/customer() → Day 14 fixed read-only queries (ai_os/data.py)
+    run_saleor_sql()      → Day 14 generated read-only SQL (the open tool, Day 15's target)
+    describe_saleor_schema() → Day 14 on-demand schema expansion
 
 Three decisions carry the module:
 
@@ -35,6 +37,15 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from ai_os.data import (
+    DIALECT_NOTE,
+    GLOSSARY,
+    DataAgent,
+    describe_table,
+    make_data_store,
+    schema_card_text,
+    table_names,
+)
 from ai_os.gate import should_refuse
 from ai_os.rag import Chunk
 from ai_os.retrieval import CODE_REWRITES, Retriever, code_tokens
@@ -138,7 +149,6 @@ class ToolResult:
     error: str | None = None
     refused: bool = False
     truncated: bool = False
-    pending_resolver: str | None = None
     # Day 13 — the typed-failure columns. `error_kind` names the disease
     # (`invalid_args`/`unknown_tool`/`timeout`/`tool_error`/`no_data`/`internal`);
     # `retryable` is the ladder's gate; `fallback_from` records a disclosed
@@ -150,11 +160,10 @@ class ToolResult:
     @classmethod
     def success(cls, name: str, *, args: dict | None = None,
                 evidence: list[dict] | None = None, data: Any = None,
-                truncated: bool = False, pending_resolver: str | None = None,
+                truncated: bool = False,
                 ) -> "ToolResult":
         return cls(name=name, ok=True, args=args, evidence=list(evidence or []),
-                   data=data, truncated=truncated,
-                   pending_resolver=pending_resolver)
+                   data=data, truncated=truncated)
 
     @classmethod
     def failure(cls, name: str, error: str, *,
@@ -463,48 +472,108 @@ def _record_schema(name: str, description: str) -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------- data stubs
+# --------------------------------------------------------- Day 14 data tools
 
-# Day 11 ships the *interface* the real resolvers will fill: schema, `id`
-# validation, result shape. The records are fixtures and say so — every one
-# carries `pending_resolver: "day14"` so no one mistakes a fixture lookup for
-# live Saleor data.
-PENDING_RESOLVER = "day14"
-
-SEEDED_RECORDS: dict[str, dict[str, dict[str, Any]]] = {
-    "product": {
-        "1": {"id": "1", "name": "Blue T-Shirt", "slug": "blue-t-shirt",
-              "product_type": "Apparel", "currency": "USD", "price": "19.99",
-              "variants": 3},
-        "2": {"id": "2", "name": "Coffee Mug", "slug": "coffee-mug",
-              "product_type": "Homeware", "currency": "USD", "price": "9.50",
-              "variants": 2},
-    },
-    "order": {
-        "1": {"id": "1", "number": "1001", "status": "UNFULFILLED",
-              "currency": "USD", "total": "19.99", "lines": 1,
-              "checkout_token": "chk_stub_1"},
-        "2": {"id": "2", "number": "1002", "status": "FULFILLED",
-              "currency": "USD", "total": "29.49", "lines": 2,
-              "checkout_token": "chk_stub_2"},
-    },
-    "customer": {
-        "1": {"id": "1", "email": "demo@example.com", "orders": 2,
-              "currency": "USD"},
-    },
-}
+# Two shapes of data tool, and the difference is the day's second design
+# decision. `get_product/order/customer(id)` are **safe by construction** — a
+# fixed query with one validated `id`, zero generation — and they finally *fill*
+# the interface Day 11 shipped (the `pending_resolver` stub is gone because the
+# resolver is real). `run_saleor_sql(sql)` is the **open, generated-query** tool:
+# the agent's power (aggregation, joins, arbitrary set logic) and Day 15's
+# target. Both return the §5 evidence record `{ok, sql, columns, rows, row_count,
+# truncated, elapsed_ms, query_kind}` so the harness grades all four corpora
+# with **one** shape — and the trace can tell a parameterized answer (`fixed`)
+# from a generated one (`generated`).
 
 
-def _record_tool(name: str, kind: str,
-                 records: dict[str, dict[str, Any]]) -> Callable[[dict], ToolResult]:
+def _data_result(name: str, args: dict[str, Any], qr, *,
+                 query_kind: str) -> ToolResult:
+    """Wrap a `QueryResult` as a `ToolResult` — success or a typed observation.
+
+    A validator rejection is `{validation: "rejected", executed: false}`; a DB
+    refusal or bad query is `executed: true` with the engine's `error_kind`. Both
+    are *observations* the loop can repair against, never exceptions.
+    """
+    record = {**qr.as_dict(), "query_kind": query_kind}
+    if qr.ok:
+        return ToolResult.success(name, args=args, data=record, truncated=qr.truncated)
+    result = ToolResult.tool_error(
+        name, error_kind=qr.error_kind or ERROR_TOOL,
+        message=qr.error or "query failed", args=args, retryable=qr.retryable)
+    # The record survives the failure on purpose: a *rejected* query must still
+    # show `gen_sql` + `validation: rejected` + `executed: false` in the trace,
+    # or the §8 table cannot distinguish "the validator refused it" from "the
+    # database refused it".
+    result.data = record
+    return result
+
+
+def run_sql_schema(*, card: str | None = None) -> dict[str, Any]:
+    """The *generator's* description: the schema card is the tool's context.
+
+    The card rides in the description — a long, stable prefix — because a model
+    cannot query a column it was never told exists. Day 8 wrote stopword-lean
+    queries for a *scorer*, Day 11 wrote descriptions for a *chooser*; this is
+    the same discipline for a *generator*.
+    """
+    return {
+        "name": "run_saleor_sql",
+        "description": (
+            "Run ONE read-only SQL query against Saleor's Postgres database and "
+            "return columns + rows. Use it for 'how much / how many / which "
+            "rows' questions (aggregation, joins) that no text search can "
+            "answer. Ground every table and column in the schema card below, and "
+            "resolve business terms with the definitions as written. Only a "
+            "single SELECT/WITH statement is allowed.\n\n"
+            + (schema_card_text() if card is None else card)
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"sql": {"type": "string"}},
+            "required": ["sql"],
+        },
+    }
+
+
+def describe_schema_schema() -> dict[str, Any]:
+    return {
+        "name": "describe_saleor_schema",
+        "description": (
+            "Return one database table's purpose and columns (on-demand schema "
+            "expansion). Use it when the schema card's curated core subset is "
+            "not enough; it adds nothing outside the core tables."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"table": {"type": "string"}},
+            "required": ["table"],
+        },
+    }
+
+
+def _sql_tool(name: str, agent: DataAgent) -> Callable[[dict], ToolResult]:
     def fn(args: dict[str, Any]) -> ToolResult:
-        record = records.get(str(args["id"]))
-        if record is None:
+        return _data_result(name, args, agent.run(args["sql"]), query_kind="generated")
+    return fn
+
+
+def _schema_tool(name: str) -> Callable[[dict], ToolResult]:
+    def fn(args: dict[str, Any]) -> ToolResult:
+        entry = describe_table(args["table"])
+        if entry is None:
             return ToolResult.failure(
-                name, f"no such {kind} id: {args['id']!r}", args=args,
-                error_kind=ERROR_NO_DATA)
-        return ToolResult.success(name, data={**record, "pending_resolver": PENDING_RESOLVER},
-                                  pending_resolver=PENDING_RESOLVER)
+                name, f"unknown table {args['table']!r} (known: {table_names()})",
+                args=args, error_kind=ERROR_NO_DATA)
+        return ToolResult.success(name, args=args, data={
+            **entry, "dialect": DIALECT_NOTE, "definitions": GLOSSARY})
+    return fn
+
+
+def _resolver_tool(name: str, agent: DataAgent,
+                   method: str) -> Callable[[dict], ToolResult]:
+    def fn(args: dict[str, Any]) -> ToolResult:
+        return _data_result(name, args, getattr(agent, method)(args["id"]),
+                            query_kind="fixed")
     return fn
 
 
@@ -523,26 +592,30 @@ def code_retriever(gateway, store, *, alpha: float = 0.5) -> Retriever:
 
 def build_default_registry(*, doc: Retriever | None = None,
                            code: Retriever | None = None,
+                           data: DataAgent | None = None,
                            tau: float | None = None,
                            doc_tau: float | None = None,
                            code_tau: float | None = None,
                            k: int | None = None,
                            doc_budget: int = DEFAULT_DOC_BUDGET,
                            code_budget: int = DEFAULT_CODE_BUDGET,
-                           records: dict[str, dict[str, dict[str, Any]]] | None = None,
                            ) -> ToolRegistry:
-    """The five tools, registered with their schemas — Day 30's scenario set.
+    """The seven tools, registered with their schemas — Day 30's scenario set.
 
     τ is a property of the *corpus*, not of the registry: `doc_tau`/`code_tau`
     (both falling back to `tau`) let each gate keep the calibration its own
     store earned — a single shared τ would silently refuse one corpus's
     answerable questions the moment the other corpus's τ moved.
+
+    `data` is the §3/§5 seam: the offline seeded stub by default, the real
+    read-only Postgres store when `SALEOR_READONLY_DB_URL` is set. Passing it in
+    is how a suite pins a small row limit for the truncation fixture.
     """
     base_tau = tool_tau() if tau is None else tau
     doc_gate = base_tau if doc_tau is None else doc_tau
     code_gate = base_tau if code_tau is None else code_tau
     k_default = tool_top_k() if k is None else k
-    table = records or SEEDED_RECORDS
+    agent = data if data is not None else DataAgent(make_data_store())
     reg = ToolRegistry()
 
     def search_docs(args: dict[str, Any]) -> ToolResult:
@@ -567,16 +640,22 @@ def build_default_registry(*, doc: Retriever | None = None,
     reg.register("get_product",
                  _record_schema("get_product",
                                 "Look up a product by its id and return the "
-                                "product record (name, type, price, variants)."),
-                 _record_tool("get_product", "product", table["product"]))
+                                "product record (name, type, price, variants). "
+                                "A fixed, parameterized query — no SQL generated."),
+                 _resolver_tool("get_product", agent, "get_product"))
     reg.register("get_order",
                  _record_schema("get_order",
                                 "Look up an order by its id and return the order "
-                                "record (number, status, total, lines)."),
-                 _record_tool("get_order", "order", table["order"]))
+                                "record (number, status, total, lines). A fixed, "
+                                "parameterized query — no SQL generated."),
+                 _resolver_tool("get_order", agent, "get_order"))
     reg.register("get_customer",
                  _record_schema("get_customer",
                                 "Look up a customer by their id and return the "
-                                "customer record (email, order count)."),
-                 _record_tool("get_customer", "customer", table["customer"]))
+                                "customer record (email, order count). A fixed, "
+                                "parameterized query — no SQL generated."),
+                 _resolver_tool("get_customer", agent, "get_customer"))
+    reg.register("run_saleor_sql", run_sql_schema(), _sql_tool("run_saleor_sql", agent))
+    reg.register("describe_saleor_schema", describe_schema_schema(),
+                 _schema_tool("describe_saleor_schema"))
     return reg
