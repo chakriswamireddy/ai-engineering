@@ -19,10 +19,26 @@ The no-regression gate re-runs Day 11's `tools/tool_smoke.py` (T1…T7) as-is, i
 a subprocess, so "run_agent(max_steps=1) is Day 11" is asserted by re-running
 the unmodified Day 11 suite, not by trusting a copy of it. Day 7–10's fixture
 lines ride behind the tools inside that suite.
+
+    $ python tools/agent_smoke.py --live      # A1/A6/A7 against the real gateway
+
+`--live` answers the Day 12 `PENDING` line as early as the framing allows: it
+keeps *retrieval* on the same in-process stub stores (deterministic, free, the
+exact seam the suite above grades) and swaps the *chat* wire for the real gateway
+built from `.env` — so a real model must compose a multi-step investigation
+(follow an import it was never told to a second query, cite each step's evidence)
+or fail to. Whether it *composes* is a measured cell, not a hard gate (`measure`,
+never `check`); the follow is read from earlier evidence *text* (the map lives in
+a chunk's body, not only its id). The harness contract (valid args,
+`cited ⊆ ∪ observations`, a real exit) is hard-checked whatever the model does. A
+provider outage (free-tier `429`/empty completion) reports `[SKIP]` and exits **2**,
+so "could not measure" is never confused with "measured and wrong" (exit 1).
 """
 from __future__ import annotations
 
+import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -357,11 +373,204 @@ def no_regression_day11():
         print(proc.stdout[-2000:])
 
 
+# ------------------------------------------------------------- live (real chat)
+# The retrieval side stays on the in-process stub stores (the seam the MECH
+# suite grades); only the *chat* wire is real, so a real model must compose the
+# investigation or fail to. The composition cells are MEASURED, never gated.
+
+def build_live_gateway():
+    """Real gateway from `.env` — chat is the thing under test."""
+    from ai_os.config import build_gateway_from_env
+    gw = build_gateway_from_env()
+    if not any(getattr(p, "chat", None) for p in gw.providers):
+        raise SystemExit("no chat-capable provider in .env (LLM_PROVIDERS)")
+    return gw
+
+
+def live_probe(gw, tries: int = 3) -> bool:
+    print("\n== LIVE — probe the real gateway (one plain chat, no tools)")
+    err = "not attempted"
+    for attempt in range(1, tries + 1):
+        try:
+            c = gw.chat([{"role": "user",
+                          "content": "Reply with exactly the word ok."}], max_tokens=16)
+            if c.text and c.text.strip():
+                check("live gateway reachable", True, repr(c.text[:80]))
+                print(f"    model={c.model} provider={gw.last_provider} "
+                      f"attempts={gw.last_attempts}")
+                return True
+            err = "empty completion (no content returned)"
+        except Exception as e:
+            err = f"{e.__class__.__name__}: {e}"
+        if attempt < tries:
+            time.sleep(min(2.0 * attempt, 5.0))
+    skip("live gateway reachable — provider unavailable; re-run when it has quota", err)
+    return False
+
+
+def measure(label: str, cond: bool, detail: str = ""):
+    """A *measured* cell (Day 21's semantic verdict) — printed, never a gate.
+
+    The harness contract is hard-checked; whether a real model *composes* is the
+    thing being measured, so a weak model must be recorded, not turned into a
+    false harness failure.
+    """
+    print(f"[{'OK  ' if cond else 'MEAS'}] {label}" + (f"  ({detail})" if detail else ""))
+
+
+def skip(label: str, detail: str = ""):
+    """Not measured — provider/network unavailability, not a harness failure.
+
+    A free-tier model that returns an empty completion or 429s is an environment
+    fact, not a Day 12 defect; the run reports `SKIP` and exits 2 (incomplete), so
+    "could not measure" is never confused with "measured and wrong" (exit 1).
+    """
+    print(f"[{'SKIP'}] {label}" + (f"  ({detail})" if detail else ""))
+
+
+def _live_answer(res) -> None:
+    ans = (res.get("answer") or "").strip().replace("\n", " ")
+    print(f"    answer: {ans[:300]}")
+    if res.get("fabricated"):
+        print(f"    ⚠ fabricated ids: {res['fabricated']}")
+
+
+_SYM_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{3,}")
+
+
+def _ident_tokens(text: str) -> set[str]:
+    """Distinctive identifier-like tokens: underscored, camelCase, or long.
+
+    Filtering to these keeps generic words (`checkout`, `order`, `mutation`) out,
+    so a "follow" is a real symbol, not shared vocabulary.
+    """
+    return {t for t in _SYM_RE.findall(text or "")
+            if "_" in t or any(c.isupper() for c in t[1:]) or len(t) >= 14}
+
+
+def _step_evidence_text(reg, step) -> str:
+    """A step's evidence *text* — the map the model walks (re-executed, in-process).
+
+    The map lives in the returned chunks' bodies (a mutation's body names the
+    service it calls), not only in the `module#Symbol` ids, so this re-runs the
+    step's calls against the deterministic stub stores to read the text the model
+    actually saw.
+    """
+    chunks: list[str] = []
+    for c in step["calls"]:
+        args = c.get("args_parsed")
+        if not c.get("args_valid") or args is None:
+            continue
+        try:
+            r = reg.execute(c["name"], args)
+        except Exception:
+            continue
+        for ev in (r.evidence or []):
+            chunks.append(ev.get("text", ""))
+    return "\n".join(chunks)
+
+
+def live_a1_a6(reg, gw, doc_ids, code_ids):
+    print("\n== LIVE A1/A6 — real model composes a multi-step investigation (PENDING)")
+    question = "What happens after CheckoutComplete submits?"
+    res = run_agent(question, reg, gw, max_steps=5)
+    record_run("L-A1", res, "real model → ≥2 steps; cite ≥2 observations")
+
+    # The harness contract — hard checks (must hold whatever the model does).
+    corpora = doc_ids | code_ids
+    check("the real model used a tool at least once", res["tool_steps"] >= 1,
+          str(res["tool_steps"]))
+    check("every emitted call passed argument validation",
+          bool(res["tool_ledger"]) and all(r["valid"] for r in res["tool_ledger"]),
+          str(res["tool_ledger"]))
+    check("grounding over the transcript holds (cited ⊆ ∪ observations)",
+          res["cited_subset_retrieved"] and not res["fabricated"],
+          str(res["fabricated"]))
+    check("every observation ⊆ a known store (docs ∪ code)",
+          all(set(s["retrieved"]) <= corpora for s in res["steps"]),
+          str(sorted({i for s in res["steps"] for i in s["retrieved"]} - corpora)))
+    check("a legitimate exit fired",
+          res["termination_reason"] in AGENT_TERMINATIONS,
+          str(res["termination_reason"]))
+
+    # The composition cells — MEASURED (Day 21's verdict, recorded not gated).
+    # The claim under test: a later step's query names a symbol that appeared in
+    # an *earlier observation* — its evidence text or ids — and was NOT in the
+    # user's question. That is "read the map and walked it" rather than "re-asked
+    # the question". A symbol merely echoed from the question does not count.
+    q_tokens = _ident_tokens(question)
+    follows: list[str] = []
+    seen: set[str] = set()
+    for i, s in enumerate(res["steps"]):
+        query = " ".join(str((c.get("args_parsed") or {}).get("query", ""))
+                         for c in s["calls"])
+        fresh = _ident_tokens(query) - q_tokens
+        hits = sorted(t for t in fresh if t in seen)
+        if i > 0 and hits:
+            follows.append(f"step {i + 1} ← {hits}")
+        seen |= _ident_tokens(_step_evidence_text(reg, s))
+    measure("COMPOSITION: ≥2 steps, the second symbol never named by the user",
+            res["tool_steps"] >= 2, f"tool_steps={res['tool_steps']}")
+    measure("COMPOSITION: a later step's query names a symbol from earlier "
+            "evidence (and not from the question)", bool(follows),
+            "; ".join(follows) or "no such follow")
+    measure("COMPOSITION: the answer cites from ≥2 observations",
+            sum(1 for s in res["steps"] if s["cited"]) >= 2,
+            str([s["cited"] for s in res["steps"]]))
+    measure("A6 note: the answer cited ≥1 id-shaped symbol at all (grounding is "
+            "id-shaped; prose that ignores evidence is not caught)",
+            bool(res["citations"]), str(res["citations"][:4]))
+
+    for n, s in enumerate(res["steps"], start=1):
+        STEP_ROWS.append({
+            "run": "L-A1", "step": n, "expected": ["search_saleor_code"],
+            "chosen": ", ".join(s["tool_calls"]), "args_valid": s["args_valid"],
+            "result_ok": s["result_ok"], "refused": s["refused"],
+            "cum_steps": n, "cost_usd": res["ledger"]["cost_usd"],
+        })
+    _live_answer(res)
+    return res
+
+
+def live_a7_zero_tool(reg, gw):
+    print("\n== LIVE A7 — a real model answers a trivial question without tools")
+    res = run_agent(
+        "Reply with exactly the word ok and nothing else. Do not call any tool.",
+        reg, gw, max_steps=3)
+    record_run("L-A7", res, "no tool_calls → tool_steps: 0")
+    check("no tool call at all", res["tool_steps"] == 0 and res["tool_calls"] == [],
+          str(res["tool_calls"]))
+    check("termination is the natural exit", res["termination_reason"] == "answer",
+          str(res["termination_reason"]))
+    _live_answer(res)
+    return res
+
+
+def run_live(reg, doc_ids, code_ids) -> bool:
+    print("LIVE mode: real chat gateway from .env, retrieval on the stub stores "
+          "(the seam the MECH suite grades).")
+    gw = build_live_gateway()
+    print(f"providers: {[p.name for p in gw.providers]} / "
+          f"models: {[p.model for p in gw.providers]}")
+    if not live_probe(gw):
+        print("\nLIVE probe failed — not running A1/A6/A7 against a dead wire.")
+        return False
+    try:
+        live_a1_a6(reg, gw, doc_ids, code_ids)
+        live_a7_zero_tool(reg, gw)
+    except Exception as e:
+        skip(f"live A1/A6/A7 aborted by provider unavailability — "
+             f"{type(e).__name__}: {e}")
+        return False
+    return True
+
+
 # ----------------------------------------------------------------- reporting
 
-def render():
+def render(live: bool = False):
     print("\n" + "=" * 100)
-    print("   DAY 12 — THE LOOP AS A CONTRACT (§8 per-step + per-run tables)")
+    print("   DAY 12 — THE LOOP AS A CONTRACT (§8 per-step + per-run tables)"
+          + ("   [LIVE]" if live else ""))
     print("=" * 100)
     print(f"{'run':<6}{'step':<6}{'expected action':<34}{'tool chosen':<34}"
           f"{'args':<6}{'ok':<5}{'gate':<8}cum")
@@ -380,14 +589,44 @@ def render():
               f"{r['steps']:<7}{r['turns']:<7}{r['refusals']:<8}{r['rejections']:<8}"
               f"{str(r['truncated']):<7}${r['cost_usd']:.8f}")
     print("-" * 104)
-    print("The `expected action` vs `tool chosen` column is Day 11's recall@1 "
-          "harvested per step — stub-truth here, a real model's verdict Day 21.")
+    if live:
+        print("The `expected action` vs `tool chosen` column is Day 11's recall@1 "
+              "harvested per step — this run's verdict, by a real model over "
+              "OpenRouter. Retrieval stayed on the stub stores, so evidence rows "
+              "are the deterministic ones the suite grades. `[MEAS]` rows are the "
+              "composition cells (Day 21's), recorded not gated.")
+    else:
+        print("The `expected action` vs `tool chosen` column is Day 11's recall@1 "
+              "harvested per step — stub-truth here, a real model's verdict Day 21.")
     print("Termination reasons:")
     for k in ("answer", "max_steps", "budget", "gave_up"):
         print(f"  {k:<10} {AGENT_TERMINATIONS[k]}")
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--live", action="store_true",
+                    help="run A1/A6/A7 against the real chat gateway from .env "
+                         "(retrieval stays on the stub stores — the model is the "
+                         "thing under test)")
+    args = ap.parse_args()
+
+    if args.live:
+        reg, _gw_doc, _gw_code, doc_store, code_store = build_registry()
+        doc_ids = {c.doc_id for c in doc_store.chunks}
+        code_ids = {c.doc_id for c in code_store.chunks}
+        print(f"stores: {len(doc_store)} doc chunks (STUB) / {len(code_store)} "
+              f"code symbols (STUB)   registry: {', '.join(reg.names())}")
+        ok = run_live(reg, doc_ids, code_ids)
+        render(live=True)
+        if not ok:
+            print("\nLIVE RUN INCOMPLETE — the provider was unavailable (not a "
+                  "harness failure); re-run when the free model has quota.")
+            sys.exit(2)
+        print("\n" + ("ALL DAY 12 (LIVE) HARNESS CHECKS PASSED" if not FAILS
+                      else f"{FAILS} LIVE HARNESS CHECK(S) FAILED"))
+        sys.exit(1 if FAILS else 0)
+
     proc = None
     if not _stub_up():
         proc = subprocess.Popen([sys.executable, str(STUB)],
