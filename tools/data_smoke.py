@@ -214,7 +214,10 @@ def q4_empty(reg, gw, agent):
 def q5_readonly(reg, gw, agent):
     print("\n== Q5 — read-only enforced (two independent guards)")
     # Guard 1 — the validator, *before* execution.
-    reset(openai=["tc_d14_delete", "tc_d14_fix", "answer_d14_error"])
+    # Day 15 deliberate edit (recorded): the script's second entry is now
+    # `answer_d15_policy` — the DELETE is a *policy* rejection, so the loop stops
+    # instead of self-correcting, and the forced final turn reports the refusal.
+    reset(openai=["tc_d14_delete", "answer_d15_policy"])
     res = run_agent("Delete every order (oops)", reg, gw, max_steps=4)
     call = res["steps"][0]["calls"][0]
     check("the validator rejected the DELETE before execution",
@@ -222,8 +225,20 @@ def q5_readonly(reg, gw, agent):
           f"validation={call.get('validation')} executed={call.get('executed')}")
     check("the rejection is typed invalid_sql",
           call.get("error_kind") == ERROR_INVALID_SQL, str(call.get("error_kind")))
+    check("Day 15: the write is *classified* policy (not a mistake to fix)",
+          call.get("rejection_class") == "policy", str(call.get("rejection_class")))
+    check("Day 15: refused at parse by the write-head rule",
+          call.get("safety_stage") == "parse", str(call.get("safety_stage")))
     check("the generated DELETE is still recorded (visible, gradable)",
           "delete" in (call.get("gen_sql") or "").lower(), str(call.get("gen_sql")))
+    check("Day 15: the run STOPPED on the policy violation — no self-correction",
+          res["termination_reason"] == "policy" and res["policy_violations"] == 1
+          and res["tool_steps"] == 1,
+          f"term={res['termination_reason']} violations={res['policy_violations']} "
+          f"steps={res['tool_steps']}")
+    check("Day 15: the policy stop fabricated nothing",
+          not res["fabricated"] and res["asserted_subset_returned"],
+          str(res["asserted_unsupported"]))
     check("nothing was deleted (orders still 5)",
           agent.run("SELECT COUNT(*) FROM order_order").rows == [[5]])
 
