@@ -9,16 +9,27 @@ scripted:
 
     $ python tools/tool_smoke.py
 
+    $ python tools/tool_smoke.py --live       # T1–T3 against the real gateway
+
+`--live` answers the `PENDING` line as early as the day's framing allows: it
+keeps the *retrieval* side on the same in-process stub stores (deterministic,
+free, and the exact seam the suite above grades) and swaps the *chat* wire for
+the real gateway built from `.env` — so a real model must choose the right
+tool, spell valid arguments, and write a final answer grounded in the tool's
+evidence. That is Day 21's verdict on Day 11's plumbing, runnable any day a
+free key has quota.
+
 What is `MECH` here: the tool seam (schemas, validation, rejection-as-result,
 refusal-as-return-value, the single-turn cap), the evidence contract
 (`cited ⊆ retrieved` on the tool's result set), the answer contract (a
 fabricated `module#Symbol` is *caught*), the Day-6 empty-content sibling, and
 the Days 7–10 no-regression lines. What stays `PENDING`: whether a *real* model
-chooses the right tool and spells the right args — Day 21's benchmark on this
-plumbing.
+chooses the right tool and spells the right args — now answered per run via
+`--live`.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -138,7 +149,7 @@ def build_registry():
 
 
 def run(question: str, registry: ToolRegistry, gateway, *, expected_tool: str,
-        mode: str = "tool") -> dict:
+        mode: str = "tool", live: bool = False) -> dict:
     """One tool answer, recorded as a §8 row."""
     res = run_tool_answer(question, registry, gateway)
     chosen = res["tool_calls"][0]["name"] if res["tool_calls"] else None
@@ -155,7 +166,7 @@ def run(question: str, registry: ToolRegistry, gateway, *, expected_tool: str,
         "question": question, "expected_tool": expected_tool, "tool_chosen": chosen,
         "args_valid": valid, "evidence": res["evidence"],
         "gate": gate, "turns": res["turns"], "cost_usd": res["ledger"]["cost_usd"],
-        "mode": mode, "result": res,
+        "mode": mode, "live": live, "result": res,
     })
     return res
 
@@ -404,9 +415,128 @@ def tool_schemas(reg):
           not rejected.ok and "unknown tool" in (rejected.error or ""))
 
 
-def render_rows():
+def build_live_gateway():
+    """Real gateway from `.env` — chat is the thing under test."""
+    from ai_os.config import build_gateway_from_env
+    gw = build_gateway_from_env()
+    if not any(getattr(p, "chat", None) for p in gw.providers):
+        raise SystemExit("no chat-capable provider in .env (LLM_PROVIDERS)")
+    return gw
+
+
+def live_probe(gw):
+    print("\n== LIVE — probe the real gateway (one plain chat, no tools)")
+    try:
+        c = gw.chat([{"role": "user", "content": "Reply with exactly the word ok."}],
+                    max_tokens=16)
+    except Exception as e:
+        check("live gateway reachable", False,
+              f"{e.__class__.__name__}: {e} (quota? wrong key?)")
+        return False
+    check("live gateway reachable", bool(c.text and c.text.strip()),
+          repr((c.text or "")[:80]))
+    print(f"    model={c.model} provider={gw.last_provider} "
+          f"attempts={gw.last_attempts}")
+    return bool(c.text and c.text.strip())
+
+
+def _live_answer(res) -> None:
+    """Print the real model's final answer so grounding is readable."""
+    ans = (res.get("answer") or "").strip().replace("\n", " ")
+    print(f"    answer: {ans[:300]}")
+    if res.get("fabricated"):
+        print(f"    ⚠ fabricated ids: {res['fabricated']}")
+
+
+def live_t1_tool_selection_code(reg, gw, code_ids):
+    print("\n== LIVE T1 — real model picks search_saleor_code (stub retrieval)")
+    res = run("Where is checkout handled?", reg, gw,
+              expected_tool="search_saleor_code", live=True)
+    calls = res["tool_calls"]
+    check("the real model asked for search_saleor_code",
+          bool(calls) and calls[0]["name"] == "search_saleor_code", f"{calls}")
+    check("arguments were emitted as JSON and passed validation",
+          bool(res["tool_ledger"]) and all(r["valid"] for r in res["tool_ledger"]),
+          f"calls={calls} ledger={res['tool_ledger']}")
+    evidence = res["evidence"]
+    check("evidence cites the domain service (complete_checkout)",
+          "saleor/checkout/complete_checkout.py#complete_checkout" in evidence,
+          str(evidence))
+    check("evidence cites the mutation (CheckoutComplete) — split-brain double-hit",
+          "saleor/graphql/checkout/mutations/checkout_complete.py#CheckoutComplete"
+          in evidence, str(evidence))
+    check("evidence ⊆ the code store (cited ⊆ retrieved)",
+          set(evidence) <= code_ids, str(sorted(set(evidence) - code_ids)))
+    check("the answer is grounded in the tool's evidence (no fabrication)",
+          res["cited_subset_retrieved"] and not res["fabricated"],
+          f"fabricated={res['fabricated']} citations={res['citations']}")
+    check("two turns: tool turn + grounded answer turn", res["turns"] == 2,
+          str(res["turns"]))
+    _live_answer(res)
+    return res
+
+
+def live_t2_tool_selection_docs(reg, gw, doc_ids):
+    print("\n== LIVE T2 — real model picks search_saleor_docs (stub retrieval)")
+    res = run("What do the docs say about creating a checkout?", reg, gw,
+              expected_tool="search_saleor_docs", live=True)
+    check("the real model asked for search_saleor_docs",
+          bool(res["tool_calls"]) and res["tool_calls"][0]["name"] == "search_saleor_docs",
+          f"{res['tool_calls']}")
+    check("arguments passed validation",
+          bool(res["tool_ledger"]) and all(r["valid"] for r in res["tool_ledger"]),
+          f"{res['tool_ledger']}")
+    check("every result ⊆ the doc store",
+          bool(res["evidence"]) and set(res["evidence"]) <= doc_ids,
+          str(sorted(set(res["evidence"]) - doc_ids)))
+    check("the answer is grounded in the doc evidence (no fabrication)",
+          res["cited_subset_retrieved"] and not res["fabricated"],
+          f"fabricated={res['fabricated']} citations={res['citations']}")
+    _live_answer(res)
+    return res
+
+
+def live_t3_data_tool(reg, gw):
+    print("\n== LIVE T3 — real model drives the data tool (get_order)")
+    res = run("Fetch order 1 and tell me its status and total", reg, gw,
+              expected_tool="get_order", live=True)
+    check("the real model asked for get_order",
+          bool(res["tool_calls"]) and res["tool_calls"][0]["name"] == "get_order",
+          f"{res['tool_calls']}")
+    row = res["tool_ledger"][0] if res["tool_ledger"] else {}
+    check("the id argument was spelled valid (string id)",
+          bool(row) and row["valid"] and row["ok"], str(row))
+    check("the seeded record came back",
+          isinstance(row.get("data"), dict) and row["data"].get("number") == "1001",
+          str(row.get("data")))
+    check("the fixture says so: pending_resolver = day14",
+          bool(row.get("data")) and row["data"].get("pending_resolver") == "day14")
+    check("the answer used the record (status/total)",
+          res["cited_subset_retrieved"] and not res["fabricated"]
+          and any(k in (res["answer"] or "") for k in ("UNFULFILLED", "19.99", "1001")),
+          f"fabricated={res['fabricated']} answer={res['answer']!r}")
+    _live_answer(res)
+    return res
+
+
+def run_live(reg, doc_ids, code_ids) -> None:
+    print(f"LIVE mode: real chat gateway from .env, retrieval on the stub "
+          f"stores (the seam the MECH suite grades). Tools: {reg.names()}")
+    gw = build_live_gateway()
+    print(f"providers: {[p.name for p in gw.providers]} / "
+          f"models: {[p.model for p in gw.providers]}")
+    if not live_probe(gw):
+        print("\nLIVE probe failed — not running T1–T3 against a dead wire.")
+        return
+    live_t1_tool_selection_code(reg, gw, code_ids)
+    live_t2_tool_selection_docs(reg, gw, doc_ids)
+    live_t3_data_tool(reg, gw)
+
+
+def render_rows(live: bool = False):
     print("\n" + "=" * 96)
-    print("   DAY 11 — TOOL CALLS AS A CONTRACT (§8 rule-4 table)")
+    print("   DAY 11 — TOOL CALLS AS A CONTRACT (§8 rule-4 table)"
+          + ("   [LIVE]" if live else ""))
     print("=" * 96)
     print(f"{'question':<40}{'expected tool':<20}{'chosen':<20}{'args':<9}"
           f"{'gate':<9}{'turns':<7}cost")
@@ -418,8 +548,14 @@ def render_rows():
         print(f"{q:<40}{r['expected_tool']:<20}{chosen:<20}{args:<9}"
               f"{r['gate']:<9}{r['turns']:<7}${r['cost_usd']:.8f}")
     print("-" * 104)
-    print("The `chosen` vs `expected tool` column is Day 11's recall@1 for tool "
-          "selection — stub-truth here, a real model's verdict Day 21.")
+    if live:
+        print("The `chosen` vs `expected tool` column is Day 11's recall@1 for "
+              "tool selection — this run's verdict, by a real model over "
+              "OpenRouter. Retrieval stayed on the stub stores, so evidence "
+              "rows are the deterministic ones the suite grades.")
+    else:
+        print("The `chosen` vs `expected tool` column is Day 11's recall@1 for "
+              "tool selection — stub-truth here, a real model's verdict Day 21.")
 
 
 # --------------------------------------------------------------------- main
@@ -434,8 +570,24 @@ def _stub_up() -> bool:
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--live", action="store_true",
+                    help="run T1–T3 against the real chat gateway from .env "
+                         "(retrieval stays on the stub stores — the model is "
+                         "the thing under test)")
+    args = ap.parse_args()
+
     proc = None
-    if not _stub_up():
+    if args.live:
+        reg, gw_doc, gw_code, doc_store, code_store = build_registry()
+        doc_ids = {c.doc_id for c in doc_store.chunks}
+        code_ids = {c.doc_id for c in code_store.chunks}
+        run_live(reg, doc_ids, code_ids)
+        render_rows(live=True)
+        print("\n" + ("ALL DAY 11 (LIVE) CHECKS PASSED" if not FAILS
+                      else f"{FAILS} LIVE CHECK(S) FAILED"))
+        sys.exit(1 if FAILS else 0)
+    elif not _stub_up():
         proc = subprocess.Popen([sys.executable, str(STUB)],
                                 stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL)
