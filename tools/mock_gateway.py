@@ -47,6 +47,37 @@ CHUNKS = ANSWER.split()
 
 DEFAULTS: dict[str, list[str]] = {"openai": ["ok"], "anthropic": ["ok"]}
 
+# Day 14 — the *generated* SQL the stub "model" emits. The offline store is
+# seeded with Saleor's core tables (ai_os/data.py's SEED_SQL), "today" is
+# 2026-09-25 so "last month" is 2026-08, and these queries are the ones a
+# grounded generator would write from the schema card. Kept here (not in the
+# suite) so the same SQL can be asserted on by both the fixture and the table.
+D14_SQL_REVENUE = (
+    "SELECT p.name AS product, SUM(l.total_price_net_amount) AS revenue\n"
+    "FROM order_orderline l\n"
+    "JOIN order_order o ON o.id = l.order_id\n"
+    "JOIN product_productvariant v ON v.id = l.variant_id\n"
+    "JOIN product_product p ON p.id = v.product_id\n"
+    "WHERE o.status <> 'DRAFT'\n"
+    "  AND o.created_at >= '2026-08-01' AND o.created_at < '2026-09-01'\n"
+    "GROUP BY p.name\n"
+    "ORDER BY revenue DESC"
+)
+D14_SQL_CUSTOMERS = (
+    "SELECT u.email AS customer, COUNT(o.id) AS orders\n"
+    "FROM account_user u\n"
+    "JOIN order_order o ON o.user_id = u.id\n"
+    "GROUP BY u.email\n"
+    "ORDER BY orders DESC"
+)
+D14_SQL_EMPTY = ("SELECT id, status FROM order_order "
+                 "WHERE created_at >= '2099-01-01'")
+D14_SQL_BAD_COLUMN = "SELECT order_total FROM order_order"
+D14_SQL_FIX = ("SELECT COUNT(*) AS orders FROM order_order "
+               "WHERE status <> 'DRAFT'")
+D14_SQL_LINES = "SELECT id, product_name, quantity FROM order_orderline"
+D14_SQL_DELETE = "DELETE FROM order_order"
+
 # Day 11 — scripted tool-call scenarios. The stub grows a voice: a script entry
 # that names a tool scenario makes the model *ask* instead of type, and the
 # next entry serves the answer turn (a `tool` role message cannot get one
@@ -122,6 +153,19 @@ TOOL_SCENARIOS: dict[str, list[tuple[str, dict | None]]] = {
                              {"field": "order_created_by_checkout", "value": True,
                               "subject":
                                   "saleor/order/order_created.py#OrderCreated"})],
+    # Day 14 — the data tools. `run_saleor_sql` takes the *generated* SQL the
+    # model wrote (the artifact the trace grades and Day 15 attacks); the
+    # parameterized tools complete the Day 11 stubs against the real store.
+    "tc_d14_revenue": [("run_saleor_sql", {"sql": D14_SQL_REVENUE})],
+    "tc_d14_customers": [("run_saleor_sql", {"sql": D14_SQL_CUSTOMERS})],
+    "tc_d14_empty": [("run_saleor_sql", {"sql": D14_SQL_EMPTY})],
+    "tc_d14_bad_column": [("run_saleor_sql", {"sql": D14_SQL_BAD_COLUMN})],
+    "tc_d14_fix": [("run_saleor_sql", {"sql": D14_SQL_FIX})],
+    "tc_d14_lines": [("run_saleor_sql", {"sql": D14_SQL_LINES})],
+    "tc_d14_delete": [("run_saleor_sql", {"sql": D14_SQL_DELETE})],
+    "tc_d14_order": [("get_order", {"id": "1"})],
+    "tc_d14_customer": [("get_customer", {"id": "1"})],
+    "tc_d14_schema": [("describe_saleor_schema", {"table": "order_order"})],
 }
 
 # Day 11 — scripted *answer* texts. The grounded one cites the tool's evidence;
@@ -204,6 +248,34 @@ ANSWER_SCENARIOS: dict[str, str] = {
         "while OrderCreated (saleor/order/order_created.py#OrderCreated) implies "
         "it does not. I am citing both sources and stating the conflict rather "
         "than picking a side."
+    ),
+    # Day 14 — answers grounded in the *result set*. Every number here is a
+    # returned cell or a stated aggregate, so `asserted ⊆ returned` is ok; the
+    # fabricated twin asserts a headline the rows never produced.
+    "answer_d14_revenue": (
+        "Desk Lamp led with 96.0 net revenue, then Blue T-Shirt at 59.97 and "
+        "Coffee Mug at 38.0 — across 3 products in the window."
+    ),
+    "answer_d14_customers": (
+        "ada@example.com and grace@example.com each placed 2 orders; "
+        "alan@example.com placed 1."
+    ),
+    "answer_d14_empty": (
+        "There were no orders in 2099 — the query matched 0 rows."
+    ),
+    "answer_d14_truncated": (
+        "The result is truncated: these are the first 3 order lines and more "
+        "rows exist beyond the page."
+    ),
+    "answer_d14_error": (
+        "The query failed because that column does not exist, so there is no "
+        "result to report."
+    ),
+    "answer_d14_orders": (
+        "Order 1 is UNFULFILLED in USD; its gross total is 59.38 with 2 lines."
+    ),
+    "answer_d14_fabricated": (
+        "Revenue for the period was roughly 250000 in total."
     ),
 }
 
