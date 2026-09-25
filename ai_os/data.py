@@ -24,7 +24,10 @@ Three decisions carry the module:
    offline store, `default_transaction_read_only` on Postgres); layer 3 is the
    platform's existing **`saleor_read_only` role** (`replica_user.sql`), which
    has no `INSERT`/`UPDATE`/`DELETE` grant to exercise. Every layer fails
-   closed, and the cheapest check runs first.
+   closed, and the cheapest check runs first. Day 15 hardens layer 1 into a
+   real allow-list parser + policy (`ai_os/sql_safety.py`) and adds the missing
+   *server-side* timeout beside Day 13's client wall; layer 3 stays the total
+   guarantee, and the parser stays best-effort.
 3. **The store is a seam, not a driver.** Two backends implement one interface:
    `SqliteDataStore` (stdlib, seeded, in-memory — the offline `MECH` engine) and
    `PostgresDataStore` (lazy `psycopg` — the real thing behind
@@ -47,12 +50,15 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from ai_os import sql_safety
+from ai_os.sql_safety import Policy, SafeSql, load_policy
+
 # --------------------------------------------------------------- config knobs
 
 DEFAULT_ROW_LIMIT = 100         # a page, never the whole table (Day 15 adds cost guards)
 DEFAULT_SCHEMA_BUDGET = 4000    # chars of schema card (Day 6's budget reflex, on a schema)
 READONLY_URL_ENV = "SALEOR_READONLY_DB_URL"     # beside Day 4's DATABASE_URL
-DEFAULT_STATEMENT_TIMEOUT_MS = 5000             # Postgres-side wall; Day 13's wall is the outer one
+DEFAULT_STATEMENT_TIMEOUT_MS = 2000             # Postgres-side wall; Day 13's wall is the outer one
 
 
 def _env_int(name: str, default: int) -> int:
@@ -127,6 +133,16 @@ class QueryResult:
     error: str | None = None
     error_kind: str | None = None
     retryable: bool = False
+    # Day 15 — the safety layer's columns. `rejection_class` is the load-bearing
+    # one (the loop routes on it); `stage` says *where* the choke point refused;
+    # `executed_sql` is the normalized + LIMIT-rewritten statement actually run
+    # (absent when it equals `sql`); `cost_estimate`/`statement_timeout_ms` make
+    # the resource guards observable.
+    rejection_class: str | None = None
+    stage: str | None = None
+    executed_sql: str | None = None
+    cost_estimate: float | None = None
+    statement_timeout_ms: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -143,16 +159,36 @@ class QueryResult:
             out["error_kind"] = self.error_kind
         if self.retryable:
             out["retryable"] = True
+        if self.rejection_class:
+            out["rejection_class"] = self.rejection_class
+        if self.stage:
+            out["stage"] = self.stage
+        if self.executed_sql:
+            out["executed_sql"] = self.executed_sql
+        if self.cost_estimate is not None:
+            out["cost_estimate"] = self.cost_estimate
+        if self.statement_timeout_ms is not None:
+            out["statement_timeout_ms"] = self.statement_timeout_ms
         return out
 
 
 def failure(sql: str, *, error_kind: str, message: str,
             retryable: bool = False, validation: str = "select-only",
-            executed: bool = False) -> QueryResult:
-    """A typed data failure — an *observation*, never an exception."""
+            executed: bool = False, rejection_class: str | None = None,
+            stage: str | None = None,
+            statement_timeout_ms: int | None = None) -> QueryResult:
+    """A typed data failure — an *observation*, never an exception.
+
+    `rejection_class` is derived from `error_kind` when not given
+    (`ai_os.sql_safety.classify`), so a `timeout`/`policy_violation` cannot slip
+    into the *repairable* path by forgetting a keyword argument.
+    """
     return QueryResult(ok=False, sql=sql, validation=validation,
                        executed=executed, row_count=0, error=message,
-                       error_kind=error_kind, retryable=retryable)
+                       error_kind=error_kind, retryable=retryable,
+                       rejection_class=(rejection_class
+                                        or sql_safety.classify(error_kind)),
+                       stage=stage, statement_timeout_ms=statement_timeout_ms)
 
 
 def sql_error_kind(exc: BaseException) -> str:
@@ -411,6 +447,7 @@ class SqliteDataStore:
     """
 
     dialect = "postgres"        # the *card's* dialect; the stub emulates the core subset
+    statement_timeout_ms: int | None = None     # sqlite has no server-side wall
 
     def __init__(self, *, row_limit: int | None = None, seed: bool = True) -> None:
         self.row_limit = row_limit_from_env() if row_limit is None else max(1, row_limit)
@@ -475,7 +512,9 @@ class PostgresDataStore:
     dialect = "postgres"
 
     def __init__(self, url: str, *, row_limit: int | None = None,
-                 statement_timeout_ms: int = DEFAULT_STATEMENT_TIMEOUT_MS) -> None:
+                 statement_timeout_ms: int = DEFAULT_STATEMENT_TIMEOUT_MS,
+                 lock_timeout_ms: int = 1000,
+                 idle_in_transaction_session_timeout_ms: int = 5000) -> None:
         try:
             import psycopg                      # noqa: PLC0415 — lazy: offline suites skip it
         except ImportError as exc:              # pragma: no cover — exercised only with a live DB
@@ -484,12 +523,36 @@ class PostgresDataStore:
                 "(pip install 'psycopg[binary]') — the offline stub needs no driver."
             ) from exc
         self.row_limit = row_limit_from_env() if row_limit is None else max(1, row_limit)
+        self.statement_timeout_ms = int(statement_timeout_ms)
         self._psycopg = psycopg
         self._conn = psycopg.connect(url, autocommit=False)
         with self._conn.cursor() as cur:
+            # Day 15 §6 — the *server-side* half of the timeout story. Day 13's
+            # client wall abandons a slow call; these settings make the *server*
+            # stop the work, which is the half a client timeout cannot do.
             cur.execute("SET default_transaction_read_only = on")    # layer 2
-            cur.execute(f"SET statement_timeout = {int(statement_timeout_ms)}")
+            cur.execute(f"SET statement_timeout = {self.statement_timeout_ms}")
+            cur.execute(f"SET lock_timeout = {int(lock_timeout_ms)}")
+            cur.execute("SET idle_in_transaction_session_timeout = "
+                        f"{int(idle_in_transaction_session_timeout_ms)}")
         self.queries = 0
+
+    def explain_cost(self, sql: str) -> float | None:
+        """The real §6 cost pre-check: `EXPLAIN (FORMAT JSON)`'s `Total Cost`.
+
+        A *heuristic* like every cost estimate — the server timeout remains the
+        certain bound behind it — but a real plan beats the offline shape guess.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute("EXPLAIN (FORMAT JSON) " + sql)
+            row = cur.fetchone()
+        self._conn.rollback()
+        plan = row[0] if row else None
+        if isinstance(plan, list) and plan:
+            plan = plan[0]
+        if isinstance(plan, dict):
+            return float((plan.get("Plan") or {}).get("Total Cost", 0.0))
+        return None
 
     def query(self, sql: str, *, row_limit: int | None = None) -> QueryResult:
         limit = self.row_limit if row_limit is None else max(1, row_limit)
@@ -516,10 +579,17 @@ class PostgresDataStore:
             elapsed = (time.monotonic() - started) * 1000
             kind = sql_error_kind(exc)
             if "cancel" in f"{exc}".lower() or "timeout" in f"{exc}".lower():
+                # §6 — the server killed a runaway statement. A *policy*-class
+                # resource rejection (not retryable: re-issuing the same runaway
+                # query is exactly the loop helping itself around the guard).
                 return failure(sql, error_kind="timeout",
                                message=f"query exceeded statement_timeout: {exc}",
-                               retryable=True)
-            return failure(sql, error_kind=kind, message=f"database error: {exc}")
+                               retryable=False, executed=True,
+                               stage=sql_safety.STAGE_EXECUTE,
+                               statement_timeout_ms=self.statement_timeout_ms)
+            return failure(sql, error_kind=kind, message=f"database error: {exc}",
+                           executed=True, stage=sql_safety.STAGE_EXECUTE,
+                           statement_timeout_ms=self.statement_timeout_ms)
 
     def scalar(self, sql: str) -> Any:
         cur = self._conn.cursor()
@@ -539,19 +609,56 @@ class DataAgent:
     wall, at the call, so the trace can say *which* query hung and with what SQL.
     """
 
-    def __init__(self, store, *, row_limit: int | None = None) -> None:
+    def __init__(self, store, *, row_limit: int | None = None,
+                 policy: Policy | None = None) -> None:
         self.store = store
         self.row_limit = store.row_limit if row_limit is None else max(1, row_limit)
+        # §5 — the policy is config, loaded from policy.yaml (or $SALEOR_SQL_POLICY).
+        # The cost pre-check prefers the store's real EXPLAIN when it has one.
+        self.policy = policy if policy is not None else load_policy()
+        self.safety = SafeSql(
+            self.policy,
+            explain_cost=getattr(store, "explain_cost", None))
 
     def run(self, sql: str, *, row_limit: int | None = None,
             validate: bool = True) -> QueryResult:
-        if validate:
-            ok, error, kind = validate_readonly(sql)
-            if not ok:
-                return failure(sql, error_kind=kind or ERROR_INVALID_SQL,
-                               message=error or "rejected", validation="rejected",
-                               executed=False)
-        return self.store.query(sql, row_limit=row_limit or self.row_limit)
+        """The §3 choke point: normalize → parse → policy → cost → rewrite → execute.
+
+        `validate=False` skips the layer entirely — the escape hatch Day 14's Q5
+        uses to prove the *engine* (layer 2) refuses a write that bypasses the
+        layer-1 rejection. Nothing else should call it.
+        """
+        limit = min(self.row_limit if row_limit is None else max(1, row_limit),
+                    max(1, self.policy.row_limit))
+        if not validate:
+            return self.store.query(sql, row_limit=limit)
+
+        verdict = self.safety.inspect(sql)
+        if not verdict.ok:
+            # A pre-execution refusal: `executed` stays False, and the *raw*
+            # generated SQL is preserved on the record so the §8 attack table can
+            # show what the model asked for. `validation: "rejected"` is the
+            # Day 14 column; `rejection_class` is the Day 15 one.
+            return failure(sql, error_kind=verdict.error_kind or ERROR_INVALID_SQL,
+                           message=verdict.message or "rejected",
+                           validation="rejected", executed=False,
+                           rejection_class=verdict.rejection_class,
+                           stage=verdict.stage)
+
+        executed_sql = self.safety.rewrite(verdict, row_limit=limit)
+        result = self.store.query(executed_sql, row_limit=limit)
+        # `sql` stays the artifact the *model* wrote (the trace's `gen_sql`); the
+        # normalized + LIMIT-rewritten form is recorded separately, so "what was
+        # asked" and "what ran" cannot be confused.
+        result.sql = sql
+        if executed_sql != sql:
+            result.executed_sql = executed_sql
+        result.stage = sql_safety.STAGE_EXECUTE
+        result.cost_estimate = verdict.cost_estimate
+        result.statement_timeout_ms = getattr(self.store, "statement_timeout_ms", None)
+        if result.error_kind:
+            result.rejection_class = sql_safety.classify(result.error_kind)
+        return result
 
     # --------------------------------------------------- parameterized resolvers
     # Safe by construction: one fixed query, one validated `id`, zero generation.
