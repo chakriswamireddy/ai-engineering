@@ -1,4 +1,4 @@
-# ai-layer — Days 4–12: Gateway → Search → RAG → Code RAG → Tool Calling → Agent Loop
+# ai-layer — Days 4–15: Gateway → Search → RAG → Code RAG → Tools → Loop → Data → Safe SQL
 
 A reusable AI layer built in layers:
 
@@ -31,6 +31,23 @@ A reusable AI layer built in layers:
    record **per step**, and termination gains two exits beside the natural one
    (`max_steps`, budget) plus `gave_up`. `run_tool_answer` survives as
    `run_agent(max_steps=1)`, so Day 11's tests stay green by construction.
+8. **Day 13 — Agent Failure Modes**: the loop's negative space becomes a
+   **taxonomy with an owner and a guard each** — a wall-clock **timeout** on one
+   tool call, a **state fingerprint** that names `no_progress`/`oscillation`
+   *before* the step cap, a bounded, **disclosed** fallback ladder, and a
+   contradiction detector; `fabricated? = no` on every row.
+9. **Day 14 — Data Agent**: a third corpus behind the same harness — the
+   **read-only** Saleor data seam (`run_saleor_sql`, `describe_saleor_schema`,
+   fixed parameterized resolvers), the schema card + business glossary, and the
+   invariant **`asserted ⊆ returned`**. The pipeline *is* the loop; the model
+   generates SQL as a tool argument, so it stays visible and gradable.
+10. **Day 15 — Safe Text-to-SQL**: the seed becomes a **safe SQL execution
+    layer** — an ordered choke point (`normalize → parse → policy → cost →
+    rewrite → execute`) with an **allow-list parser** (not a deny-list), a
+    reviewable `policy.yaml` (table allow, PII column deny, enforced glossary),
+    a shape-aware `LIMIT`, a **server-side** `statement_timeout`, and the day's
+    sharpest idea, **two rejection classes**: a `repairable` error invites a
+    fixed retry, a `policy` error **stops the run** and is never self-corrected.
 
 ```
 Application
@@ -68,9 +85,12 @@ raw HTTP via `urllib`.
 | `ai_os/code_questions.yaml` | day 10: the pre-registered code fixtures (CA1–CE1), asserting `module#Symbol` sets |
 | `ai_os/server.py` | FastAPI: `/chat`, `/chat/stream`, `/rag` (`corpus="docs"｜"code"`), `/ledger`, `/health` |
 | `ai_os/tools.py` | day 11: `ToolRegistry` (schemas/validation/dispatch), `ToolResult`, the five tools, the hand-rolled JSON-Schema subset |
+| `ai_os/sql_safety.py` | day 15: the safe SQL choke point — `normalize`, the allow-list `parse_readonly` grammar, `Policy` (from `policy.yaml`), the cost pre-check, the shape-aware `rewrite_limit`, and `classify()` (repairable vs policy) |
+| `policy.yaml` | day 15: the reviewable allow/deny document — statement heads, `tables_allow`, PII `columns_deny`, the enforced `definitions`, and the resource caps (all config, not code) |
 | `ai_os/agent.py` | day 11/12: `run_tool_answer` (one tool turn → grounded answer) + `run_agent` — the loop: transcript-as-state, three exits + `gave_up`, per-step observations; `cited ⊆ retrieved` over the accumulated transcript; `REASONING_PROMPT` is the reasoning-turn system prompt |
-| `tools/mock_gateway.py` | scripted dual-provider stub `:8700`/`:8701` (chat, embeddings, **and tool_calls** scenarios) |
+| `tools/mock_gateway.py` | scripted dual-provider stub `:8700`/`:8701` (chat, embeddings, **tool_calls** scenarios: `tc_d12_*`/`tc_d13_*`/`tc_d14_*`/`tc_d15_*`) |
 | `tools/tool_smoke.py` | day 11: T1–T7 offline suite (selection, validation matrix, refusal, cap, dialect parity, no-regression) |
+| `tools/sql_attack_smoke.py` | day 15: X1–X11 offline attack set (parser, policy, PII, cost, LIMIT, the two rejection classes) + the `Wrote? = no` invariant + the Days 11–14 no-regression re-run |
 | `tools/agent_smoke.py` | day 12: A1–A8 offline suite (loop, three exits + `gave_up`, depth-1 = Day 11, parallel observations, grounding over the transcript, cost shape, T1–T7 re-run); `--live` measures real-model composition against the real gateway |
 | `tools/gateway_smoke.py` | day 4 deliberate-failure suite + token economics |
 | `tools/build_rag_store.py` | embed a `corpus/` of markdown → `data/store.json` |
@@ -142,6 +162,9 @@ python tools/retrieval_day9.py --stub   # day 9 evidence pipeline (ΣΔMRR +1.00
 python tools/retrieval_day10.py --stub  # day 10 doc-vs-code (code 6/6, doc 9/9)
 python tools/tool_smoke.py              # day 11 T1–T7 (tool calls, validation, cap)
 python tools/agent_smoke.py             # day 12 A1–A8 (loop, exits + gave_up, depth-1, grounding over transcript)
+python tools/failure_smoke.py           # day 13 F1–F9 (guards, the failure taxonomy, fabricated? = no)
+python tools/data_smoke.py              # day 14 Q1–Q8 (read-only guards + asserted ⊆ returned)
+python tools/sql_attack_smoke.py        # day 15 X1–X11 (attack set + control; Wrote? = no) + the Days 11–14 re-run
 ```
 
 The stub serves both providers on `:8700` (OpenAI) and `:8701` (Anthropic)
@@ -239,6 +262,7 @@ and exits 2 rather than a false FAIL.
 | `SALEOR_READONLY_DB_URL` | unset | day 14: the `saleor_read_only` DSN; unset → the offline seeded sqlite stub |
 | `SALEOR_SQL_ROW_LIMIT` | `100` | day 14: rows per data query (truncation is reported) |
 | `SALEOR_SQL_SCHEMA_BUDGET` | `4000` | day 14: chars of schema card (budget-clamped, cut marked) |
+| `SALEOR_SQL_POLICY` | `policy.yaml` | day 15: the allow/deny document the safe SQL layer enforces |
 
 Omitted keys are a startup error in `build_gateway_from_env` (fail fast, not a
 runtime 401 surprise). Embedding model is passed per-provider, so the key lives
@@ -295,3 +319,15 @@ with the provider config it belongs to.
   `python tools/data_smoke.py` (Q1–Q8: the two read-only guards, the schema card,
   measured truncation, and the invariant proven both ways). A data answer costs
   **0 embeds + 2 chats** — exact set logic, no vectors.
+- Day 15 adds the safe SQL execution layer: `ai_os/sql_safety.py` (the ordered
+  choke point — `normalize`, an **allow-list** `parse_readonly` grammar, `Policy`,
+  the cost pre-check, the shape-aware `LIMIT`, and `classify()`), `policy.yaml`
+  (the allow/deny document), the **server-side** `statement_timeout` +
+  lock/idle timeouts on the Postgres seam, and the **two rejection classes**
+  (`repairable` → the loop may fix it; `policy` → `policy_violations`, the run
+  stops, no self-correction). The guarantee is still the `saleor_read_only`
+  **role**; the parser/policy/cost guards are defense-in-depth. See
+  `docs/concepts/safe-sql.md`, `docs/evaluations/sql-safety-day15.md`, and
+  `python tools/sql_attack_smoke.py` (X1–X11: `Wrote? = no` on every attack row,
+  the X11 control passes, and Days 11–14 re-run unchanged). A rejected attack
+  costs **0 DB execution, 0 chats, 0 embeds**.

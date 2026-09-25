@@ -32,6 +32,7 @@ Updated: 2026-09-25
 | 12 | Agent Loop | PARTIAL (all MECH green offline; A1–A8 + the `gave_up` bound + the depth-1 line + the cost shape; `--live` real-model *composition* **verified** — the free model walks the map with the reasoning prompt; Day 21 rules cross-model strength) | `ai_os/agent.py` (`run_agent`, `REASONING_PROMPT`), `ai_os/trace.py` (`step_trace`, `grounding_over_transcript`), `tools/mock_gateway.py` (multi-step `tc_*`/`answer_*`), `tools/agent_smoke.py` (`--live`), `docs/concepts/agent-loop.md`, `docs/evaluations/agent-day12.md` |
 | 13 | Agent Failure Modes | PARTIAL (all MECH green offline; F1–F9 with `fabricated? = no` on every row + the timeout wall on an injected clock + the fingerprint firing before the cap + the disclosed fallback ladder + the contradiction flag with its two negative twins; A1–A8 / T1–T7 re-run through the guarded loop; real-model *tripping* and contradiction *adjudication* `PENDING` Day 21, real latency `PENDING` Day 14) | `ai_os/tools.py` (`ToolError`, `error_kind` taxonomy, `REJECTION_KINDS`/`TOOL_ERROR_KINDS`), `ai_os/agent.py` (`execute_bounded`, the fingerprint, the fallback ladder, `_derive_failure_kind`), `ai_os/trace.py` (`fingerprint`/`detect_repeat`/`detect_oscillation`/`contradiction_rows`/`contradiction_coverage`), `tools/mock_gateway.py` (`tc_d13_*`), `tools/failure_smoke.py`, `docs/concepts/agent-failure-modes.md`, `docs/evaluations/failure-day13.md` |
 | 14 | Data Agent | PARTIAL (all MECH green offline; Q1–Q8 with **`asserted ⊆ returned = ok` on every answered row** (the fabricated twin excepted) + the **two independent read-only guards** (validator rejects before execution; the engine refuses a bypassed write) + the schema card (DB schema, not `schema.graphql`) + row-limit/truncation + `no_data` as a finding + the `unknown_column` repair; A1–A8 / T1–T7 / F1–F9 re-run through the same harness; real-model *SQL generation + grounding* `PENDING` Day 21, real Postgres latency/schema reconciliation `PENDING` a live role) | `ai_os/data.py` (new), `ai_os/tools.py` (`run_saleor_sql`, `describe_saleor_schema`, real resolvers), `ai_os/trace.py`/`ai_os/agent.py` (data columns + the invariant), `tools/data_smoke.py`, `tools/mock_gateway.py` (`tc_d14_*`/`answer_d14_*`), `docs/concepts/text-to-sql.md`, `docs/evaluations/data-day14.md` |
+| 15 | Safe Text-to-SQL | PARTIAL (all MECH green offline; X1–X11 with **`Wrote? = no` on every attack row** — the DB byte-for-byte unchanged — and **`X11 false-reject? = no`**; the allow-list parser (not a deny-list), the policy (table allow / PII column deny / enforced glossary), single-statement + homoglyph normalization, the **two rejection classes** with `policy_violations` stopping the run on a policy hit, the cost pre-check, the shape-aware `LIMIT`, and the *server-side* `statement_timeout` (proven offline by its mapping); Q1–Q8 / A1–A8 / T1–T7 / F1–F9 re-run unchanged through the hardened executor; **X10's real-model behaviour `PENDING` Day 25/26 + Day 21, parser soundness `PENDING` long-term hardening, real Postgres timeout/`EXPLAIN` `PENDING` a live role**) | `ai_os/sql_safety.py` (new), `policy.yaml` (new), `ai_os/data.py` (server timeouts + safety routing + `rejection_class`), `ai_os/tools.py` (`ToolResult.rejection_class`), `ai_os/trace.py` (safety columns), `ai_os/agent.py` (the policy stop), `tools/sql_attack_smoke.py` (new), `tools/mock_gateway.py` (`tc_d15_*`/`answer_d15_*`), `docs/concepts/safe-sql.md`, `docs/evaluations/sql-safety-day15.md` |
 
 ---
 
@@ -577,6 +578,88 @@ not adjudication). Concept + evaluation: `docs/concepts/agent-failure-modes.md`,
 
 ---
 
+## Day 15 — Safe Text-to-SQL `PARTIAL`
+
+Day 14 made the Data Agent *work* and admitted the seed: a keyword validator is
+not a parser. Day 15 attacks the seed — DELETE, UPDATE, invalid SQL, expensive
+queries, nonexistent tables, ambiguous definitions, plus the agent-specific
+indirect injection — and hardens layer 1 into a real **allow-list parser +
+policy**, while it keeps telling the truth about *where the guarantee lives*.
+Three ideas: **allow-lists beat deny-lists**, **privileges beat parsers** (the
+`role` is the invariant; the parser is defense-in-depth), and **fail closed but
+stay honest** (over-blocking is a measured bug). Concept + evaluation:
+`docs/concepts/safe-sql.md`, `docs/evaluations/sql-safety-day15.md`.
+
+- `ai_os/sql_safety.py` (new) — the ordered choke point. `normalize()` (comment
+  obfuscation, homoglyph refusal, single-statement split), `parse_readonly()` (a
+  conservative recursive-descent grammar with **no write production**; residual
+  write-keyword scan as belt-and-braces), `Policy` (loaded from `policy.yaml`:
+  `tables_allow`, `columns_deny`, `definitions`, `row_limit`, `max_cost`,
+  timeouts), `estimate_cost`/`check_cost` (EXPLAIN when available, else a shape
+  heuristic), `rewrite_limit` (shape-aware, skipped before an aggregate),
+  `classify()` (**the** repairable/policy routing), and `SafeSql.inspect`/
+  `rewrite` — the `{ok, …} | {ok: false, error_kind, rejection_class, stage,
+  message}` contract.
+- `policy.yaml` (new) — the reviewable allow/deny document. The schema card
+  becomes an **enforcement artifact** (table allow-list), PII is denied by
+  *column* (never readable, even where the table is allowed), the glossary's
+  "revenue excludes DRAFT" becomes a **definition guard**, and every cap is
+  config (env `SALEOR_SQL_POLICY` points at another document).
+- `ai_os/data.py` (extended) — `DataAgent.run` routes through `SafeSql`
+  (normalize → parse → policy → cost → rewrite → execute), preserving the raw
+  model SQL as `gen_sql` and recording `executed_sql` separately; `QueryResult`
+  gains `rejection_class` / `stage` / `cost_estimate` / `statement_timeout_ms`;
+  `PostgresDataStore` now sets `statement_timeout`, `lock_timeout`,
+  `idle_in_transaction_session_timeout` beside the read-only transaction, and
+  exposes `explain_cost()`. The `validate_readonly` seed is kept for the
+  Day-14 regression matrix.
+- `ai_os/tools.py` (extended) — `ToolResult.rejection_class` (surfaced in
+  `as_dict`, so the model is told the *class*); `_data_result` carries it
+  through; `tool_error`/`failure` accept it.
+- `ai_os/trace.py` (extended) — `data_columns` promotes `rejection_class`,
+  `safety_stage`, `executed_sql`, `cost_estimate`, `statement_timeout_ms`;
+  `policy_violations` / `rejection_classes` / `cost_estimates` aggregate a run.
+  `AGENT_TERMINATIONS` gains the `policy` exit.
+- `ai_os/agent.py` (extended) — the loop consults `rejection_class`: a **policy**
+  rejection increments `policy_violations`, is excluded from **both** ladder
+  rungs, and **stops** the run (`termination_reason: "policy"`,
+  `failure_kind: "policy_violation"`, a forced final turn told not to rephrase);
+  the run object carries `policy_violations` / `rejection_classes` /
+  `cost_estimates`; `REASONING_PROMPT` gains rule 5 (stop on `policy`, retry only
+  on `repairable`).
+- `tools/mock_gateway.py` — the D15 attack SQL (`D15_SQL_*`) and the scripted
+  hostile turns: `tc_d15_delete` (the forbidden request that stops the run),
+  `tc_d15_fix` (the retry the loop must NOT take), `tc_d15_injection` (X10),
+  `tc_d15_control` (X11) + `answer_d15_policy`/`_blocked`/`_control`.
+- `tools/sql_attack_smoke.py` (new) — **ALL DAY 15 (MECH) CHECKS PASSED** (99
+  checks): X1–X9+the X11 control through the choke point, X4's server-timeout
+  mapping on a fake engine, X10 end-to-end through the loop (policy stop, one
+  step, nothing fabricated), the classification matrix, the grammar/allow-list
+  matrix (21 cases), the policy-is-config tests, the shape-aware `LIMIT` + the
+  aggregation trap, the schema-leak guard, and the **no-regression** gate
+  (re-runs `tool_smoke` / `agent_smoke` / `failure_smoke` / `data_smoke`).
+- **Headline:** `Wrote? = no` on every attack row — the three tables snapshotted
+  before/after are **byte-for-byte unchanged** — and `X11 false-reject? = no`
+  (a multi-join, aggregate, *window* control passes through the choke point and
+  the full loop). The two independent guards are both proven: the parser rejects
+  *before* execution, and the engine refuses a write when the parser is bypassed.
+- One deliberate Day 14 edit, recorded: Q5's DELETE now also asserts the Day 15
+  behaviour (classified `policy`; the run **stops** — `policy_violations: 1`, one
+  step, no self-correction; fabricates nothing), and its second script turn moved
+  from `tc_d14_fix` to `answer_d15_policy`. Q5's original assertions all still
+  pass; `asserted ⊆ returned = ok` is unchanged.
+- **No regression:** the hardening changes the *executor*, not the loop or the
+  corpora. Days 7–14 unit suites and all four smoke suites stay green.
+- `PENDING`: **adversarial completeness is unprovable** — X1–X10 are a *sample*
+  and the parser is best-effort; the **guarantee is the `saleor_read_only`
+  role**. X10's *real-model* behaviour is **Day 25/26** (injection) + **Day 21**;
+  the offline cost estimate is a shape heuristic (real `EXPLAIN` needs a live
+  role); the real server timeout is proven offline only by its mapping; parser
+  *soundness* is **long-term hardening**. Re-verify with
+  `python tools/sql_attack_smoke.py`.
+
+---
+
 ## Known gaps (what blocks "everything green for real")
 
 1. **Git:** Day 9 is committed (`39285dd`, `76af2e0`, `37bd8d9`, `d62acda`);
@@ -679,6 +762,21 @@ not adjudication). Concept + evaluation: `docs/concepts/agent-failure-modes.md`,
     for a card that cannot fit the whole DB (Day 16/19). Re-verify with
     `python tools/data_smoke.py`.
 
+11. **Day 15 semantics** — the MECH half is green (`tools/sql_attack_smoke.py`;
+    X1–X11, `Wrote? = no` on every attack row with the DB byte-for-byte unchanged,
+    `X11 false-reject? = no`, the classification matrix, the grammar/policy/config
+    checks, the shape-aware `LIMIT` + the aggregation trap, the leak guard, and
+    Days 7–14 re-run unchanged). Still `PENDING`: (a) **adversarial completeness is
+    unprovable** — X1–X10 are a sample and the parser is best-effort; the guarantee
+    is the `saleor_read_only` **role** (long-term hardening: a vetted AST validator
+    is the recorded seam); (b) X10's *real-model* behaviour — will a real model emit
+    hostile SQL when a poisoned corpus asks? (Day 25/26), and unprompted (Day 21);
+    (c) the offline **cost estimate is a shape heuristic** — real `EXPLAIN
+    (FORMAT JSON)` needs a live role; (d) the real **server `statement_timeout`** is
+    proven offline only by its *mapping* (a fake engine), not by a live server;
+    (e) the **definition guard is SQL-shape arithmetic**, not semantic understanding.
+    Re-verify with `python tools/sql_attack_smoke.py`.
+
 ## How to re-verify, in one line
 
 ```bash
@@ -698,6 +796,7 @@ python tools/agent_smoke.py             # day 12 A1–A8 (loop, three exits + ga
 python tools/agent_smoke.py --live      # day 12 A1/A6/A7 against the real gateway (retrieval on the stub stores)
 python tools/failure_smoke.py           # day 13 F1–F9 (guards + fabricated? column) + A1–A8 / T1–T7 re-run
 python tools/data_smoke.py              # day 14 Q1–Q8 (read-only guards + asserted ⊆ returned) + A1–A8 / T1–T7 / F1–F9 re-run
+python tools/sql_attack_smoke.py        # day 15 X1–X11 (attack set + control) + Wrote?=no + the Days 11–14 re-run
 LLM_PROVIDERS=cloudflare: python tools/build_code_store.py --corpus corpus_code/saleor --out data/code_store.json --batch 100  # real build (resume; see gap 6)
 python tools/retrieval_day10.py --store data/code_store.json --doc-store data/store.json  # real corpora
 ```
