@@ -1,4 +1,4 @@
-# ai-layer — Days 4–11: Gateway → Search → RAG → Code RAG → Tool Calling
+# ai-layer — Days 4–12: Gateway → Search → RAG → Code RAG → Tool Calling → Agent Loop
 
 A reusable AI layer built in layers:
 
@@ -24,6 +24,13 @@ A reusable AI layer built in layers:
    rides the Day-4 gateway as **one pass-through argument**; the refusal gate
    becomes a **return value**; and `cited ⊆ retrieved` moves home to where the
    evidence is produced.
+7. **Day 12 — Agent Loop**: the single turn becomes a **loop** — reason → choose →
+   execute → observe → reason again → answer — so a question several calls deep
+   ("what happens after `CheckoutComplete` submits?") is answerable. Agent state is
+   the **transcript** (no hidden variable), observations are the graded evidence
+   record **per step**, and termination gains two exits beside the natural one
+   (`max_steps`, budget) plus `gave_up`. `run_tool_answer` survives as
+   `run_agent(max_steps=1)`, so Day 11's tests stay green by construction.
 
 ```
 Application
@@ -61,9 +68,10 @@ raw HTTP via `urllib`.
 | `ai_os/code_questions.yaml` | day 10: the pre-registered code fixtures (CA1–CE1), asserting `module#Symbol` sets |
 | `ai_os/server.py` | FastAPI: `/chat`, `/chat/stream`, `/rag` (`corpus="docs"｜"code"`), `/ledger`, `/health` |
 | `ai_os/tools.py` | day 11: `ToolRegistry` (schemas/validation/dispatch), `ToolResult`, the five tools, the hand-rolled JSON-Schema subset |
-| `ai_os/agent.py` | day 11: `run_tool_answer` — tool turn → validate → execute → grounded answer; `cited ⊆ retrieved` on the tool's evidence |
+| `ai_os/agent.py` | day 11/12: `run_tool_answer` (one tool turn → grounded answer) + `run_agent` — the loop: transcript-as-state, three exits + `gave_up`, per-step observations; `cited ⊆ retrieved` over the accumulated transcript; `REASONING_PROMPT` is the reasoning-turn system prompt |
 | `tools/mock_gateway.py` | scripted dual-provider stub `:8700`/`:8701` (chat, embeddings, **and tool_calls** scenarios) |
 | `tools/tool_smoke.py` | day 11: T1–T7 offline suite (selection, validation matrix, refusal, cap, dialect parity, no-regression) |
+| `tools/agent_smoke.py` | day 12: A1–A8 offline suite (loop, three exits + `gave_up`, depth-1 = Day 11, parallel observations, grounding over the transcript, cost shape, T1–T7 re-run); `--live` measures real-model composition against the real gateway |
 | `tools/gateway_smoke.py` | day 4 deliberate-failure suite + token economics |
 | `tools/build_rag_store.py` | embed a `corpus/` of markdown → `data/store.json` |
 | `tools/build_code_store.py` | day 10: embed a Saleor source tree → `data/code_store.json` (interface-only, resumable) |
@@ -133,6 +141,7 @@ python tools/rag_debug.py --stub        # day 7 offline mechanics
 python tools/retrieval_day9.py --stub   # day 9 evidence pipeline (ΣΔMRR +1.000)
 python tools/retrieval_day10.py --stub  # day 10 doc-vs-code (code 6/6, doc 9/9)
 python tools/tool_smoke.py              # day 11 T1–T7 (tool calls, validation, cap)
+python tools/agent_smoke.py             # day 12 A1–A8 (loop, exits + gave_up, depth-1, grounding over transcript)
 ```
 
 The stub serves both providers on `:8700` (OpenAI) and `:8701` (Anthropic)
@@ -179,6 +188,33 @@ Day 11 tool suite (`tools/tool_smoke.py`, T1–T7, offline):
 | dialect parity | the same turn over Anthropic's `tool_use`/`tool_result` wire |
 | regression | doc nine 9/9, code six 6/6 through the tools (same `retrieve()`) |
 
+Day 12 agent suite (`tools/agent_smoke.py`, A1–A8 + exits, offline):
+
+| Fixture | Verified behavior |
+|---|---|
+| A1 multi-step | 2 `search_saleor_code` steps; step 2's query names the symbol step 1's evidence carried; answer cites from ≥2 observations |
+| A2 self-correction | step 1 rejected (enum violation named), step 2 fixed → 1 rejection + 1 success |
+| A3 pivot after refusal | code tool refuses → step 2 legally switches to `search_saleor_docs`; no symbol fabricated |
+| A4 parallel calls | two `tool_calls` one step → both executed, both observed |
+| A5 termination | `max_steps` → `truncated`, answer names the limit; `budget_usd` → exit 3 |
+| A6 grounding | `cited ⊆ ∪(step observations)`; a `ghost#Symbol` outside every observation is caught |
+| A7 zero-tool | no `tool_calls` → `tool_steps: 0`, one turn |
+| A8 parallel capacity | three calls one step → all validated/executed/observed, none dropped |
+| gave_up | `self_correct=1`, repeat the bad call → bound reached, answer names the stuck point |
+| cost | `chats == tool_steps + 1`, `embeds == tool_steps`, retrieval gateway chat calls `0` |
+| depth-1 | `run_agent(max_steps=1)` *is* Day 11 — natural `answer` exit, `turns: 2`, no `max_steps` note |
+| regression | `tools/tool_smoke.py` re-run unchanged (T1–T7) |
+
+Both suites also run **live** — `python tools/tool_smoke.py --live` (Day 11 tool
+*choice*) and `python tools/agent_smoke.py --live` (Day 12 multi-step *composition*).
+Live swaps only the *chat* wire for the real gateway from `.env`; retrieval stays on
+the deterministic stub stores. The harness contract (valid args, `cited ⊆ ∪
+observations`, a real exit) is hard-checked; the semantic cells are measured per run.
+With the reasoning prompt in place the free `nvidia/nemotron-3-super-120b-a12b:free`
+model **follows evidence-carried symbols** (`complete_checkout` →
+`create_order_from_checkout` → `process_payment`); a provider outage reports `[SKIP]`
+and exits 2 rather than a false FAIL.
+
 ## Config (via env, never committed)
 
 | Var | Default | Meaning |
@@ -195,7 +231,11 @@ Day 11 tool suite (`tools/tool_smoke.py`, T1–T7, offline):
 | `RAG_STORE_PATH` | `data/store.json` | where `POST /rag` loads the store from |
 | `TOOL_GATE_TAU` | `0.55` | the fused-score gate behind the retrieval tools |
 | `TOOL_TOP_K` | `4` | default `k` when the model does not name one |
-| `TOOL_MAX_TURNS` | `1` | day 11's single-turn cap (day 12 turns this knob) |
+| `TOOL_MAX_TURNS` | `1` | day 11's per-step call cap (day 12's `run_tool_answer`) |
+| `AGENT_MAX_STEPS` | `6` | day 12: the loop's step cap (exit 2) |
+| `AGENT_BUDGET_CHARS` | `4000` | day 12: per-observation clamp (day 11's `max_chars`, per step) |
+| `AGENT_SELF_CORRECT` | `2` | day 12: re-issues allowed after a rejection, per question |
+| `AGENT_BUDGET_USD` | unset (`0`) | day 12: run-level cost cap → exit 3 |
 
 Omitted keys are a startup error in `build_gateway_from_env` (fail fast, not a
 runtime 401 surprise). Embedding model is passed per-provider, so the key lives
@@ -230,5 +270,14 @@ with the provider config it belongs to.
   `docs/concepts/tool-calling.md` and `docs/evaluations/tool-day11.md`. A
   tool-turn chat is a chat call, so it bills like one; tool execution is free
   arithmetic. The real model's *choice* of tool is Day 21's measure.
-- Day 12 (next): the loop — `run_tool_answer` generalized by lifting
-  `max_tool_turns` and appending observations instead of terminating.
+- Day 12 adds the loop: `run_agent` generalizes `run_tool_answer` (which is now
+  `run_agent(max_steps=1)`) — transcript-as-state, three exits + `gave_up`,
+  parallel observations, and `cited ⊆ retrieved` over the accumulated transcript.
+  The loop asks once more after the last allowed tool step, so `max_steps=1` takes
+  Day 11's *natural* answer exit (never a false "step limit" note); a completion
+  that still asks for tools at the cap is recorded, not executed. `REASONING_PROMPT`
+  precedes every reasoning turn (observations are evidence for the *next* step). See
+  `docs/concepts/agent-loop.md` and `docs/evaluations/agent-day12.md`. The real
+  model's *composition* of a multi-step investigation is Day 21's measure, now run
+  per request via `python tools/agent_smoke.py --live` — the free model walks the
+  map (`complete_checkout` → `create_order_from_checkout` → `process_payment`).

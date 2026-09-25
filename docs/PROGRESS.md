@@ -29,6 +29,7 @@ Updated: 2026-09-23
 | 9 | Reranking and context construction | PARTIAL (all MECH green; **real-corpus comparison made** — envelope-blocked at Day 8, C2 partial move, D2 regression; τ/LOM/cross-encoder verdicts `PENDING` Day 20/21) | `ai_os/rerank.py`, `ai_os/context.py`, `test_day9.py`, `tools/retrieval_day9.py`, `docs/concepts/reranking.md`, `docs/evaluations/rerank-day9.md` |
 | 10 | Code RAG | PARTIAL (all MECH green offline; code fixtures 6/6 + doc nine 9/9 on the stub; real Saleor build + semantic `file:line` verdicts `PENDING` Day 21) | `ai_os/ingest_code.py`, `ai_os/code_questions.yaml`, `ai_os/retrieval.py` (code vocab), `ai_os/rag.py` (code metadata), `tools/build_code_store.py`, `tools/code_debug.py`, `tools/retrieval_day10.py`, `test_day10.py`, `docs/concepts/code-rag.md`, `docs/evaluations/code-day10.md` |
 | 11 | Tool Calling | PARTIAL (all MECH green offline; T1–T7 + dialect parity + the Day-6 empty-content sibling; real model *tool choice* `PENDING` Day 21) | `ai_os/tools.py`, `ai_os/agent.py`, `ai_os/contract.py` (`ToolCall`), `ai_os/providers/{openai,anthropic}.py` (tool wire), `ai_os/gateway.py` (`chat_with_tools`), `tools/mock_gateway.py` (tc_* scenarios), `tools/tool_smoke.py`, `docs/concepts/tool-calling.md`, `docs/evaluations/tool-day11.md` |
+| 12 | Agent Loop | PARTIAL (all MECH green offline; A1–A8 + the `gave_up` bound + the depth-1 line + the cost shape; `--live` real-model *composition* **verified** — the free model walks the map with the reasoning prompt; Day 21 rules cross-model strength) | `ai_os/agent.py` (`run_agent`, `REASONING_PROMPT`), `ai_os/trace.py` (`step_trace`, `grounding_over_transcript`), `tools/mock_gateway.py` (multi-step `tc_*`/`answer_*`), `tools/agent_smoke.py` (`--live`), `docs/concepts/agent-loop.md`, `docs/evaluations/agent-day12.md` |
 
 ---
 
@@ -371,6 +372,81 @@ do not move. Concept + evaluation:
 
 ---
 
+## Day 12 — Agent Loop `PARTIAL`
+
+Day 12 lifts Day 11's single-turn cap into a **loop**: reason → choose a tool →
+execute → observe → reason again → answer, so a question several calls deep
+("what happens after `CheckoutComplete` submits?") becomes answerable. What changes
+is underneath the loop, and it is mostly a *deletion*: **agent state is the
+transcript, nothing else** (no hidden `plan`, no scratch dict the model cannot
+see); **observations** arrive as the same graded evidence record Day 7 has checked
+since, now per step; **termination** gains two exits beside the natural one
+(`max_steps`, budget) plus the narrower `gave_up`. Everything Day 11 built — the
+registry, validation-as-contract, refusal-as-a-return-value, the Day-4 gateway's
+tool wire — is exercised **as-is**: `run_agent(max_steps=1)` *is* Day 11's
+`run_tool_answer`, which is what keeps T1…T7 green by construction.
+Concept + evaluation: `docs/concepts/agent-loop.md`,
+`docs/evaluations/agent-day12.md`.
+
+- `ai_os/agent.py` — `run_agent(request, registry, gateway, *, max_steps,
+  budget_chars, self_correct, budget_usd, max_tool_calls_per_step)`: transcript as
+  the growing `messages` list; per-step execution of parallel `tool_calls` (each
+  its own `tool` observation, never summarized); the exit-1 check reads "no
+  `tool_calls`" off the **already-corrected** completion parser (a null-content
+  answer turn is still the Day 6 retry, not an exit). At the last allowed step the
+  loop asks **once more** so the model can answer *naturally*; a completion that
+  still carries `tool_calls` at the cap is recorded-not-executed
+  (`capped_tool_calls`) and only then is a forced final *plain* chat issued — which
+  is what makes `run_agent(max_steps=1)` reproduce Day 11 exactly (a pre-fix
+  regression injected a false `max_steps` note into every single-tool answer, which
+  a real model echoed; `--live` caught it). `run_tool_answer` is now
+  `run_agent(max_steps=1, max_tool_calls_per_step=cap)` — Day 11 survives as a
+  config, not a replica. The transcript opens with `REASONING_PROMPT` (§6) — the
+  reasoning-turn system prompt that tells the model observations are evidence for
+  the *next* step; its absence was why the real model rephrased instead of
+  composing, and `--live` measured both. `mentioned_ids` + the fabrication guard
+  (`fabricated`, `cited_subset_retrieved`) are carried in from Day 11.
+- `ai_os/trace.py` — `step_trace(step, rows)` (the per-step row:
+  `name`/`args_parsed`/`args_valid`/`result_ok`/`refused`/`error`/`evidence_ids`/
+  `obs_clamped`, plus `rejections`/`observed_refusals`) and
+  `grounding_over_transcript` (`cited ⊆ ∪ observations`, annotating each step with
+  its own citations) — Day 7's per-query trace, serialized per step.
+  `AGENT_TERMINATIONS` names the four exits.
+- `ai_os/tools.py`, `ai_os/gateway.py` — **unchanged**: the loop consumes the seam,
+  never edits it; the loop adds retry *steps*, never new retry *behavior* inside a
+  call.
+- `tools/mock_gateway.py` — scripted multi-step scenarios: `tc_d12_step1/step2`
+  (walk the map), `tc_d12_fix_step1/step2` (fix-then-answer), `tc_code_ooc` +
+  `tc_d12_pivot_step2` (pivot-after-refusal), `tc_two`/`tc_three` (parallel), the
+  `answer_limit`/`answer_budget`/`answer_gaveup` turns (the stops say why).
+- `tools/agent_smoke.py` — **ALL DAY 12 (MECH) CHECKS PASSED**: A1 multi-step
+  (step 2's query names the symbol step 1's evidence carried; cites from ≥2
+  observations), A2 self-correction (1 rejection + 1 fixed call), A3 pivot after
+  refusal (no retried refusal, no fabricated symbol), A4/A8 parallel calls (none
+  dropped, mixed corpora in one transcript), A5/A5b the `max_steps` and budget
+  exits (truncated, named; the over-asking call is recorded-not-executed), A6
+  grounding over the transcript (both directions), A7 zero-tool question, the
+  `gave_up` bound, the **depth-1 line** (`run_agent(max_steps=1)` is Day 11: the
+  natural `answer` exit, `turns: 2`, no `max_steps` note), the cost assertion
+  (`chats == tool_steps + 1`, `embeds == tool_steps`), and the **no-regression
+  line** (re-runs `tools/tool_smoke.py` unchanged, T1–T7). `--live` swaps the chat
+  wire for the real gateway (retrieval stays on the stub stores): contract cells are
+  hard-checked, composition cells are `measure`d, and a provider outage reports
+  `[SKIP]`/exit 2 rather than a false FAIL. The free
+  `nvidia/nemotron-3-super-120b-a12b:free` model **composes** with the reasoning
+  prompt — it walked `CheckoutComplete` → `complete_checkout` →
+  `create_order_from_checkout` → `process_payment`, each step naming a symbol the
+  previous step's evidence carried.
+- `PENDING` (now measured): whether a *real* model **composes** — follows an import
+  to a `complete_checkout` it was never told and keeps citing each step. `--live`
+  answers it per run, and with the §6 reasoning prompt the free model **does** walk
+  the map (see the `tools/agent_smoke.py` bullet). Day 21 owns the *cross-model*
+  strength verdict. The failure *modes* a reactive loop can still hit (oscillation,
+  contradiction, hallucinated tools) are Day 13's taxonomy; the real data the stub
+  cannot provide is Day 14's.
+
+---
+
 ## Known gaps (what blocks "everything green for real")
 
 1. **Git:** Day 9 is committed (`39285dd`, `76af2e0`, `37bd8d9`, `d62acda`);
@@ -429,6 +505,22 @@ do not move. Concept + evaluation:
    catches cited-but-absent ids, not prose that ignores the tool; (d) whether the
    single-turn cap is the right amount of agency, which Day 12 answers by lifting
    `TOOL_MAX_TURNS`.
+8. **Day 12 semantics** — the MECH half is green (`tools/agent_smoke.py`; A1–A8,
+   the `gave_up` bound, the **depth-1 line** (`max_steps=1` is Day 11 — the natural
+   exit, no `max_steps` note), the `chats == tool_steps + 1` / `embeds ==
+   tool_steps` cost assertion, and T1–T7 re-run unchanged through
+   `run_agent(max_steps=1)`). `--live` measures the real-model half per run, and
+   with the §6 reasoning prompt the free model **follows the map**
+   (`complete_checkout` → `create_order_from_checkout` → `process_payment`). Still
+   `PENDING`: (a) *cross-model* strength — composition now holds on the free model,
+   and a stronger paid tool-calling model is Day 21's call to confirm breadth; (b)
+   whether `max_steps` is the right
+   stopping lever or a worth-conscious reasoner should stop on sufficiency
+   (Day 16/21); (c) whether per-step `cited ⊆ retrieved` catches the *important*
+   failure (evidence ignored between steps) or only the cheap one (a dropped
+   citation) — the loop-prompt ownership family is new and ungraded by a real
+   model; (d) the failure modes a reactive loop still hits (oscillation,
+   contradiction, hallucinated tools) — **Day 13**'s guards, built on this trace.
 
 ## How to re-verify, in one line
 
@@ -445,6 +537,8 @@ python tools/retrieval_day9.py --store data/store.json    # real-corpus comparis
 python tools/retrieval_day9.py --store data/store.json --sweep --lom  # real knobs + LOM
 python tools/retrieval_day10.py --stub  # day 10 doc-vs-code (code 6/6, doc 9/9)
 python tools/tool_smoke.py              # day 11 T1–T7 (calls, validation, cap, parity)
+python tools/agent_smoke.py             # day 12 A1–A8 (loop, three exits + gave_up, depth-1, grounding over transcript)
+python tools/agent_smoke.py --live      # day 12 A1/A6/A7 against the real gateway (retrieval on the stub stores)
 LLM_PROVIDERS=cloudflare: python tools/build_code_store.py --corpus corpus_code/saleor --out data/code_store.json --batch 100  # real build (resume; see gap 6)
 python tools/retrieval_day10.py --store data/code_store.json --doc-store data/store.json  # real corpora
 ```
