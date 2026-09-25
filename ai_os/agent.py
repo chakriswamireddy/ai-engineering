@@ -231,9 +231,10 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
 
     1. **`answer`** — the model's turn carried no `tool_calls` (it answered from
        the evidence in hand). The only exit Day 11 knew, unchanged.
-    2. **`max_steps`** — the step cap fired. One final *plain* chat asks the
-       model to answer from already-gathered evidence and say the loop stopped;
-       nothing is invented to fill the gap.
+    2. **`max_steps`** — the model asked for tools again with no steps left; those
+       calls are *recorded, not executed* (`capped_tool_calls`). One final *plain*
+       chat asks the model to answer from already-gathered evidence and say the
+       loop stopped; nothing is invented to fill the gap.
     3. **`budget`** — the run's cumulative ledger cost tripped `budget_usd`.
        Same forced final turn, `termination_reason: budget`.
 
@@ -259,18 +260,30 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
     executed_rows: list[dict[str, Any]] = []
     ledger_rows: list[dict[str, Any]] = []
     deferred: list[Any] = []
+    capped_calls: list[Any] = []
     rejections = refusals = 0
     gave_up = False
     termination: str | None = None
     answer_text = ""
 
-    while len(steps) < steps_cap:
+    while True:
         completion = gateway.chat_with_tools(transcript, tools=registry.schemas(),
                                              temperature=temperature,
                                              max_tokens=max_tokens)
         if not completion.tool_calls:
             answer_text = completion.text
             termination = "answer"                      # exit 1
+            break
+
+        if len(steps) >= steps_cap:
+            # The model asked again with no steps left. The calls are *recorded,
+            # not executed* (exit 2) — evidence of the spiral, not a step. This
+            # branch is why the loop still calls once more after the last allowed
+            # tool step: `run_agent(max_steps=1)` never lands here on a single
+            # tool turn, so Day 11's `run_tool_answer` is reproduced exactly
+            # (one tool turn + one *natural* answer, never a bogus cap note).
+            capped_calls = list(completion.tool_calls)
+            termination = "max_steps"
             break
 
         all_calls.extend(completion.tool_calls)
@@ -315,9 +328,6 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
             termination = "gave_up"
             break
 
-    if termination is None:
-        termination = "max_steps"                       # exit 2
-
     if termination != "answer":
         note = {"role": "system", "content": TERMINATION_NOTE[termination]}
         final = gateway.chat(transcript + [note], temperature=temperature,
@@ -342,6 +352,7 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
         "tool_steps": len(steps),
         "no_tool_call": not all_calls,
         "tool_calls": [c.as_dict() for c in all_calls],
+        "capped_tool_calls": [c.as_dict() for c in capped_calls],
         "tool_ledger": ledger_rows,
         "steps": steps,
         "deferred_tool_calls": [c.as_dict() for c in deferred],
