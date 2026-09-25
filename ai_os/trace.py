@@ -407,6 +407,12 @@ AGENT_TERMINATIONS: dict[str, str] = {
                    "short set of calls (A,B,A,B) with no tie-breaker",
     "tool_failure": "Day 13 — the tool-call boundary owned it: execution failed "
                     "(timeout/exception) and the fallback ladder was exhausted",
+    # Day 15 — the safety layer's hard wall. A *policy* rejection (a write, a
+    # denied table/column, an ambiguous definition, an over-cost/runaway query)
+    # stops the run: it is not a mistake to fix, and a loop that "corrects" its
+    # way past a denial has become a fuzzer for its own defenses.
+    "policy": "Day 15 — the safe SQL layer refused a *policy* violation "
+              "(forbidden request); the run stopped rather than self-correct",
 }
 
 
@@ -517,7 +523,10 @@ def data_columns(result) -> dict[str, Any]:
     """Promote a data tool's record columns into the call row (Day 14 §8).
 
     Empty for a retrieval result — a doc tool has no `sql` key — so this is
-    purely additive and Days 7–13 rows are byte-for-byte unchanged.
+    purely additive and Days 7–13 rows are byte-for-byte unchanged. Day 15 adds
+    the safety columns: `rejection_class` (repairable vs policy), `stage` (where
+    the choke point refused), `executed_sql` (what actually ran), `cost_estimate`
+    (the resource pre-check) and `statement_timeout_ms` (the server-side guard).
     """
     data = getattr(result, "data", None)
     if not isinstance(data, dict) or "sql" not in data:
@@ -536,7 +545,41 @@ def data_columns(result) -> dict[str, Any]:
         out["truncated"] = True
     if data.get("elapsed_ms") is not None:
         out["db_elapsed_ms"] = data["elapsed_ms"]
+    # Day 15 — the safety layer's observable columns.
+    if data.get("rejection_class"):
+        out["rejection_class"] = data["rejection_class"]
+    if data.get("stage"):
+        out["safety_stage"] = data["stage"]
+    if data.get("executed_sql"):
+        out["executed_sql"] = data["executed_sql"]
+    if data.get("cost_estimate") is not None:
+        out["cost_estimate"] = data["cost_estimate"]
+    if data.get("statement_timeout_ms") is not None:
+        out["statement_timeout_ms"] = data["statement_timeout_ms"]
     return out
+
+
+def policy_violations(steps: list[dict[str, Any]]) -> int:
+    """How many calls the safety layer refused as a **policy** rejection.
+
+    The counter that *stops* a run: a policy rejection is a forbidden request,
+    not a mistake, so it must not invite another attempt. Distinct from Day 12's
+    `rejections` (arg schema) and Day 13's tool failures.
+    """
+    return sum(1 for s in steps for c in s.get("calls") or []
+               if c.get("rejection_class") == "policy")
+
+
+def rejection_classes(steps: list[dict[str, Any]]) -> list[str]:
+    """The safety classes seen across the run, in call order (for the trace)."""
+    return [c["rejection_class"] for s in steps for c in s.get("calls") or []
+            if c.get("rejection_class")]
+
+
+def cost_estimates(steps: list[dict[str, Any]]) -> list[float]:
+    """Every cost pre-check estimate the run made (the resource guard's ledger)."""
+    return [float(c["cost_estimate"]) for s in steps for c in s.get("calls") or []
+            if c.get("cost_estimate") is not None]
 
 
 def generated_sqls(steps: list[dict[str, Any]]) -> list[str]:

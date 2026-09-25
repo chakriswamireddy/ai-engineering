@@ -153,9 +153,14 @@ class ToolResult:
     # (`invalid_args`/`unknown_tool`/`timeout`/`tool_error`/`no_data`/`internal`);
     # `retryable` is the ladder's gate; `fallback_from` records a disclosed
     # substitution (the docs tool answering where the code tool died).
+    # Day 15 adds `rejection_class`: the *follow-up* the loop must take. A
+    # `repairable` (a syntax / unknown-column error) may be self-corrected; a
+    # `policy` (a write, a denied table/column, an ambiguous definition, an
+    # over-cost or runaway query) must NOT — the loop stops and surfaces it.
     error_kind: str | None = None
     retryable: bool = False
     fallback_from: str | None = None
+    rejection_class: str | None = None
 
     @classmethod
     def success(cls, name: str, *, args: dict | None = None,
@@ -169,17 +174,21 @@ class ToolResult:
     def failure(cls, name: str, error: str, *,
                 args: dict | None = None,
                 error_kind: str = ERROR_INVALID_ARGS,
-                retryable: bool = False) -> "ToolResult":
+                retryable: bool = False,
+                rejection_class: str | None = None) -> "ToolResult":
         return cls(name=name, ok=False, args=args, error=error,
-                   error_kind=error_kind, retryable=retryable)
+                   error_kind=error_kind, retryable=retryable,
+                   rejection_class=rejection_class)
 
     @classmethod
     def tool_error(cls, name: str, *, error_kind: str, message: str,
                    args: dict | None = None, retryable: bool = False,
+                   rejection_class: str | None = None,
                    ) -> "ToolResult":
         """Day 13 — a tool error is an *observation*, not an exception."""
         return cls(name=name, ok=False, args=args, error=message,
-                   error_kind=error_kind, retryable=retryable)
+                   error_kind=error_kind, retryable=retryable,
+                   rejection_class=rejection_class)
 
     @classmethod
     def refusal(cls, name: str, *, args: dict | None = None,
@@ -202,6 +211,11 @@ class ToolResult:
             out["error"] = self.error
             if self.error_kind:
                 out["error_kind"] = self.error_kind
+            if self.rejection_class:
+                # The model is told *which class* it is — a repairable error
+                # invites a fixed query; a policy error is surfaced, never
+                # handed back as something to rephrase around.
+                out["rejection_class"] = self.rejection_class
             if self.retryable:
                 out["retryable"] = True
         elif self.evidence:
@@ -499,7 +513,8 @@ def _data_result(name: str, args: dict[str, Any], qr, *,
         return ToolResult.success(name, args=args, data=record, truncated=qr.truncated)
     result = ToolResult.tool_error(
         name, error_kind=qr.error_kind or ERROR_TOOL,
-        message=qr.error or "query failed", args=args, retryable=qr.retryable)
+        message=qr.error or "query failed", args=args, retryable=qr.retryable,
+        rejection_class=qr.rejection_class)
     # The record survives the failure on purpose: a *rejected* query must still
     # show `gen_sql` + `validation: rejected` + `executed: false` in the trace,
     # or the §8 table cannot distinguish "the validator refused it" from "the
