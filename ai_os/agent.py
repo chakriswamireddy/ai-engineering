@@ -45,15 +45,30 @@ still runs retrieval, not generation.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
+import time
 from typing import Any
 
+from ai_os.contract import ToolCall
 from ai_os.rag import NOT_COVERED
-from ai_os.tools import ToolRegistry, ToolResult
+from ai_os.tools import (
+    ERROR_TIMEOUT,
+    ERROR_TOOL,
+    TOOL_ERROR_KINDS,
+    ToolRegistry,
+    ToolResult,
+)
 from ai_os.trace import (
     AGENT_TERMINATIONS,
+    contradiction_coverage,
+    contradiction_rows,
+    detect_oscillation,
+    detect_repeat,
+    fingerprint,
     grounding_over_transcript,
+    observed_failures,
     step_trace,
 )
 
@@ -62,6 +77,21 @@ from ai_os.trace import (
 DEFAULT_MAX_STEPS = 6           # the loop's step cap (exit 2)
 DEFAULT_BUDGET_CHARS = 4000     # per-observation clamp, like Day 11's max_chars
 DEFAULT_SELF_CORRECT = 2        # re-issues allowed after a rejection, per question
+
+# Day 13 §3/§4/§6 — the guard ring's knobs. Each is a config with a default and
+# is counted per run, because an unbounded guard is an infinite loop in costume.
+DEFAULT_TOOL_TIMEOUT_S = 30.0   # the wall around one tool call (time, not money)
+DEFAULT_REPEAT_WINDOW = 4       # the fingerprint's cycle window (A,B,A,B)
+DEFAULT_TOOL_RETRIES = 1        # rung 1: same-arg execution retries, per call
+DEFAULT_FALLBACKS = 1           # rung 2: sibling-tool substitutions, per run
+
+# Day 13 §6 rung 2 — the sibling map. A dead corpus tool may legally be answered
+# by the other corpus *only* when the question's intent allows it, and the
+# substitution must be disclosed (`fallback_from`).
+SIBLING_TOOLS: dict[str, str] = {
+    "search_saleor_code": "search_saleor_docs",
+    "search_saleor_docs": "search_saleor_code",
+}
 
 
 def _env_int(name: str, default: int) -> int:
@@ -96,6 +126,23 @@ def agent_cost_budget_from_env() -> float | None:
     return raw if raw > 0 else None
 
 
+def agent_tool_timeout_from_env() -> float:
+    """Day 13 — the wall around one tool call, in seconds."""
+    return _env_float("AGENT_TOOL_TIMEOUT_S", DEFAULT_TOOL_TIMEOUT_S)
+
+
+def agent_repeat_window_from_env() -> int:
+    return max(2, _env_int("AGENT_REPEAT_WINDOW", DEFAULT_REPEAT_WINDOW))
+
+
+def agent_tool_retries_from_env() -> int:
+    return max(0, _env_int("AGENT_TOOL_RETRIES", DEFAULT_TOOL_RETRIES))
+
+
+def agent_fallbacks_from_env() -> int:
+    return max(0, _env_int("AGENT_FALLBACKS", DEFAULT_FALLBACKS))
+
+
 # Ids the answer is allowed to cite: `module#Symbol` (code) and `doc_id#heading`
 # (docs) share one shape, so one regex covers both corpora. A mention that is
 # not in the observations is a fabricated citation.
@@ -125,6 +172,26 @@ TERMINATION_NOTE: dict[str, str] = {
         "Your tool arguments were rejected and the self-correction limit was "
         "reached. State plainly the point you were stuck at, using only the "
         "observations already in this transcript. Do NOT invent evidence."
+    ),
+    # Day 13 — the diagnosis exits. The note still forbids fabrication; it only
+    # changes *which* honest thing the model is asked to say.
+    "no_progress": (
+        "The loop stopped early because you repeated an identical tool call "
+        "instead of correcting it or moving on. Answer strictly from the "
+        "observations already in this transcript and say plainly that the loop "
+        "stopped on a repeated call. Do NOT invent evidence."
+    ),
+    "oscillation": (
+        "The loop stopped early because you alternated the same small set of "
+        "tool calls without making progress. Answer strictly from the "
+        "observations already in this transcript, name the ambiguity that kept "
+        "you cycling, and do NOT invent evidence."
+    ),
+    "tool_failure": (
+        "A tool call failed (a timeout or an execution error) and the fallback "
+        "ladder was exhausted, so the run stopped. Answer strictly from the "
+        "observations already in this transcript and say plainly that the tool "
+        "failed and what is therefore missing. Do NOT invent evidence."
     ),
 }
 
@@ -200,9 +267,69 @@ def _tool_message(call, result: ToolResult,
     return msg, clamped
 
 
+# ============================================================== Day 13 guards
+
+def execute_bounded(registry: ToolRegistry, name: str, args: dict[str, Any], *,
+                    tool_timeout_s: float | None,
+                    clock=time.monotonic) -> tuple[ToolResult, float]:
+    """§3 — the wall-clock budget around *one* tool call, not around the step.
+
+    The orchestrator knows *a step* hung; the boundary knows *which call* hung
+    and with what args, which is the trace the debugger wants. A timeout is an
+    **observation** (`{ok: false, error_kind: "timeout"}`) exactly as a refusal
+    is — nothing unwinds, nothing crashes, and the transcript stays the memory.
+    The clock is injectable so the suite is deterministic (no real sleeping).
+    """
+    t0 = clock()
+    try:
+        result = registry.execute(name, args)
+    except Exception as exc:                       # an executor bug, not the model's
+        return ToolResult.tool_error(
+            name, error_kind=ERROR_TOOL,
+            message=f"tool error: {exc.__class__.__name__}: {exc}",
+            args=args, retryable=True), (clock() - t0) * 1000
+    elapsed_ms = (clock() - t0) * 1000
+    if tool_timeout_s is not None and elapsed_ms > tool_timeout_s * 1000:
+        return ToolResult.tool_error(
+            name, error_kind=ERROR_TIMEOUT,
+            message=f"exceeded tool_timeout_s={tool_timeout_s}s",
+            args=args, retryable=True), elapsed_ms
+    return result, elapsed_ms
+
+
+def _claims(result: ToolResult) -> list[dict[str, Any]]:
+    """Structured claims a result bears, as `(field, value, subject)` triples.
+
+    §6's contradiction detector needs *values* to compare. Retrieval evidence
+    rows may carry a `claims` mapping (rarely); structured data records carry one
+    where two resolvers can disagree. Absent claims mean the detector is silent,
+    which is what keeps Day 10's split-brain from firing.
+    """
+    out: list[dict[str, Any]] = []
+    for row in result.evidence or []:
+        claims = row.get("claims")
+        if isinstance(claims, dict):
+            for field, value in claims.items():
+                out.append({"field": field, "value": value,
+                            "subject": row.get("doc_id")})
+    if isinstance(result.data, dict) and isinstance(result.data.get("claims"), dict):
+        for field, value in result.data["claims"].items():
+            out.append({"field": field, "value": value,
+                        "subject": str(result.data.get("id"))})
+    return out
+
+
 def _call_row(call, vr: ToolResult, result: ToolResult,
-              clamped: bool) -> dict[str, Any]:
-    """One executed call's audit row — the atom of the per-step trace."""
+              clamped: bool, *, elapsed_ms: float | None = None,
+              retries: int = 0, fallbacks: int = 0, failures: int = 0,
+              timeouts: int = 0, fallback: dict[str, Any] | None = None,
+              fp: str | None = None) -> dict[str, Any]:
+    """One executed call's audit row — the atom of the per-step trace.
+
+    Day 13 beside the Day 11/12 columns: the *fingerprint* (the loop's state),
+    the *elapsed_ms* (the wall), the *error_kind* (the taxonomy), the retry and
+    fallback counters (the ladder), and any *claims* (the contradiction input).
+    """
     row: dict[str, Any] = {
         "name": call.name,
         "arguments": call.arguments,
@@ -212,8 +339,31 @@ def _call_row(call, vr: ToolResult, result: ToolResult,
         "refused": result.refused,
         "error": result.error,
     }
+    if result.error_kind:
+        row["error_kind"] = result.error_kind
+    if result.retryable:
+        row["retryable"] = True
+    if result.fallback_from:
+        row["fallback_from"] = result.fallback_from
+    if fp:
+        row["fingerprint"] = fp
+    if elapsed_ms is not None:
+        row["elapsed_ms"] = round(float(elapsed_ms), 3)
+    if retries:
+        row["tool_retries"] = retries
+    if fallbacks:
+        row["fallback_used"] = fallbacks
+    if failures:
+        row["tool_failures"] = failures
+    if timeouts:
+        row["timeouts"] = timeouts
+    if fallback:
+        row["fallback"] = fallback
     if result.evidence:
         row["evidence_ids"] = result.doc_ids
+    claims = _claims(result)
+    if claims:
+        row["claims"] = claims
     if result.data is not None:
         row["data"] = result.data
     if result.truncated:
@@ -233,6 +383,8 @@ def _ledger_row(call, result: ToolResult, clamped: bool) -> dict[str, Any]:
         "refused": result.refused,
         "error": result.error,
     }
+    if result.error_kind:
+        row["error_kind"] = result.error_kind
     if result.evidence:
         row["evidence_ids"] = result.doc_ids
     if result.data is not None:
@@ -244,6 +396,55 @@ def _ledger_row(call, result: ToolResult, clamped: bool) -> dict[str, Any]:
     return row
 
 
+def _pivot_recovered(steps: list[dict[str, Any]]) -> bool:
+    """§2's attribution: a refusal followed by a *different* tool that succeeded.
+
+    That is a wrong-tool miss the description owns (F1) — the loop recovered by
+    changing corpus, not by retrying the refused call.
+    """
+    refused_tools: set[str] = set()
+    for step in steps:
+        for call in step.get("calls") or []:
+            if call.get("refused"):
+                refused_tools.add(call["name"])
+        for call in step.get("calls") or []:
+            if (refused_tools and call.get("args_valid") and call.get("result_ok")
+                    and not call.get("refused") and call["name"] not in refused_tools):
+                return True
+    return False
+
+
+def _derive_failure_kind(*, termination: str | None, gave_up: bool,
+                         last_rejection_kind: str | None, refused_all: bool,
+                         any_tool_failure: bool, any_timeout: bool,
+                         pivot_recovered: bool, contradictions: list[dict],
+                         ) -> str | None:
+    """The taxonomy's payoff: one name for the disease, not the symptom.
+
+    A `failure_kind` turns "the loop stopped" into "the loop stopped because it
+    repeated its own rejected call" — and points at an owning file.
+    """
+    if termination == "no_progress":
+        return "no_progress"
+    if termination == "oscillation":
+        return "oscillation"
+    if termination == "tool_failure":
+        return "timeout" if any_timeout else "tool_error"
+    if gave_up:
+        return last_rejection_kind or "invalid_args"
+    if refused_all:
+        return "refused"
+    if last_rejection_kind:
+        return last_rejection_kind
+    if any_tool_failure:
+        return "timeout" if any_timeout else "tool_error"
+    if pivot_recovered:
+        return "tool_miss"
+    if contradictions:
+        return "contradiction"
+    return None
+
+
 # -------------------------------------------------------------------- the loop
 
 def run_agent(request: str, registry: ToolRegistry, gateway, *,
@@ -252,11 +453,16 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
               self_correct: int | None = None,
               budget_usd: float | None = None,
               max_tool_calls_per_step: int | None = None,
+              tool_timeout_s: float | None = None,
+              repeat_window: int | None = None,
+              tool_retries: int | None = None,
+              fallbacks: int | None = None,
+              clock=time.monotonic,
               temperature: float = 0.0, max_tokens: int = 2048,
               ) -> dict[str, Any]:
     """Reason → choose → execute → observe → reason again → answer.
 
-    Three legitimate exits, all reported in `termination_reason`:
+    Day 12's three legitimate exits, all reported in `termination_reason`:
 
     1. **`answer`** — the model's turn carried no `tool_calls` (it answered from
        the evidence in hand). The only exit Day 11 knew, unchanged.
@@ -271,6 +477,26 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
     fourth, narrower exit. `max_tool_calls_per_step` is Day 11's cap expressed
     as a per-step config: `run_tool_answer` is exactly
     `run_agent(max_steps=1, max_tool_calls_per_step=1)`.
+
+    Day 13 layers a **guard ring** around each tool call and a **failure ledger**
+    beside each step row, without changing the loop above:
+
+    - **`execute_bounded`** — a wall-clock timeout (`tool_timeout_s`) around
+      `registry.execute`; a hung tool becomes a `timeout` observation.
+    - **the state fingerprint** — identical valid calls (`no_progress`) or a
+      short cycle (`oscillation`) stop the loop *before* `max_steps`, and say
+      which disease it was. `max_steps`/budget stay exactly where Day 12 left
+      them: the fingerprint is a diagnosis on top, never a replacement.
+    - **the fallback ladder** — on a retryable tool error, retry the *same* call
+      once, then substitute a sibling corpus tool (`fallbacks`, disclosed via
+      `fallback_from`), then degrade/stop honestly. Bounded, and it never
+      fabricates: a failed tool never licenses an invented result.
+
+    The run object carries both `termination_reason` (what stopped it) and
+    `failure_kind` (why), so "stopped at the cap" and "stopped because it was
+    looping" are distinguishable — the way Day 12 made "answer" distinguishable
+    from "max_steps". `clock` is injectable so the timeout wall is testable
+    without real sleeping.
     """
     q = (request or "").strip()
     if not q:
@@ -281,6 +507,14 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
     correct_cap = (agent_self_correct_from_env() if self_correct is None
                    else max(0, self_correct))
     cost_cap = agent_cost_budget_from_env() if budget_usd is None else budget_usd
+    timeout_cap = (agent_tool_timeout_from_env() if tool_timeout_s is None
+                   else tool_timeout_s)
+    window = (agent_repeat_window_from_env() if repeat_window is None
+              else max(2, repeat_window))
+    retry_cap = (agent_tool_retries_from_env() if tool_retries is None
+                 else max(0, tool_retries))
+    fallback_cap = (agent_fallbacks_from_env() if fallbacks is None
+                    else max(0, fallbacks))
     ledger_start = len(gateway.ledger.records)
 
     transcript: list[dict[str, Any]] = [
@@ -293,7 +527,14 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
     ledger_rows: list[dict[str, Any]] = []
     deferred: list[Any] = []
     capped_calls: list[Any] = []
+    signatures: list[str] = []
+    fallback_log: list[dict[str, Any]] = []
     rejections = refusals = 0
+    tool_timeouts_total = 0
+    fallbacks_used = 0
+    no_progress_at_step: int | None = None
+    oscillation_detected = False
+    last_rejection_kind: str | None = None
     gave_up = False
     termination: str | None = None
     answer_text = ""
@@ -326,17 +567,83 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
 
         observations: list[dict[str, Any]] = []
         rows: list[dict[str, Any]] = []
+        step_failures = 0
         for call in calls:
             vr = registry.validate_args(call.name, call.arguments)
-            result = registry.execute(call.name, vr.args or {}) if vr.ok else vr
+            if not vr.ok:
+                # §2 — a *rejection* ("you asked wrong"): no execution, no
+                # fingerprint (a call that never ran is not a step's identity),
+                # no ladder — Day 12's self-correction owns it.
+                rejections += 1
+                if vr.error_kind:
+                    last_rejection_kind = vr.error_kind
+                msg, clamped = _tool_message(call, vr, obs_budget)
+                observations.append(msg)
+                row = _call_row(call, vr, vr, clamped)
+                rows.append(row)
+                executed_rows.append(row)
+                ledger_rows.append(_ledger_row(call, vr, clamped))
+                continue
+
+            # §3 — execute behind the wall; §6 — climb the ladder on a tool error.
+            result, elapsed_ms = execute_bounded(
+                registry, call.name, vr.args or {},
+                tool_timeout_s=timeout_cap, clock=clock)
+            retries = failures = timeouts = 0
+            if result.error_kind in TOOL_ERROR_KINDS:
+                failures += 1
+                timeouts += int(result.error_kind == ERROR_TIMEOUT)
+            # Rung 1 — retry the *same* call (execution retry, not self-correction;
+            # different counter, different config, because a 502 and a missing
+            # `query` are not the same animal).
+            while (result.error_kind in TOOL_ERROR_KINDS and result.retryable
+                   and retries < retry_cap):
+                retries += 1
+                result, more = execute_bounded(
+                    registry, call.name, vr.args or {},
+                    tool_timeout_s=timeout_cap, clock=clock)
+                elapsed_ms += more
+                if result.error_kind in TOOL_ERROR_KINDS:
+                    failures += 1
+                    timeouts += int(result.error_kind == ERROR_TIMEOUT)
+            # Rung 2 — a sibling *corpus* tool, only with the question's intent
+            # and only if the rung is still budgeted. The substitution is
+            # disclosed (`fallback_from`) — a silent one is F1's disease.
+            fallback: dict[str, Any] | None = None
+            if result.error_kind in TOOL_ERROR_KINDS and fallbacks_used < fallback_cap:
+                sibling = SIBLING_TOOLS.get(call.name)
+                if sibling and sibling in registry.names():
+                    allowed = registry.properties(sibling)
+                    s_args = {k: v for k, v in (vr.args or {}).items() if k in allowed}
+                    fb_vr = registry.validate_args(sibling, json.dumps(s_args))
+                    if fb_vr.ok:
+                        fb_result, fb_elapsed = execute_bounded(
+                            registry, sibling, fb_vr.args or {},
+                            tool_timeout_s=timeout_cap, clock=clock)
+                        elapsed_ms += fb_elapsed
+                        fallbacks_used += 1
+                        if fb_result.error_kind in TOOL_ERROR_KINDS:
+                            failures += 1
+                            timeouts += int(fb_result.error_kind == ERROR_TIMEOUT)
+                        fb_result.fallback_from = call.name
+                        result = fb_result
+                        fallback = {"from": call.name, "to": sibling,
+                                    "ok": fb_result.ok}
+                        fallback_log.append({"step": len(steps) + 1, **fallback})
+            if result.error_kind in TOOL_ERROR_KINDS:
+                step_failures += 1
+            tool_timeouts_total += timeouts
+
             msg, clamped = _tool_message(call, result, obs_budget)
             observations.append(msg)
-            row = _call_row(call, vr, result, clamped)
+            row = _call_row(call, vr, result, clamped,
+                            elapsed_ms=elapsed_ms, retries=retries,
+                            fallbacks=1 if fallback else 0, failures=failures,
+                            timeouts=timeouts, fallback=fallback,
+                            fp=fingerprint(call))
             rows.append(row)
             executed_rows.append(row)
             ledger_rows.append(_ledger_row(call, result, clamped))
-            if not vr.ok:
-                rejections += 1
             if result.refused:
                 refusals += 1
 
@@ -351,7 +658,23 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
             row_trace["truncated"] = True             # calls recorded, not executed
             row_trace["deferred"] = [c.as_dict() for c in deferred]
         steps.append(row_trace)
+        signatures.extend(row_trace["fingerprints"])
 
+        # §4 — diagnose *before* the cap. Repeat first (stricter/faster), then a
+        # short cycle; both name the disease the cap could only call max_steps.
+        if detect_repeat(signatures):
+            no_progress_at_step = step_no
+            termination = "no_progress"
+            break
+        if detect_oscillation(signatures, window):
+            oscillation_detected = True
+            termination = "oscillation"
+            break
+        # §6 rung 4 — every call this step failed as a tool error and the ladder
+        # is spent: stop honestly, surfacing what evidence existed.
+        if calls and step_failures == len(calls):
+            termination = "tool_failure"
+            break
         if cost_cap is not None and _run_cost(gateway.ledger, ledger_start) >= cost_cap:
             termination = "budget"                      # exit 3
             break
@@ -372,6 +695,13 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
     refused_all = bool(executed_rows) and all(r["refused"] for r in executed_rows)
     answered = bool((answer_text or "").strip())
     refusal_restated = bool(refused_all and answered and NOT_COVERED not in answer_text)
+    contradictions = contradiction_rows(steps)
+    observed = observed_failures(steps)
+    failure_kind = _derive_failure_kind(
+        termination=termination, gave_up=gave_up,
+        last_rejection_kind=last_rejection_kind, refused_all=refused_all,
+        any_tool_failure=observed > 0, any_timeout=tool_timeouts_total > 0,
+        pivot_recovered=_pivot_recovered(steps), contradictions=contradictions)
 
     return {
         "question": q,
@@ -399,6 +729,18 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
         "fabricated": grounding["fabricated"],
         "cited_subset_retrieved": grounding["cited_subset_retrieved"],
         "ledger": _ledger_delta(gateway.ledger, ledger_start),
+        # Day 13 — the failure contract: the taxonomy, the wall, the detectors,
+        # the ladder, and the contradiction flag. `fabricated` above is the one
+        # every F-row asserts stays false.
+        "failure_kind": failure_kind,
+        "tool_timeouts": tool_timeouts_total,
+        "observed_failures": observed,
+        "no_progress_at_step": no_progress_at_step,
+        "oscillation_detected": oscillation_detected,
+        "distinct_step_fingerprints": len(set(signatures)),
+        "contradiction": contradictions,
+        "contradiction_covered": contradiction_coverage(contradictions, mentioned),
+        "fallback_used": fallback_log,
     }
 
 

@@ -209,15 +209,20 @@ def a4_parallel_calls(reg, gw):
 def a5_termination(reg, gw, code_ids):
     print("\n== A5 — termination on max_steps (and the budget sibling, exit 3)")
     n = 3
-    # The stub keeps asking *past* the cap: n tool turns execute, the (n+1)th is
-    # the cap (recorded, not executed), then the forced answer turn. One extra
-    # `tc_code` is the model's over-asking turn — proof the cap, not the script,
-    # stopped the loop.
-    reset(openai=["tc_code"] * (n + 1) + ["answer_limit"])
+    # A5 is the *legitimate* long run: every step is a new call, so the work
+    # simply exceeded the cap. (Day 13's repeat/oscillation detectors fire on a
+    # spiral of *identical* calls — that disease is F3/F4, not A5 — so this
+    # fixture uses distinct calls to keep the cap the thing under test.) The stub
+    # keeps asking *past* the cap: n tool turns execute, the (n+1)th is the cap
+    # (recorded, not executed), then the forced answer turn.
+    reset(openai=["tc_code", "tc_order", "tc_docs", "tc_d12_step2", "answer_limit"])
     res = run_agent("Where is checkout handled?", reg, gw, max_steps=n)
     record_run("A5", res, f"max_steps={n} → truncated, named")
     check("termination_reason == max_steps", res["termination_reason"] == "max_steps",
           str(res["termination_reason"]))
+    check("no failing-guard diagnosis fired (a legitimate run, not a spiral)",
+          res["failure_kind"] is None and not res["oscillation_detected"]
+          and res["no_progress_at_step"] is None, str(res["failure_kind"]))
     check("the run is marked truncated", res["truncated"] is True)
     check("exactly max_steps tool steps ran", res["tool_steps"] == n,
           str(res["tool_steps"]))
