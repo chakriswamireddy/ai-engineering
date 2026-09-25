@@ -75,6 +75,49 @@ def max_tool_turns_from_env() -> int:
     return max(1, _env_int("TOOL_MAX_TURNS", DEFAULT_MAX_TOOL_TURNS))
 
 
+# ============================================================ Day 13 — taxonomy
+# §2 — the third error family. Day 11's rejection is "you asked *wrong*" (a
+# schema problem the model fixes by re-issuing different args); Day 13's tool
+# error is "you asked *right, the world broke*" (an execution problem the loop
+# fixes by retrying the *same* call, then climbing the fallback ladder). Same
+# `{ok: false, ...}` surface, a different `error_kind`, a different recovery —
+# which is why they get different names and different counters.
+ERROR_INVALID_ARGS = "invalid_args"     # Day 11 — schema rejection (self-correct)
+ERROR_UNKNOWN_TOOL = "unknown_tool"     # Day 11 — registry rejection (self-correct)
+ERROR_TIMEOUT = "timeout"               # Day 13 — the wall clock (retry then fall back)
+ERROR_TOOL = "tool_error"               # Day 13 — the tool raised / downstream 5xx
+ERROR_NO_DATA = "no_data"               # Day 13 — the resolver found nothing
+ERROR_INTERNAL = "internal"             # Day 13 — the harness itself is broken
+
+# Rejections the model fixes with a *different* call. They are never retried
+# with the same args — "same wrong thing, louder" is Day 12's disease.
+REJECTION_KINDS = frozenset({ERROR_INVALID_ARGS, ERROR_UNKNOWN_TOOL})
+
+# Execution failures the fallback ladder owns. `no_data` is excluded on purpose:
+# an empty result is a *finding* to degrade from, not a broken tool to retry.
+TOOL_ERROR_KINDS = frozenset({ERROR_TIMEOUT, ERROR_TOOL, ERROR_INTERNAL})
+
+
+@dataclass
+class ToolError:
+    """Day 13 §6 — the typed execution failure, an *observation*, never a raise.
+
+    The loop must not have to catch exceptions: the moment a stub is swapped for
+    a real resolver (Day 14) an uncaught raise would turn a well-tested run into
+    an untested one. So execution failure is a value with a `retryable` flag the
+    ladder reads — `timeout` and a transient `tool_error` get one same-arg retry;
+    a `no_data`/`internal` failure does not.
+    """
+
+    error_kind: str
+    message: str
+    retryable: bool
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"error_kind": self.error_kind, "message": self.message,
+                "retryable": self.retryable}
+
+
 # ------------------------------------------------------------ result shapes
 
 @dataclass
@@ -96,6 +139,13 @@ class ToolResult:
     refused: bool = False
     truncated: bool = False
     pending_resolver: str | None = None
+    # Day 13 — the typed-failure columns. `error_kind` names the disease
+    # (`invalid_args`/`unknown_tool`/`timeout`/`tool_error`/`no_data`/`internal`);
+    # `retryable` is the ladder's gate; `fallback_from` records a disclosed
+    # substitution (the docs tool answering where the code tool died).
+    error_kind: str | None = None
+    retryable: bool = False
+    fallback_from: str | None = None
 
     @classmethod
     def success(cls, name: str, *, args: dict | None = None,
@@ -108,8 +158,19 @@ class ToolResult:
 
     @classmethod
     def failure(cls, name: str, error: str, *,
-                args: dict | None = None) -> "ToolResult":
-        return cls(name=name, ok=False, args=args, error=error)
+                args: dict | None = None,
+                error_kind: str = ERROR_INVALID_ARGS,
+                retryable: bool = False) -> "ToolResult":
+        return cls(name=name, ok=False, args=args, error=error,
+                   error_kind=error_kind, retryable=retryable)
+
+    @classmethod
+    def tool_error(cls, name: str, *, error_kind: str, message: str,
+                   args: dict | None = None, retryable: bool = False,
+                   ) -> "ToolResult":
+        """Day 13 — a tool error is an *observation*, not an exception."""
+        return cls(name=name, ok=False, args=args, error=message,
+                   error_kind=error_kind, retryable=retryable)
 
     @classmethod
     def refusal(cls, name: str, *, args: dict | None = None,
@@ -130,12 +191,20 @@ class ToolResult:
             out["reason"] = self.error
         elif not self.ok:
             out["error"] = self.error
+            if self.error_kind:
+                out["error_kind"] = self.error_kind
+            if self.retryable:
+                out["retryable"] = True
         elif self.evidence:
             out["evidence"] = self.evidence
         elif self.data is not None:
             out["data"] = self.data
         if self.truncated:
             out["truncated"] = True
+        if self.fallback_from:
+            # Rung 2 must *say* it fell back — a silent substitution is F1's
+            # disease arriving through the back door.
+            out["fallback_from"] = self.fallback_from
         return out
 
     def as_message(self) -> str:
@@ -240,25 +309,39 @@ class ToolRegistry:
     def validate_args(self, name: str, args_raw: Any) -> ToolResult:
         if name not in self._tools:
             return ToolResult.failure(
-                name, f"unknown tool {name!r} (known: {self.names()})")
+                name, f"unknown tool {name!r} (known: {self.names()})",
+                error_kind=ERROR_UNKNOWN_TOOL)
         ok, result = validate_args(self._tools[name]["schema"], args_raw)
         if not ok:
-            return ToolResult.failure(name, result)
+            return ToolResult.failure(name, result, error_kind=ERROR_INVALID_ARGS)
         return ToolResult.success(name, args=result)
+
+    def properties(self, name: str) -> dict[str, Any]:
+        """The tool's declared argument properties (Day 13's sibling-arg filter)."""
+        tool = self._tools.get(name)
+        if tool is None:
+            return {}
+        return (tool["schema"].get("parameters") or {}).get("properties") or {}
 
     def execute(self, name: str, args: dict[str, Any]) -> ToolResult:
         tool = self._tools.get(name)
         if tool is None:
             return ToolResult.failure(
-                name, f"unknown tool {name!r} (known: {self.names()})")
+                name, f"unknown tool {name!r} (known: {self.names()})",
+                error_kind=ERROR_UNKNOWN_TOOL)
         try:
             result = tool["fn"](args or {})
         except Exception as exc:                     # never crash the turn
-            return ToolResult.failure(name, f"tool error: {exc.__class__.__name__}: {exc}",
-                                      args=args)
+            # Day 13 §2 — the executor owns "the tool broke": a typed, retryable
+            # observation the ladder reads, not an exception into the loop.
+            return ToolResult.tool_error(
+                name, error_kind=ERROR_TOOL,
+                message=f"tool error: {exc.__class__.__name__}: {exc}",
+                args=args, retryable=True)
         if not isinstance(result, ToolResult):
-            return ToolResult.failure(name, "tool returned a malformed result",
-                                      args=args)
+            return ToolResult.tool_error(
+                name, error_kind=ERROR_INTERNAL,
+                message="tool returned a malformed result", args=args)
         if result.args is None:
             result.args = dict(args or {})
         return result
@@ -310,7 +393,8 @@ def _retrieval_result(name: str, retriever: Retriever | None, args: dict[str, An
                       k: int, tau: float, max_chars: int | None,
                       filter: dict[str, str] | None = None) -> ToolResult:
     if retriever is None:
-        return ToolResult.failure(name, "no store configured for this tool", args=args)
+        return ToolResult.failure(name, "no store configured for this tool",
+                                  args=args, error_kind=ERROR_INTERNAL)
     results = retriever.retrieve(args["query"], k=k, filter=filter)
     if should_refuse(results, tau):
         return ToolResult.refusal(name, args=args)
@@ -416,7 +500,9 @@ def _record_tool(name: str, kind: str,
     def fn(args: dict[str, Any]) -> ToolResult:
         record = records.get(str(args["id"]))
         if record is None:
-            return ToolResult.failure(name, f"no such {kind} id: {args['id']!r}")
+            return ToolResult.failure(
+                name, f"no such {kind} id: {args['id']!r}", args=args,
+                error_kind=ERROR_NO_DATA)
         return ToolResult.success(name, data={**record, "pending_resolver": PENDING_RESOLVER},
                                   pending_resolver=PENDING_RESOLVER)
     return fn
