@@ -18,7 +18,9 @@ entry is one of:
   tc_*        -> Day 11: a scripted `tool_calls` turn (see TOOL_SCENARIOS:
                  tc_code / tc_code_ooc / tc_docs / tc_order / tc_two /
                  tc_bad_args / tc_bad_kind / tc_unknown_key / tc_malformed /
-                 tc_unknown_tool)
+                 tc_unknown_tool, plus Day 12's tc_d12_* multi-step turns and
+                 Day 13's failure modes: tc_d13_repeat / tc_d13_osc_a|b /
+                 tc_d13_docs_miss / tc_d13_contra_step1|2 / tc_d13_contra_agree)
   answer_*    -> Day 11: a scripted answer turn (see ANSWER_SCENARIOS:
                  answer_code / answer_fabricated / answer_refusal_restated)
 
@@ -89,6 +91,37 @@ TOOL_SCENARIOS: dict[str, list[tuple[str, dict | None]]] = {
     "tc_three": [("search_saleor_code", {"query": "where is checkout completed", "k": 4}),
                  ("get_order", {"id": "1"}),
                  ("search_saleor_docs", {"query": "how do I create a checkout", "k": 4})],
+    # Day 13 — scripted failure modes. The *chat* wire can only script the
+    # model's side (a wrong tool, a repeat, an oscillation, an unknown name);
+    # tool-side failures (raise/timeout) are injected in the registry and the
+    # clock by `tools/failure_smoke.py`.
+    #   F3 repeat: the identical valid call, re-emitted (no_progress).
+    "tc_d13_repeat": [("search_saleor_code",
+                       {"query": "where is checkout completed", "k": 4})],
+    #   F4 oscillation: A,B,A,B — every step legal, the sequence is not.
+    "tc_d13_osc_a": [("search_saleor_code",
+                      {"query": "where is checkout completed", "k": 4})],
+    "tc_d13_osc_b": [("search_saleor_docs",
+                      {"query": "how do I create a checkout", "k": 4})],
+    #   F1/F5 pivot: the *wrong* corpus refuses this out-of-vocabulary query (no
+    #   known words → a zero vector → the gate refuses), so the loop can switch.
+    "tc_d13_docs_miss": [("search_saleor_docs",
+                          {"query": "frobnicate zzqx vlim", "k": 4})],
+    #   F6 contradiction: step 1 and step 2 assert opposite values for the same
+    #   claim (the stub's `claim_probe` tool carries the `claims` mapping).
+    "tc_d13_contra_step1": [("claim_probe",
+                             {"field": "order_created_by_checkout", "value": True,
+                              "subject":
+                                  "saleor/checkout/complete_checkout.py#complete_checkout"})],
+    "tc_d13_contra_step2": [("claim_probe",
+                             {"field": "order_created_by_checkout", "value": False,
+                              "subject":
+                                  "saleor/order/order_created.py#OrderCreated"})],
+    #   F6 negative twin: two sources *agree* — no contradiction to flag.
+    "tc_d13_contra_agree": [("claim_probe",
+                             {"field": "order_created_by_checkout", "value": True,
+                              "subject":
+                                  "saleor/order/order_created.py#OrderCreated"})],
 }
 
 # Day 11 — scripted *answer* texts. The grounded one cites the tool's evidence;
@@ -143,6 +176,34 @@ ANSWER_SCENARIOS: dict[str, str] = {
         "I could not fix the rejected call within the self-correction bound: the "
         "argument kept failing validation, so I am naming the stuck point "
         "instead of guessing."
+    ),
+    # Day 13 — answers that say *which* disease stopped the loop, from the
+    # evidence only (the failure column stays `fabricated? = no`).
+    "answer_noprogress": (
+        "I stopped because I repeated an identical search call without making "
+        "progress. From the evidence gathered, CheckoutComplete "
+        "(saleor/graphql/checkout/mutations/checkout_complete.py#CheckoutComplete) "
+        "is the entry point, but the loop stopped on the repeated call."
+    ),
+    "answer_oscillation": (
+        "The loop stopped because I alternated the same two searches with no "
+        "tie-breaker. From the evidence gathered, checkout is reached via "
+        "CheckoutComplete "
+        "(saleor/graphql/checkout/mutations/checkout_complete.py#CheckoutComplete)."
+    ),
+    "answer_tool_failure": (
+        "The tool failed (a timeout or an execution error) and the recovery "
+        "ladder was exhausted, so there is no evidence to answer from. I cannot "
+        "confirm what happens after checkout completes, because both the code "
+        "and documentation tools were unavailable."
+    ),
+    "answer_contradiction": (
+        "Two observations disagree on whether the checkout creates the order: "
+        "complete_checkout "
+        "(saleor/checkout/complete_checkout.py#complete_checkout) says it does, "
+        "while OrderCreated (saleor/order/order_created.py#OrderCreated) implies "
+        "it does not. I am citing both sources and stating the conflict rather "
+        "than picking a side."
     ),
 }
 
