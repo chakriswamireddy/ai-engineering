@@ -4,7 +4,7 @@
 > Kept up to date as days are worked; the canonical per-day detail lives in
 > `docs/day-plan/day-N-notes.md`.
 
-Updated: 2026-09-23
+Updated: 2026-09-25
 
 ## Status legend
 
@@ -30,6 +30,7 @@ Updated: 2026-09-23
 | 10 | Code RAG | PARTIAL (all MECH green offline; code fixtures 6/6 + doc nine 9/9 on the stub; real Saleor build + semantic `file:line` verdicts `PENDING` Day 21) | `ai_os/ingest_code.py`, `ai_os/code_questions.yaml`, `ai_os/retrieval.py` (code vocab), `ai_os/rag.py` (code metadata), `tools/build_code_store.py`, `tools/code_debug.py`, `tools/retrieval_day10.py`, `test_day10.py`, `docs/concepts/code-rag.md`, `docs/evaluations/code-day10.md` |
 | 11 | Tool Calling | PARTIAL (all MECH green offline; T1–T7 + dialect parity + the Day-6 empty-content sibling; real model *tool choice* `PENDING` Day 21) | `ai_os/tools.py`, `ai_os/agent.py`, `ai_os/contract.py` (`ToolCall`), `ai_os/providers/{openai,anthropic}.py` (tool wire), `ai_os/gateway.py` (`chat_with_tools`), `tools/mock_gateway.py` (tc_* scenarios), `tools/tool_smoke.py`, `docs/concepts/tool-calling.md`, `docs/evaluations/tool-day11.md` |
 | 12 | Agent Loop | PARTIAL (all MECH green offline; A1–A8 + the `gave_up` bound + the depth-1 line + the cost shape; `--live` real-model *composition* **verified** — the free model walks the map with the reasoning prompt; Day 21 rules cross-model strength) | `ai_os/agent.py` (`run_agent`, `REASONING_PROMPT`), `ai_os/trace.py` (`step_trace`, `grounding_over_transcript`), `tools/mock_gateway.py` (multi-step `tc_*`/`answer_*`), `tools/agent_smoke.py` (`--live`), `docs/concepts/agent-loop.md`, `docs/evaluations/agent-day12.md` |
+| 13 | Agent Failure Modes | PARTIAL (all MECH green offline; F1–F9 with `fabricated? = no` on every row + the timeout wall on an injected clock + the fingerprint firing before the cap + the disclosed fallback ladder + the contradiction flag with its two negative twins; A1–A8 / T1–T7 re-run through the guarded loop; real-model *tripping* and contradiction *adjudication* `PENDING` Day 21, real latency `PENDING` Day 14) | `ai_os/tools.py` (`ToolError`, `error_kind` taxonomy, `REJECTION_KINDS`/`TOOL_ERROR_KINDS`), `ai_os/agent.py` (`execute_bounded`, the fingerprint, the fallback ladder, `_derive_failure_kind`), `ai_os/trace.py` (`fingerprint`/`detect_repeat`/`detect_oscillation`/`contradiction_rows`/`contradiction_coverage`), `tools/mock_gateway.py` (`tc_d13_*`), `tools/failure_smoke.py`, `docs/concepts/agent-failure-modes.md`, `docs/evaluations/failure-day13.md` |
 
 ---
 
@@ -447,6 +448,78 @@ Concept + evaluation: `docs/concepts/agent-loop.md`,
 
 ---
 
+## Day 13 — Agent Failure Modes `PARTIAL`
+
+Day 13 turns the loop's negative space into the subject. Day 12 made failure *reachable
+and terminating*; Day 13 makes it *named and handled* — the seven curriculum modes
+(wrong tool, invalid args, infinite loop, missing information, contradictory results,
+hallucinated tools, tool failure) become a **taxonomy with an owner and a guard each**,
+and the loop gains the three mechanisms Day 12 deferred: a **wall-clock timeout** (the
+bound money never gave), a **state fingerprint** (repeat/oscillation diagnosed *before*
+the cap), and a **bounded fallback ladder** (retry → sibling tool → degrade/stop, and
+it never fabricates). Five of the seven guards are **renamed** Day 11–12 seams; the two
+genuinely new ones are tool failure (execution) and contradiction (semantic detection,
+not adjudication). Concept + evaluation: `docs/concepts/agent-failure-modes.md`,
+`docs/evaluations/failure-day13.md`.
+
+- `ai_os/tools.py` — the **third error family**. `ToolError{error_kind, message,
+  retryable}` and the constants `invalid_args`/`unknown_tool` (Day 11 rejections) vs
+  `timeout`/`tool_error`/`no_data`/`internal` (Day 13 execution). `ToolResult` gains
+  `error_kind`/`retryable`/`fallback_from`; `failure()` and a new `tool_error()` carry
+  the type. `validate_args` tags rejections; `execute` turns any raise into a typed,
+  retryable `tool_error` **observation** (never an exception into the loop), a
+  malformed return into `internal`, and a missing record into `no_data`.
+  `REJECTION_KINDS` (model fixes it) and `TOOL_ERROR_KINDS` (the ladder owns it) encode
+  the recovery split; `registry.properties()` feeds the sibling-arg filter.
+- `ai_os/agent.py` — `execute_bounded(registry, name, args, *, tool_timeout_s,
+  clock)` measures the wall around **one** `registry.execute` (not the step) and
+  returns `(ToolResult, elapsed_ms)`; a timeout is an observation. `run_agent` gains
+  `tool_timeout_s`, `repeat_window`, `tool_retries`, `fallbacks`, and an injectable
+  `clock`, plus the **guard ring**: the **fingerprint** (identical call → `no_progress`;
+  `A,B,A,B` → `oscillation`, both *before* `max_steps` and layered on top of it) and
+  the **fallback ladder** (rung 1 same-arg retry, rung 2 sibling `search_saleor_code ⇄
+  search_saleor_docs` with a **disclosed** `fallback_from`, rung 4 `tool_failure`). The
+  run returns both `termination_reason` and `failure_kind` (`_derive_failure_kind`),
+  plus `tool_timeouts`, `observed_failures`, `no_progress_at_step`,
+  `oscillation_detected`, `distinct_step_fingerprints`, `contradiction`,
+  `contradiction_covered`, and `fallback_used`. `AGENT_TOOL_TIMEOUT_S=30`,
+  `AGENT_REPEAT_WINDOW=4`, `AGENT_TOOL_RETRIES=1`, `AGENT_FALLBACKS=1`.
+- `ai_os/trace.py` — the state fingerprint (`fingerprint` = sha1 of name+canonical args,
+  stable across processes; `detect_repeat`/`detect_oscillation`) and the contradiction
+  detector (`contradiction_rows` groups claims by `field`, fires on conflicting
+  *values*; `contradiction_coverage` = the completeness clause requiring both sides
+  cited; `observed_failures`). `step_trace` carries the failure ledger beside each step
+  row; `AGENT_TERMINATIONS` gains `no_progress`/`oscillation`/`tool_failure`.
+- `tools/mock_gateway.py` — Day 13 scripted turns: `tc_d13_repeat`, `tc_d13_osc_a|b`,
+  `tc_d13_docs_miss` (the wrong-corpus refusal that licenses a pivot),
+  `tc_d13_contra_step1|2` + `tc_d13_contra_agree` (the contradiction and its agreeing
+  twin), and the `answer_noprogress`/`answer_oscillation`/`answer_tool_failure`/
+  `answer_contradiction` turns (each says *which* disease stopped the loop, from the
+  evidence only).
+- `tools/failure_smoke.py` (new) — **ALL DAY 13 (MECH) CHECKS PASSED**: F1 wrong tool
+  (pivot, `tool_miss`), F2 invalid args (typed rejection, self-correct, A2 stays green),
+  F3 repeat (fire at step 2, 0 calls), F4 oscillation (fire at step 4), F5 missing
+  info (refusal + restated "not covered", zero evidence), F6 contradiction (flagged,
+  both sides cited, **two negative twins** — agreement and the split-brain — must not
+  fire), F7 hallucinated tool (typed `unknown_tool`, no execution), F8 tool failure
+  (transient retry / persistent sibling fallback disclosed / ladder exhausted →
+  `tool_failure`), F9 timeout (wall proven on an injected clock), and the
+  **no-regression** gate (re-runs `agent_smoke.py` A1–A8 and `tool_smoke.py` T1–T7
+  unchanged in subprocesses). `fabricated? = no` on every row.
+- **No regression:** the guards wrap the loop — a healthy run is byte-for-byte
+  unchanged (`failure_kind: None`), A2 (self-correction) and F2 (invalid args) coexist
+  because the fingerprint never normalizes the *fix*, and A5 (`max_steps`) uses four
+  *distinct* calls so the cap, not a detector, is the thing under test. `ai_os/gateway.py`
+  and the retrieval engine are **untouched**: a failure-handling layer that modifies the
+  thing it protects is a bug wearing a safety vest.
+- `PENDING`: whether a *real* model **trips** F1/F5/F6/F7 and whether it **recovers** or
+  papers over — Day 21's judgment on Day 13's guards. The stub proves the guards *fire*;
+  a real key proves a real model can *trip* them. The stubbed failures cannot represent
+  real DB latency (Day 14), the fingerprint cannot catch slow-but-genuine progress (Day
+  16), and a contradiction is flagged, never adjudicated (Day 21).
+
+---
+
 ## Known gaps (what blocks "everything green for real")
 
 1. **Git:** Day 9 is committed (`39285dd`, `76af2e0`, `37bd8d9`, `d62acda`);
@@ -521,6 +594,19 @@ Concept + evaluation: `docs/concepts/agent-loop.md`,
    citation) — the loop-prompt ownership family is new and ungraded by a real
    model; (d) the failure modes a reactive loop still hits (oscillation,
    contradiction, hallucinated tools) — **Day 13**'s guards, built on this trace.
+9. **Day 13 semantics** — the MECH half is green (`tools/failure_smoke.py`; F1–F9,
+   `fabricated? = no` on every row, the timeout wall on an injected clock, the
+   fingerprint firing before the cap, the disclosed fallback ladder, the contradiction
+   flag with its two negative twins, and A1–A8 / T1–T7 re-run unchanged through the
+   guarded loop). Still `PENDING`: (a) whether a *real* model **trips** F1/F5/F6/F7 and
+   whether it **recovers** or papers over — Day 21's judgment on Day 13's guards (the
+   stub proves the guards *fire*, a real key proves a model can *trip* them); (b)
+   **contradiction adjudication** — the harness flags a conflict and requires both
+   sides cited, but no mechanical rule decides *which* is right (Day 21); (c) real DB
+   timeouts and resolver errors, which the stubbed failures cannot represent (Day 14);
+   (d) slow-but-genuine progress that still ends at `max_steps` — the fingerprint
+   cannot see it (Day 16's planner). Re-verify with
+   `python tools/failure_smoke.py`.
 
 ## How to re-verify, in one line
 
@@ -539,6 +625,7 @@ python tools/retrieval_day10.py --stub  # day 10 doc-vs-code (code 6/6, doc 9/9)
 python tools/tool_smoke.py              # day 11 T1–T7 (calls, validation, cap, parity)
 python tools/agent_smoke.py             # day 12 A1–A8 (loop, three exits + gave_up, depth-1, grounding over transcript)
 python tools/agent_smoke.py --live      # day 12 A1/A6/A7 against the real gateway (retrieval on the stub stores)
+python tools/failure_smoke.py           # day 13 F1–F9 (guards + fabricated? column) + A1–A8 / T1–T7 re-run
 LLM_PROVIDERS=cloudflare: python tools/build_code_store.py --corpus corpus_code/saleor --out data/code_store.json --batch 100  # real build (resume; see gap 6)
 python tools/retrieval_day10.py --store data/code_store.json --doc-store data/store.json  # real corpora
 ```
