@@ -34,7 +34,7 @@ STUB = Path(__file__).resolve().parent / "mock_gateway.py"
 TOOL_SMOKE = Path(__file__).resolve().parent / "tool_smoke.py"
 sys.path.insert(0, str(ROOT))
 
-from ai_os.agent import run_agent  # noqa: E402
+from ai_os.agent import run_agent, run_tool_answer  # noqa: E402
 from ai_os.trace import AGENT_TERMINATIONS  # noqa: E402
 
 import tools.code_debug as _cd  # noqa: E402
@@ -193,7 +193,11 @@ def a4_parallel_calls(reg, gw):
 def a5_termination(reg, gw, code_ids):
     print("\n== A5 — termination on max_steps (and the budget sibling, exit 3)")
     n = 3
-    reset(openai=["tc_code"] * n + ["answer_limit"])
+    # The stub keeps asking *past* the cap: n tool turns execute, the (n+1)th is
+    # the cap (recorded, not executed), then the forced answer turn. One extra
+    # `tc_code` is the model's over-asking turn — proof the cap, not the script,
+    # stopped the loop.
+    reset(openai=["tc_code"] * (n + 1) + ["answer_limit"])
     res = run_agent("Where is checkout handled?", reg, gw, max_steps=n)
     record_run("A5", res, f"max_steps={n} → truncated, named")
     check("termination_reason == max_steps", res["termination_reason"] == "max_steps",
@@ -208,6 +212,12 @@ def a5_termination(reg, gw, code_ids):
           res["turns"] == n + 1, str(res["turns"]))
     check("the still-asking model produced no fabricated evidence",
           not res["fabricated"])
+    check("the over-asking calls are *recorded, not executed*",
+          len(res["capped_tool_calls"]) == 1
+          and res["capped_tool_calls"][0]["name"] == "search_saleor_code",
+          str(res["capped_tool_calls"]))
+    check("no observation was appended for the capped turn (step count stays the cap)",
+          res["tool_steps"] == n and len(res["steps"]) == n)
 
     reset(openai=["tc_code", "answer_budget"])
     res2 = run_agent("Where is checkout handled?", reg, gw, max_steps=5, budget_usd=1e-9)
@@ -305,6 +315,33 @@ def cost_shape(reg, gw, gw_doc, gw_code):
           f"${sum(r.cost_usd for r in g.ledger.records):.8f}")
 
 
+def day11_single_turn_is_an_answer(reg, gw):
+    """The depth-1 loop *is* Day 11: one tool turn + one *natural* answer.
+
+    The regression this guards: a loop that, at `max_steps=1`, executes the tool
+    turn, calls that the cap, and injects the `max_steps` note — turning Day 11's
+    grounded answer into a false "I reached the step limit". The loop must ask
+    once more after the last allowed step and take the answer exit.
+    """
+    print("\n== Day 12 — run_agent(max_steps=1) reproduces Day 11 exactly")
+    reset(openai=["tc_code", "answer_code"])
+    res = run_tool_answer("Where is checkout handled?", reg, gw)
+    check("termination_reason is the natural answer, not max_steps",
+          res["termination_reason"] == "answer", str(res["termination_reason"]))
+    check("no cap note leaked into the answer (a loop must not change a single-tool answer)",
+          "step limit" not in (res["answer"] or "").lower()
+          and "max_steps" not in (res["answer"] or "").lower(),
+          (res["answer"] or "")[:70])
+    check("Day 11's two-turn shape: tool_steps == 1, turns == 2",
+          res["tool_steps"] == 1 and res["turns"] == 2,
+          f"steps={res['tool_steps']} turns={res['turns']}")
+    check("nothing was capped (a single tool turn never hits the cap)",
+          res["capped_tool_calls"] == [] and not res["truncated"])
+    check("the grounded answer is inside the retrieved set",
+          res["cited_subset_retrieved"] and not res["fabricated"])
+    record_run("depth1", res, "max_steps=1 → Day 11 exactly (answer exit)")
+
+
 def no_regression_day11():
     print("\n== Day 12 — no regression: Day 11's T1…T7 re-run unchanged (max_steps=1)")
     proc = subprocess.run([sys.executable, str(TOOL_SMOKE)], cwd=str(ROOT),
@@ -380,6 +417,7 @@ def main() -> None:
         a8_parallel_capacity(reg, gw)
         ran_off_budget(reg, gw)
         cost_shape(reg, gw, gw_doc, gw_code)
+        day11_single_turn_is_an_answer(reg, gw)
         no_regression_day11()
     finally:
         if proc is not None:
