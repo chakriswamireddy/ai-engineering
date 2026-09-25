@@ -23,6 +23,8 @@ the whole thing next to the report.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Iterable, Sequence
 
 from ai_os.gate import score_gap, should_refuse, top_score
@@ -397,7 +399,114 @@ AGENT_TERMINATIONS: dict[str, str] = {
               "to already-gathered evidence",
     "gave_up": "the self-correction bound was reached; the loop stopped naming "
                "the stuck point",
+    # Day 13 — the diagnosis exits. Each fires *before* the cap on a disease the
+    # cap could only report as `max_steps`, and hands the user a named reason.
+    "no_progress": "Day 13 — the repeat detector fired: the model re-issued an "
+                   "identical call instead of correcting or moving on",
+    "oscillation": "Day 13 — the cycle detector fired: the loop alternated a "
+                   "short set of calls (A,B,A,B) with no tie-breaker",
+    "tool_failure": "Day 13 — the tool-call boundary owned it: execution failed "
+                    "(timeout/exception) and the fallback ladder was exhausted",
 }
+
+
+# ==================================================== Day 13 — loop hardening
+# §4 — the state fingerprint. `max_steps` reports *that* the loop hit a wall;
+# the fingerprint reports *why*, so "the model repeated its own rejected call"
+# and "the work genuinely exceeded the cap" stop sharing one terminal. It is
+# arithmetic over strings the loop already holds — zero embeds, zero chats.
+
+def normalized_args(call) -> Any:
+    """The call's args, JSON-canonicalized (key order is noise, not signal).
+
+    Spelling is normalized so "the same call spelled differently" is still a
+    repeat; the *value* is never normalized, so Day 12's A2 stays a different
+    call the moment the model fixes `kind="mutations"` → `kind="mutation"`.
+    """
+    parsed = call.parsed() if hasattr(call, "parsed") else None
+    raw = parsed if parsed is not None else (getattr(call, "arguments", "") or "")
+    try:
+        return json.loads(json.dumps(raw, sort_keys=True, default=str))
+    except (TypeError, ValueError):
+        return str(raw)
+
+
+def fingerprint(call) -> str:
+    """Stable digest of (tool name, normalized args) — the step's identity.
+
+    sha1, not Python's salted `hash()`, so the same call fingerprints the same
+    across processes and `distinct_step_fingerprints` is reproducible.
+    """
+    key = json.dumps([getattr(call, "name", ""), normalized_args(call)],
+                     sort_keys=True, default=str)
+    return hashlib.sha1(key.encode()).hexdigest()[:12]
+
+
+def detect_repeat(signatures: Sequence[str]) -> bool:
+    """No progress: the identical *valid* call re-issued immediately (A, A).
+
+    Adjacency, not a global count: a call that reappears *after* a different one
+    is oscillation's business (checked separately), and a legitimate re-search
+    with identical args is not something a stub can distinguish from a spiral.
+    """
+    return len(signatures) >= 2 and signatures[-1] == signatures[-2]
+
+
+def detect_oscillation(signatures: Sequence[str], window: int) -> bool:
+    """Oscillation: ≤ 2 distinct calls inside a window of `window` steps (A,B,A,B)."""
+    if window < 2 or len(signatures) < window:
+        return False
+    return len(set(signatures[-window:])) <= 2
+
+
+def contradiction_rows(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """§6 — flag observations that bear on the same claim with conflicting values.
+
+    Detected, not adjudicated: the detector compares *values* for the same claim
+    `field` across observations. It is deliberately narrow, so Day 10's
+    split-brain — a mutation and a service both answering "where is checkout",
+    two correct hits in two layers — does **not** fire: complementary evidence
+    carries overlapping *topics*, never contradictory `claims`.
+    """
+    groups: dict[str, list[tuple[str | None, Any]]] = {}
+    for step in steps:
+        for call in step.get("calls") or []:
+            for claim in call.get("claims") or []:
+                groups.setdefault(claim["field"], []).append(
+                    (claim.get("subject"), claim.get("value")))
+    rows: list[dict[str, Any]] = []
+    for field, pairs in groups.items():
+        distinct: dict[str, tuple[str | None, Any]] = {}
+        for subject, value in pairs:
+            key = json.dumps(value, sort_keys=True, default=str)
+            distinct.setdefault(key, (subject, value))
+        if len(distinct) > 1:
+            rows.append({
+                "contradiction": True,
+                "field": field,
+                "observations": [subj for subj, _ in distinct.values()],
+                "values": [val for _, val in distinct.values()],
+            })
+    return rows
+
+
+def contradiction_coverage(rows: list[dict[str, Any]],
+                           citations: Sequence[str]) -> bool:
+    """§6's completeness clause: a flagged contradiction must have both sides cited.
+
+    `cited ⊆ retrieved` grows a *cover*: silently picking one side is the failure
+    mode, so every contentious observation must appear in the answer's citations.
+    """
+    if not rows:
+        return True
+    cited = set(citations or [])
+    return all(set(r.get("observations") or []) <= cited for r in rows)
+
+
+def observed_failures(steps: list[dict[str, Any]]) -> int:
+    """How many executed calls ended in a tool failure (timeout/exception/internal)."""
+    return sum(int(c.get("tool_failures") or 0)
+               for s in steps for c in s.get("calls") or [])
 
 
 def step_trace(step: int, rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -430,6 +539,14 @@ def step_trace(step: int, rows: list[dict[str, Any]]) -> dict[str, Any]:
         "retrieved": retrieved,
         "cited": [],
         "cited_subset_retrieved": True,
+        # Day 13 — the failure ledger beside the step row.
+        "fingerprints": [r["fingerprint"] for r in rows if r.get("fingerprint")],
+        "error_kinds": [r["error_kind"] for r in rows if r.get("error_kind")],
+        "tool_failures": sum(int(r.get("tool_failures") or 0) for r in rows),
+        "tool_timeouts": sum(int(r.get("timeouts") or 0) for r in rows),
+        "observed_failures": sum(int(r.get("tool_failures") or 0) for r in rows),
+        "fallback_used": [r["fallback"] for r in rows if r.get("fallback")],
+        "tool_retries": sum(int(r.get("tool_retries") or 0) for r in rows),
     }
 
 
