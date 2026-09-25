@@ -503,6 +503,53 @@ def contradiction_coverage(rows: list[dict[str, Any]],
     return all(set(r.get("observations") or []) <= cited for r in rows)
 
 
+# ===================================================== Day 14 — the data columns
+# §8's data table has four columns no retrieval row ever carried: the *generated*
+# SQL, the *validation* verdict, whether it *executed*, and the *row_count* (plus
+# `truncated` and the database's own `elapsed_ms`). They are promoted here, out
+# of the tool result's `{ok, sql, columns, rows, row_count, truncated,
+# elapsed_ms}` record, so the debugger reads one row per call for all four
+# corpora. `gen_sql` is the artifact Day 15 attacks; `executed` is what separates
+# "the validator refused it" (executed: false) from "the database refused it"
+# (executed: true).
+
+def data_columns(result) -> dict[str, Any]:
+    """Promote a data tool's record columns into the call row (Day 14 §8).
+
+    Empty for a retrieval result — a doc tool has no `sql` key — so this is
+    purely additive and Days 7–13 rows are byte-for-byte unchanged.
+    """
+    data = getattr(result, "data", None)
+    if not isinstance(data, dict) or "sql" not in data:
+        return {}
+    out: dict[str, Any] = {
+        "gen_sql": data.get("sql"),
+        "executed": bool(data.get("executed")),
+    }
+    if data.get("validation"):
+        out["validation"] = data["validation"]
+    if data.get("query_kind"):
+        out["query_kind"] = data["query_kind"]
+    if data.get("row_count") is not None:
+        out["row_count"] = int(data["row_count"])
+    if data.get("truncated"):
+        out["truncated"] = True
+    if data.get("elapsed_ms") is not None:
+        out["db_elapsed_ms"] = data["elapsed_ms"]
+    return out
+
+
+def generated_sqls(steps: list[dict[str, Any]]) -> list[str]:
+    """The *generated* queries for the run — `query_kind: generated` only.
+
+    The parameterized resolvers carry `sql` too (a fixed query with one `id`), so
+    the kind is what keeps "the model wrote this" distinguishable from "the tool
+    ran a stored query" in the trace.
+    """
+    return [c["gen_sql"] for s in steps for c in s.get("calls") or []
+            if c.get("gen_sql") and c.get("query_kind") == "generated"]
+
+
 def observed_failures(steps: list[dict[str, Any]]) -> int:
     """How many executed calls ended in a tool failure (timeout/exception/internal)."""
     return sum(int(c.get("tool_failures") or 0)

@@ -52,6 +52,7 @@ import time
 from typing import Any
 
 from ai_os.contract import ToolCall
+from ai_os.data import asserted_subset_returned
 from ai_os.rag import NOT_COVERED
 from ai_os.tools import (
     ERROR_TIMEOUT,
@@ -64,9 +65,11 @@ from ai_os.trace import (
     AGENT_TERMINATIONS,
     contradiction_coverage,
     contradiction_rows,
+    data_columns,
     detect_oscillation,
     detect_repeat,
     fingerprint,
+    generated_sqls,
     grounding_over_transcript,
     observed_failures,
     step_trace,
@@ -370,7 +373,17 @@ def _call_row(call, vr: ToolResult, result: ToolResult,
         row["truncated"] = True
     if clamped:
         row["obs_clamped"] = True
+    row.update(data_columns(result))          # Day 14 §8 — gen_sql/validation/…
     return row
+
+
+_DATA_SUMMARY_KEYS = ("sql", "query_kind", "validation", "executed", "columns",
+                      "row_count", "truncated", "error_kind", "elapsed_ms")
+
+
+def _data_summary(record: dict[str, Any]) -> dict[str, Any]:
+    """The compact data-record view for the run object (rows stay in the steps)."""
+    return {k: record[k] for k in _DATA_SUMMARY_KEYS if record.get(k) is not None}
 
 
 def _ledger_row(call, result: ToolResult, clamped: bool) -> dict[str, Any]:
@@ -692,6 +705,12 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
     mentioned = mentioned_ids(answer_text)
     grounding = grounding_over_transcript(mentioned, steps)
     evidence_ids = grounding["retrieved"]
+    # Day 14 §7 — `asserted ⊆ returned`: every number/entity the answer asserts
+    # must be a returned cell or a stated aggregate of one. The SQL sibling of
+    # `cited ⊆ retrieved`, computed over the data records of the transcript.
+    data_records = [r["data"] for r in executed_rows
+                    if isinstance(r.get("data"), dict) and "columns" in r["data"]]
+    asserted = asserted_subset_returned(answer_text, question=q, records=data_records)
     refused_all = bool(executed_rows) and all(r["refused"] for r in executed_rows)
     answered = bool((answer_text or "").strip())
     refusal_restated = bool(refused_all and answered and NOT_COVERED not in answer_text)
@@ -741,6 +760,15 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
         "contradiction": contradictions,
         "contradiction_covered": contradiction_coverage(contradictions, mentioned),
         "fallback_used": fallback_log,
+        # Day 14 — the data contract: the *generated* SQL (the artifact Day 15
+        # attacks), the data records (compact; rows live in the steps), and the
+        # day's headline invariant `asserted ⊆ returned` over the whole run.
+        "gen_sql": generated_sqls(steps),
+        "data_tool_calls": len(data_records),
+        "data_records": [_data_summary(r) for r in data_records],
+        "asserted_subset_returned": asserted["ok"],
+        "asserted_unsupported": (asserted["unsupported"]
+                                 + asserted["unsupported_entities"]),
     }
 
 
