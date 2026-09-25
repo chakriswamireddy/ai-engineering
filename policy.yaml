@@ -1,0 +1,70 @@
+# Day 15 §5 — the SQL policy: allow/deny rules as *config*, not code.
+#
+# The layer that executes generated SQL (ai_os/sql_safety.py) reads this file.
+# Nothing here is a heuristic the executor embeds: the allow-listed tables are
+# exactly Day 14's schema card (the same curated list the model was *told*
+# about becomes the list the layer *enforces*), the PII deny is a property of
+# the column (never of the question), and every limit is reviewable and
+# testable without touching the executor.
+#
+#   * allow-lists beat deny-lists: state what is permitted (single statement,
+#     SELECT/WITH, these tables, bounded cost) and reject the complement.
+#   * privileges beat parsers: this file is defense-in-depth — the total
+#     guarantee is the `saleor_read_only` role, which has no write grant.
+#   * fail closed: anything not permitted here is refused; over-blocking is
+#     measured against a legitimate control (X11), never assumed away.
+
+# The only statement heads the grammar allows. A write/DDL head is a *policy*
+# rejection, not a syntax one (the model asked for something it may not have,
+# so self-correction must not help it find a workaround).
+statement_allow: [select, with]
+
+# The allow-listed schema — Day 14's SCHEMA_CARD, verbatim. A table outside it
+# is invisible: rejected *before* the database, as a policy decision the layer
+# owns (not an unknown-table error the engine happens to return).
+tables_allow:
+  - order_order
+  - order_orderline
+  - product_product
+  - product_productvariant
+  - product_productvariantchannellisting
+  - account_user
+  - channel_channel
+
+# PII / secrets — never readable, even where the table is allowed. Rejected by
+# *name*, so `SELECT password FROM account_user` is refused although the table
+# is allow-listed (and refused even though the column does not exist in the
+# offline stub: the deny is a property of the column, not of the schema).
+columns_deny:
+  account_user:
+    - password
+    - password_hash
+    - last_login
+    - auth_token
+    - token
+    - session_key
+    - api_key
+    - secret
+
+# Enforced business definitions (Day 14's glossary, now a *guard*). A metric
+# with more than one valid reading must be pinned the glossary's way; a silent
+# pick is the correctness failure this block exists to prevent. `require_all`
+# lists the tokens that must appear (case-insensitive) when a query reads one
+# of `columns`.
+definitions:
+  revenue:
+    columns: [total_price_net_amount, total_price_gross_amount]
+    require_all: ["draft"]
+    message: >-
+      "revenue" has more than one valid reading (net or gross; drafts included
+      or excluded). Resolve it via the glossary — exclude status = 'DRAFT' —
+      or the query is ambiguous.
+
+# Resource guards. `row_limit` is the hard maximum returned (a LIMIT is injected
+# at rewrite time, shape-aware); `max_cost` is the EXPLAIN/heuristic ceiling;
+# the timeouts are *server-side* settings (the client wall is Day 13's).
+row_limit: 100
+max_cost: 1000000
+statement_timeout_ms: 2000
+lock_timeout_ms: 1000
+idle_in_transaction_session_timeout_ms: 5000
