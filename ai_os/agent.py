@@ -54,6 +54,7 @@ from typing import Any
 from ai_os.contract import ToolCall
 from ai_os.data import asserted_subset_returned
 from ai_os.rag import NOT_COVERED
+from ai_os.sql_safety import POLICY as POLICY_CLASS
 from ai_os.tools import (
     ERROR_TIMEOUT,
     ERROR_TOOL,
@@ -65,6 +66,7 @@ from ai_os.trace import (
     AGENT_TERMINATIONS,
     contradiction_coverage,
     contradiction_rows,
+    cost_estimates,
     data_columns,
     detect_oscillation,
     detect_repeat,
@@ -72,6 +74,8 @@ from ai_os.trace import (
     generated_sqls,
     grounding_over_transcript,
     observed_failures,
+    policy_violations,
+    rejection_classes,
     step_trace,
 )
 
@@ -196,6 +200,17 @@ TERMINATION_NOTE: dict[str, str] = {
         "observations already in this transcript and say plainly that the tool "
         "failed and what is therefore missing. Do NOT invent evidence."
     ),
+    # Day 15 — the policy wall. The note explicitly forbids the rephrase-the-
+    # forbidden-request move, because that is exactly the attack a helpful loop
+    # would otherwise assist.
+    "policy": (
+        "The run stopped because the safe SQL layer refused a *policy* violation "
+        "(a write, a denied/sensitive table or column, an ambiguous definition, "
+        "or a query over the resource cap). This is not a mistake to fix by "
+        "rephrasing: say plainly that the request was refused and why (naming the "
+        "class, not schema details), and do NOT attempt a workaround. Answer only "
+        "from the observations already in this transcript. Do NOT invent evidence."
+    ),
 }
 
 
@@ -218,7 +233,11 @@ REASONING_PROMPT = (
     "it. Never invent a doc_id or a module#Symbol.\n"
     "4. If a call was rejected, fix the argument and retry once — a corrected call "
     "is a different call; repeating the same wrong call is not.\n"
-    "5. Answer only from the evidence you gathered, citing the module#Symbol / "
+    "5. If a tool result carries rejection_class 'policy', STOP: it is a forbidden "
+    "request (a write, sensitive data, an ambiguous definition, an over-cost "
+    "query). Do not rephrase it and do not look for a workaround — report the "
+    "refusal plainly. Only a 'repairable' rejection invites a fixed retry.\n"
+    "6. Answer only from the evidence you gathered, citing the module#Symbol / "
     "doc_id ids that appear in the tool results."
 )
 
@@ -378,7 +397,9 @@ def _call_row(call, vr: ToolResult, result: ToolResult,
 
 
 _DATA_SUMMARY_KEYS = ("sql", "query_kind", "validation", "executed", "columns",
-                      "row_count", "truncated", "error_kind", "elapsed_ms")
+                      "row_count", "truncated", "error_kind", "elapsed_ms",
+                      "rejection_class", "stage", "executed_sql", "cost_estimate",
+                      "statement_timeout_ms")
 
 
 def _data_summary(record: dict[str, Any]) -> dict[str, Any]:
@@ -431,12 +452,17 @@ def _derive_failure_kind(*, termination: str | None, gave_up: bool,
                          last_rejection_kind: str | None, refused_all: bool,
                          any_tool_failure: bool, any_timeout: bool,
                          pivot_recovered: bool, contradictions: list[dict],
+                         policy_hits: int = 0,
                          ) -> str | None:
     """The taxonomy's payoff: one name for the disease, not the symptom.
 
     A `failure_kind` turns "the loop stopped" into "the loop stopped because it
-    repeated its own rejected call" — and points at an owning file.
+    repeated its own rejected call" — and points at an owning file. Day 15's
+    `policy_violation` outranks the rest: a forbidden request is the *cause*,
+    whatever the loop was doing when it made it.
     """
+    if policy_hits:
+        return "policy_violation"
     if termination == "no_progress":
         return "no_progress"
     if termination == "oscillation":
@@ -545,6 +571,7 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
     rejections = refusals = 0
     tool_timeouts_total = 0
     fallbacks_used = 0
+    policy_hits = 0
     no_progress_at_step: int | None = None
     oscillation_detected = False
     last_rejection_kind: str | None = None
@@ -581,6 +608,7 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
         observations: list[dict[str, Any]] = []
         rows: list[dict[str, Any]] = []
         step_failures = 0
+        step_policy = False
         for call in calls:
             vr = registry.validate_args(call.name, call.arguments)
             if not vr.ok:
@@ -598,18 +626,24 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
                 ledger_rows.append(_ledger_row(call, vr, clamped))
                 continue
 
-            # §3 — execute behind the wall; §6 — climb the ladder on a tool error.
+            # §6 — climb the ladder on a tool error. Day 15: a *policy* rejection
+            # is excluded from both rungs — re-issuing a forbidden query (or
+            # substituting a sibling tool for it) is the loop assisting a bypass.
             result, elapsed_ms = execute_bounded(
                 registry, call.name, vr.args or {},
                 tool_timeout_s=timeout_cap, clock=clock)
             retries = failures = timeouts = 0
-            if result.error_kind in TOOL_ERROR_KINDS:
+            if result.rejection_class == POLICY_CLASS:
+                policy_hits += 1
+                step_policy = True
+            elif result.error_kind in TOOL_ERROR_KINDS:
                 failures += 1
                 timeouts += int(result.error_kind == ERROR_TIMEOUT)
             # Rung 1 — retry the *same* call (execution retry, not self-correction;
             # different counter, different config, because a 502 and a missing
             # `query` are not the same animal).
             while (result.error_kind in TOOL_ERROR_KINDS and result.retryable
+                   and result.rejection_class != POLICY_CLASS
                    and retries < retry_cap):
                 retries += 1
                 result, more = execute_bounded(
@@ -623,7 +657,9 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
             # and only if the rung is still budgeted. The substitution is
             # disclosed (`fallback_from`) — a silent one is F1's disease.
             fallback: dict[str, Any] | None = None
-            if result.error_kind in TOOL_ERROR_KINDS and fallbacks_used < fallback_cap:
+            if (result.error_kind in TOOL_ERROR_KINDS
+                    and result.rejection_class != POLICY_CLASS
+                    and fallbacks_used < fallback_cap):
                 sibling = SIBLING_TOOLS.get(call.name)
                 if sibling and sibling in registry.names():
                     allowed = registry.properties(sibling)
@@ -643,6 +679,11 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
                         fallback = {"from": call.name, "to": sibling,
                                     "ok": fb_result.ok}
                         fallback_log.append({"step": len(steps) + 1, **fallback})
+            if result.rejection_class == POLICY_CLASS and not step_policy:
+                # A retry/substitution that ended in a policy rejection still
+                # counts and still stops the run.
+                policy_hits += 1
+                step_policy = True
             if result.error_kind in TOOL_ERROR_KINDS:
                 step_failures += 1
             tool_timeouts_total += timeouts
@@ -672,6 +713,15 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
             row_trace["deferred"] = [c.as_dict() for c in deferred]
         steps.append(row_trace)
         signatures.extend(row_trace["fingerprints"])
+
+        # §7 — a policy rejection *stops* the run, before any diagnosis. It is a
+        # wall, not a wall to route around: the model asked for something it may
+        # not have, so self-correction must not apply and the loop must not
+        # invite another attempt. Checked first so a policy hit owns the terminal,
+        # not `no_progress`/`oscillation`/`tool_failure` arriving the same step.
+        if step_policy:
+            termination = "policy"
+            break
 
         # §4 — diagnose *before* the cap. Repeat first (stricter/faster), then a
         # short cycle; both name the disease the cap could only call max_steps.
@@ -720,7 +770,8 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
         termination=termination, gave_up=gave_up,
         last_rejection_kind=last_rejection_kind, refused_all=refused_all,
         any_tool_failure=observed > 0, any_timeout=tool_timeouts_total > 0,
-        pivot_recovered=_pivot_recovered(steps), contradictions=contradictions)
+        pivot_recovered=_pivot_recovered(steps), contradictions=contradictions,
+        policy_hits=policy_hits)
 
     return {
         "question": q,
@@ -769,6 +820,13 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
         "asserted_subset_returned": asserted["ok"],
         "asserted_unsupported": (asserted["unsupported"]
                                  + asserted["unsupported_entities"]),
+        # Day 15 — the safety contract: how many policy violations stopped the
+        # run, the rejection classes seen, and the cost pre-check's estimates.
+        # `policy_violations` must be 0 on every legitimate run; a non-zero value
+        # is the day's hard stop, and it owns the run's `failure_kind`.
+        "policy_violations": policy_violations(steps),
+        "rejection_classes": rejection_classes(steps),
+        "cost_estimates": cost_estimates(steps),
     }
 
 
