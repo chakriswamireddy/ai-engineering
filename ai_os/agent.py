@@ -13,7 +13,7 @@ question                                   request
                                                └─ cap → one final chat → answer (exit 2/3)
 ```
 
-Three decisions carry Day 12's honesty:
+Three decisions carry Day 12's honesty — and one prompt:
 
 - **Agent state is the transcript, nothing else.** The user request, every
   assistant `tool_calls` turn, every `tool` observation, and the final answer
@@ -28,6 +28,11 @@ Three decisions carry Day 12's honesty:
   answer's citations must lie in the union of the observations
   (`cited ⊆ ∪ observations`). A multi-step agent whose answer cites nothing it
   saw is the Day 11 lie stretched over more turns.
+- **The prompt is part of the loop.** `REASONING_PROMPT` precedes every reasoning
+  turn, because the loop cannot *enforce* that observations are evidence for the
+  next step — it can only say so. Without it a real model re-asks the question in
+  new words instead of following what the evidence named; with it, the live run
+  walks the map (`complete_checkout` → `create_order_from_checkout` → …).
 
 Everything Day 11 built — the registry, the gate-as-return-value, the Day 4
 gateway's tool wire — is exercised **as-is**: `run_agent(max_steps=1)` *is*
@@ -122,6 +127,30 @@ TERMINATION_NOTE: dict[str, str] = {
         "observations already in this transcript. Do NOT invent evidence."
     ),
 }
+
+
+# Day 12 §6 — the reasoning-turn prompt. It states what the loop depends on: tool
+# results are *evidence for the next step*, a refusal is a finding (not an answer),
+# and self-correction re-issues a *fixed* call. It is the difference between an
+# agent that follows what the evidence named and one that re-asks the question in
+# new words — the prompt is written for the grader, the way the schemas were.
+REASONING_PROMPT = (
+    "You are a code-investigation agent. Tools return *evidence* — graded source "
+    "or documentation records — not prose. Rules:\n"
+    "1. Investigate before answering: if the question asks how or where something "
+    "works and you have no evidence yet, call a tool first.\n"
+    "2. Act on the evidence: if a result names an import, dependency, helper or "
+    "symbol relevant to the question (for example a mutation's service, or a "
+    "service's order-creation helper), that name is your NEXT query — issue "
+    "another tool call for it. Do not re-ask the question in different words.\n"
+    "3. A refusal is a finding, not an answer: if a tool refuses, do not repeat "
+    "the same call — pivot to another tool or say plainly the corpus cannot cover "
+    "it. Never invent a doc_id or a module#Symbol.\n"
+    "4. If a call was rejected, fix the argument and retry once — a corrected call "
+    "is a different call; repeating the same wrong call is not.\n"
+    "5. Answer only from the evidence you gathered, citing the module#Symbol / "
+    "doc_id ids that appear in the tool results."
+)
 
 
 def mentioned_ids(text: str) -> list[str]:
@@ -254,7 +283,10 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
     cost_cap = agent_cost_budget_from_env() if budget_usd is None else budget_usd
     ledger_start = len(gateway.ledger.records)
 
-    transcript: list[dict[str, Any]] = [{"role": "user", "content": q}]
+    transcript: list[dict[str, Any]] = [
+        {"role": "system", "content": REASONING_PROMPT},
+        {"role": "user", "content": q},
+    ]
     steps: list[dict[str, Any]] = []
     all_calls: list[Any] = []
     executed_rows: list[dict[str, Any]] = []
