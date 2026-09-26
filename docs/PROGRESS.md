@@ -33,6 +33,7 @@ Updated: 2026-09-25
 | 13 | Agent Failure Modes | PARTIAL (all MECH green offline; F1–F9 with `fabricated? = no` on every row + the timeout wall on an injected clock + the fingerprint firing before the cap + the disclosed fallback ladder + the contradiction flag with its two negative twins; A1–A8 / T1–T7 re-run through the guarded loop; real-model *tripping* and contradiction *adjudication* `PENDING` Day 21, real latency `PENDING` Day 14) | `ai_os/tools.py` (`ToolError`, `error_kind` taxonomy, `REJECTION_KINDS`/`TOOL_ERROR_KINDS`), `ai_os/agent.py` (`execute_bounded`, the fingerprint, the fallback ladder, `_derive_failure_kind`), `ai_os/trace.py` (`fingerprint`/`detect_repeat`/`detect_oscillation`/`contradiction_rows`/`contradiction_coverage`), `tools/mock_gateway.py` (`tc_d13_*`), `tools/failure_smoke.py`, `docs/concepts/agent-failure-modes.md`, `docs/evaluations/failure-day13.md` |
 | 14 | Data Agent | PARTIAL (all MECH green offline; Q1–Q8 with **`asserted ⊆ returned = ok` on every answered row** (the fabricated twin excepted) + the **two independent read-only guards** (validator rejects before execution; the engine refuses a bypassed write) + the schema card (DB schema, not `schema.graphql`) + row-limit/truncation + `no_data` as a finding + the `unknown_column` repair; A1–A8 / T1–T7 / F1–F9 re-run through the same harness; real-model *SQL generation + grounding* `PENDING` Day 21, real Postgres latency/schema reconciliation `PENDING` a live role) | `ai_os/data.py` (new), `ai_os/tools.py` (`run_saleor_sql`, `describe_saleor_schema`, real resolvers), `ai_os/trace.py`/`ai_os/agent.py` (data columns + the invariant), `tools/data_smoke.py`, `tools/mock_gateway.py` (`tc_d14_*`/`answer_d14_*`), `docs/concepts/text-to-sql.md`, `docs/evaluations/data-day14.md` |
 | 15 | Safe Text-to-SQL | PARTIAL (all MECH green offline; X1–X11 with **`Wrote? = no` on every attack row** — the DB byte-for-byte unchanged — and **`X11 false-reject? = no`**; the allow-list parser (not a deny-list), the policy (table allow / PII column deny / enforced glossary), single-statement + homoglyph normalization, the **two rejection classes** with `policy_violations` stopping the run on a policy hit, the cost pre-check, the shape-aware `LIMIT`, and the *server-side* `statement_timeout` (proven offline by its mapping); Q1–Q8 / A1–A8 / T1–T7 / F1–F9 re-run unchanged through the hardened executor; **X10's real-model behaviour `PENDING` Day 25/26 + Day 21, parser soundness `PENDING` long-term hardening, real Postgres timeout/`EXPLAIN` `PENDING` a live role**) | `ai_os/sql_safety.py` (new), `policy.yaml` (new), `ai_os/data.py` (server timeouts + safety routing + `rejection_class`), `ai_os/tools.py` (`ToolResult.rejection_class`), `ai_os/trace.py` (safety columns), `ai_os/agent.py` (the policy stop), `tools/sql_attack_smoke.py` (new), `tools/mock_gateway.py` (`tc_d15_*`/`answer_d15_*`), `docs/concepts/safe-sql.md`, `docs/evaluations/sql-safety-day15.md` |
+| 16 | Agent Planning | PARTIAL (all MECH green offline; P1–P9 with **`conclusion ⊆ evidence = ok` on every answered row** — the fabricated twin the only `FAIL`, and the point of the fixture — and **`over-planned? = no` on P9**; plan validation fail-closed (registered tools · schema args · acyclic · deps exist — an invalid plan runs **zero steps, zero bills**), execution state + **checkpoints** (resume at *k+1* without re-running a completed step; replay reproduces the evidence), the re-plan gate (divergence → replan), the bounded retry ladder (repair · retry · fallback · replan) with the **policy wall climbing no rung** (`rungs: []`), and the 6→7 gate; T1–T7 / A1–A8 / F1–F9 / Q1–Q8 / X1–X11 re-run unchanged; **real-model plan quality `PENDING` Day 21, durable state `PENDING` Day 17/18, parallel DAG branches named not built**) | `ai_os/planner.py` (new), `ai_os/executor.py` (new), `ai_os/state.py` (new), `ai_os/agent.py` (`run_agent(plan=…)`), `ai_os/trace.py` (plan columns + `PLAN_TERMINATIONS`), `tools/plan_smoke.py` (new), `tools/mock_gateway.py` (`D16_PLAN_*`/`answer_d16_*`), `docs/concepts/planning.md`, `docs/evaluations/planning-day16.md` |
 
 ---
 
@@ -660,6 +661,72 @@ stay honest** (over-blocking is a measured bug). Concept + evaluation:
 
 ---
 
+## Day 16 — Agent Planning `PARTIAL`
+
+Days 6–15 built a machine that reads, acts, drives itself, survives failure,
+computes, and defends itself — and every one of those is **reactive**: the loop
+chooses its next step only *after* reading the last observation. Day 16 adds the
+reflective counterpart — **decide before acting** — for a concrete multi-step
+investigation ("investigate why customer X could not complete checkout"), while
+keeping the change small. Concept + evaluation: `docs/concepts/planning.md`,
+`docs/evaluations/planning-day16.md`.
+
+- `ai_os/planner.py` (new) — `Step(id, tool, args, depends_on, expected)` and
+  `Plan`; `parse_plan` (fenced or bare JSON), `validate_plan` (**fail-closed**:
+  registered tools · schema-valid args · known deps · **acyclic** — all errors
+  collected), `topological_order` (deterministic, dependency-safe),
+  `estimate_cost`/`within_budget` (Day 12's cap, plan-wide), `needs_plan` (the
+  **entry rule**, `MECH`), and the three model calls: `plan` (one chat, **one**
+  informative retry carrying the validator's errors), `replan` (rung 4), `repair_args`
+  (rung 1). The plan is *data*; validation is the plan-level analogue of Day 11's
+  argument check and Day 14's schema grounding.
+- `ai_os/executor.py` (new) — `run_plan`: walks the plan in topological order, one
+  `chat_with_tools` turn per step through the **same** atoms as Day 12 (the registry,
+  `execute_bounded`, the error taxonomy, the sibling map, `step_trace`), and adds the
+  plan layer: **execution state** + a **checkpoint** per step (resume at *k+1* /
+  replay), the **re-plan gate** (the observation vs `expected` → replan), the
+  **four-rung ladder** (repair · retry · fallback · replan, each bounded) with
+  **Day 15's classes** deciding which rungs a failure may climb — a `policy`
+  rejection is a **wall** that climbs **none** — and the **6→7 gate** plus
+  `conclusion ⊆ evidence`. `resume=True`+`stop_after=k` make the checkpoint's
+  resumability provable offline.
+- `ai_os/state.py` (new) — `StepRecord` / `Checkpoint` / `ExecutionState`, with
+  `as_dict`/`from_dict` so the checkpoint **format** round-trips (the resume path).
+  **Ephemeral by design**: the *store* is **Day 17/18's** seam, named not built.
+- `ai_os/agent.py` (extended, minimally) — `run_agent` gains an optional `plan` and
+  delegates to `executor.run_plan`; with no plan the Day-12 body is **untouched**,
+  which is what makes a **one-step plan the identity case** (P9) and keeps
+  `run_agent(max_steps=1)` ≡ Day 11.
+- `ai_os/trace.py` (extended) — `PLAN_TERMINATIONS`, `plan_adherence` (grades the
+  step's tool, not the sequence), `conclusion_subset_evidence` (ids **and** numbers),
+  `plan_columns` (the §8 row). No existing function or row shape moved.
+- `tools/mock_gateway.py` — Day 16 fixtures: `D16_PLAN_GOOD` (the curriculum's
+  five-step DAG with the `payment ← order_state` edge), `D16_PLAN_BAD`, and the
+  `answer_d16_*` turns (the scripted plan, its correction, and the honest non-answer
+  the gate forces).
+- `tools/plan_smoke.py` (new) — **ALL DAY 16 (MECH) CHECKS PASSED** (68 checks):
+  P1 validation + the fail-closed twins, P2 coverage, P3 execution state (+ a failed
+  step recorded, not dropped), P4 resume/replay, P5 replan-on-contradiction, P6 the
+  repair rung and its bound, P7 the policy wall with `rungs: []`, P8 the 6→7 gate
+  **both ways** (the fabricated twin caught), P9 the control (+ an over-planned twin),
+  FC1/FC2 fail-closed, and the **no-regression** gate (re-runs `tool_smoke` /
+  `agent_smoke` / `failure_smoke` / `data_smoke` / `sql_attack_smoke`).
+- **Headline:** `conclusion ⊆ evidence = ok` on every answered row (the fabricated
+  twin the only `FAIL`), and `over-planned? = no` on P9 — `needs_plan("Fetch order
+  1")` is `False`, so a one-step stored plan costs **1 step chat + 1 answer chat, 0
+  plan chats**, exactly Day 11/12's shape.
+- **No regression:** the planner is **additive** — an agenda above the loop. Days
+  7–15's unit suites and all five smoke suites stay green; the only edit to existing
+  behaviour is the `plan=None` default.
+- `PENDING`: whether a **real** model writes a **good** plan (the right
+  decomposition, the right order, sensible replans) and grounds its answer under it —
+  **Day 21's** benchmark on Day 16's planner. Durable state/memory is **Day 17/18**;
+  parallel DAG branches are *named, not built*; the entry rule's heuristic and the
+  id/number shape of the invariant are recorded limits. Re-verify with
+  `python tools/plan_smoke.py`.
+
+---
+
 ## Known gaps (what blocks "everything green for real")
 
 1. **Git:** Day 9 is committed (`39285dd`, `76af2e0`, `37bd8d9`, `d62acda`);
@@ -777,6 +844,25 @@ stay honest** (over-blocking is a measured bug). Concept + evaluation:
     (e) the **definition guard is SQL-shape arithmetic**, not semantic understanding.
     Re-verify with `python tools/sql_attack_smoke.py`.
 
+12. **Day 16 semantics** — the MECH half is green (`tools/plan_smoke.py`; P1–P9 with
+    `conclusion ⊆ evidence = ok` on every answered row, the fabricated twin the only
+    `FAIL`, and `over-planned? = no` on P9; plan validation fail-closed (an invalid
+    plan runs **zero steps, zero bills**), execution state + checkpoints (resume at
+    *k+1* without re-running a completed step; replay reproduces the evidence), the
+    re-plan gate, the bounded ladder with the **policy wall climbing no rung**, and
+    the 6→7 gate; Days 11–15 re-run unchanged). Still `PENDING`: (a) whether a *real*
+    model writes a **good** plan — the right decomposition, the right order, sensible
+    replans — and grounds its answer under it; the stub supplies a **stored** plan, so
+    plan quality is **Day 21's** benchmark on this harness; (b) **durable state and
+    memory** — the checkpoint *format* round-trips, the persistent store is
+    **Day 17/18's** seam, named not built; (c) **parallel DAG branches** — the day
+    executes a topological linearization, and true concurrency's checkpoint/evidence
+    semantics are a recorded seam (*named, not built*); (d) the **entry rule is a
+    heuristic** (a long single-intent question can be over-planned) and
+    `conclusion ⊆ evidence` is **id/number-shaped** (prose asserting a cause without
+    an id or a figure is not caught) — the same honest limit Day 12's fabrication
+    guard carries, owned by **Day 21**. Re-verify with `python tools/plan_smoke.py`.
+
 ## How to re-verify, in one line
 
 ```bash
@@ -797,6 +883,7 @@ python tools/agent_smoke.py --live      # day 12 A1/A6/A7 against the real gatew
 python tools/failure_smoke.py           # day 13 F1–F9 (guards + fabricated? column) + A1–A8 / T1–T7 re-run
 python tools/data_smoke.py              # day 14 Q1–Q8 (read-only guards + asserted ⊆ returned) + A1–A8 / T1–T7 / F1–F9 re-run
 python tools/sql_attack_smoke.py        # day 15 X1–X11 (attack set + control) + Wrote?=no + the Days 11–14 re-run
+python tools/plan_smoke.py              # day 16 P1–P9 (plan validation · state · checkpoints · ladder · policy wall) + the Days 11–15 re-run
 LLM_PROVIDERS=cloudflare: python tools/build_code_store.py --corpus corpus_code/saleor --out data/code_store.json --batch 100  # real build (resume; see gap 6)
 python tools/retrieval_day10.py --store data/code_store.json --doc-store data/store.json  # real corpora
 ```

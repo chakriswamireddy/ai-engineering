@@ -1,4 +1,4 @@
-# ai-layer — Days 4–15: Gateway → Search → RAG → Code RAG → Tools → Loop → Data → Safe SQL
+# ai-layer — Days 4–16: Gateway → Search → RAG → Code RAG → Tools → Loop → Data → Safe SQL → Planning
 
 A reusable AI layer built in layers:
 
@@ -48,6 +48,18 @@ A reusable AI layer built in layers:
     a shape-aware `LIMIT`, a **server-side** `statement_timeout`, and the day's
     sharpest idea, **two rejection classes**: a `repairable` error invites a
     fixed retry, a `policy` error **stops the run** and is never self-corrected.
+11. **Day 16 — Agent Planning**: the loop gains the reflective counterpart to its
+    reflex — **decide before acting**. A **planner** turns the question into a
+    **validated plan** (a DAG of tool calls: `id`, `tool`, schema-valid `args`,
+    `depends_on`, `expected`; fail-closed — registered tools · valid args ·
+    acyclic · known deps), and an **executor** walks it tracking **execution
+    state** and writing **checkpoints** (resumable at *k+1*, replayable), replanning
+    when an observation contradicts the plan. The retry ladder gains one rung
+    (**repair · retry · fallback · replan**, all bounded), **Day 15's rejection
+    classes** decide which rungs a failure may climb (a `policy` wall climbs
+    **none**), and the answer must satisfy **`conclusion ⊆ evidence`** — the plan's
+    third translation of `cited ⊆ retrieved`. A one-step plan *is* the loop, so a
+    trivial question is **not** over-planned.
 
 ```
 Application
@@ -86,11 +98,15 @@ raw HTTP via `urllib`.
 | `ai_os/server.py` | FastAPI: `/chat`, `/chat/stream`, `/rag` (`corpus="docs"｜"code"`), `/ledger`, `/health` |
 | `ai_os/tools.py` | day 11: `ToolRegistry` (schemas/validation/dispatch), `ToolResult`, the five tools, the hand-rolled JSON-Schema subset |
 | `ai_os/sql_safety.py` | day 15: the safe SQL choke point — `normalize`, the allow-list `parse_readonly` grammar, `Policy` (from `policy.yaml`), the cost pre-check, the shape-aware `rewrite_limit`, and `classify()` (repairable vs policy) |
+| `ai_os/planner.py` | day 16: `Step`/`Plan`, `parse_plan` + fail-closed `validate_plan` (registered tools · schema args · acyclic · known deps), `topological_order`, `estimate_cost`, the `needs_plan` entry rule, and the model calls `plan`/`replan`/`repair_args` |
+| `ai_os/executor.py` | day 16: `run_plan` — the state machine that walks a plan through Day 12's atoms, tracking execution state + **checkpoints** (resume at *k+1*), the re-plan gate, the bounded ladder (repair · retry · fallback · replan), the **policy wall**, and `conclusion ⊆ evidence` |
+| `ai_os/state.py` | day 16: `StepRecord`/`Checkpoint`/`ExecutionState` — the **ephemeral** execution state and the checkpoint format that round-trips (the persistent store is Day 17's seam) |
 | `policy.yaml` | day 15: the reviewable allow/deny document — statement heads, `tables_allow`, PII `columns_deny`, the enforced `definitions`, and the resource caps (all config, not code) |
-| `ai_os/agent.py` | day 11/12: `run_tool_answer` (one tool turn → grounded answer) + `run_agent` — the loop: transcript-as-state, three exits + `gave_up`, per-step observations; `cited ⊆ retrieved` over the accumulated transcript; `REASONING_PROMPT` is the reasoning-turn system prompt |
-| `tools/mock_gateway.py` | scripted dual-provider stub `:8700`/`:8701` (chat, embeddings, **tool_calls** scenarios: `tc_d12_*`/`tc_d13_*`/`tc_d14_*`/`tc_d15_*`) |
+| `ai_os/agent.py` | day 11/12: `run_tool_answer` (one tool turn → grounded answer) + `run_agent` — the loop: transcript-as-state, three exits + `gave_up`, per-step observations; `cited ⊆ retrieved` over the accumulated transcript; `REASONING_PROMPT` is the reasoning-turn system prompt; day 16: an optional `plan` delegates to `executor.run_plan` (a one-step plan *is* the loop) |
+| `tools/mock_gateway.py` | scripted dual-provider stub `:8700`/`:8701` (chat, embeddings, **tool_calls** scenarios: `tc_d12_*`/`tc_d13_*`/`tc_d14_*`/`tc_d15_*`; day 16's `D16_PLAN_*` stored plans + `answer_d16_*`) |
 | `tools/tool_smoke.py` | day 11: T1–T7 offline suite (selection, validation matrix, refusal, cap, dialect parity, no-regression) |
 | `tools/sql_attack_smoke.py` | day 15: X1–X11 offline attack set (parser, policy, PII, cost, LIMIT, the two rejection classes) + the `Wrote? = no` invariant + the Days 11–14 no-regression re-run |
+| `tools/plan_smoke.py` | day 16: P1–P9 offline suite (plan validation, execution state, checkpoints/resume, the re-plan gate, the ladder + policy wall, `conclusion ⊆ evidence` both ways, the P9 control) + the Days 11–15 no-regression re-run |
 | `tools/agent_smoke.py` | day 12: A1–A8 offline suite (loop, three exits + `gave_up`, depth-1 = Day 11, parallel observations, grounding over the transcript, cost shape, T1–T7 re-run); `--live` measures real-model composition against the real gateway |
 | `tools/gateway_smoke.py` | day 4 deliberate-failure suite + token economics |
 | `tools/build_rag_store.py` | embed a `corpus/` of markdown → `data/store.json` |
@@ -165,6 +181,7 @@ python tools/agent_smoke.py             # day 12 A1–A8 (loop, exits + gave_up,
 python tools/failure_smoke.py           # day 13 F1–F9 (guards, the failure taxonomy, fabricated? = no)
 python tools/data_smoke.py              # day 14 Q1–Q8 (read-only guards + asserted ⊆ returned)
 python tools/sql_attack_smoke.py        # day 15 X1–X11 (attack set + control; Wrote? = no) + the Days 11–14 re-run
+python tools/plan_smoke.py              # day 16 P1–P9 (plan validation · state · checkpoints · ladder · policy wall; conclusion ⊆ evidence) + the Days 11–15 re-run
 ```
 
 The stub serves both providers on `:8700` (OpenAI) and `:8701` (Anthropic)
@@ -263,6 +280,8 @@ and exits 2 rather than a false FAIL.
 | `SALEOR_SQL_ROW_LIMIT` | `100` | day 14: rows per data query (truncation is reported) |
 | `SALEOR_SQL_SCHEMA_BUDGET` | `4000` | day 14: chars of schema card (budget-clamped, cut marked) |
 | `SALEOR_SQL_POLICY` | `policy.yaml` | day 15: the allow/deny document the safe SQL layer enforces |
+| `AGENT_MAX_REPLANS` | `1` | day 16: total replans per run (the ladder's rung 4) |
+| `AGENT_MAX_REPAIRS` | `1` | day 16: repairs per step (the ladder's rung 1) |
 
 Omitted keys are a startup error in `build_gateway_from_env` (fail fast, not a
 runtime 401 surprise). Embedding model is passed per-provider, so the key lives
@@ -331,3 +350,17 @@ with the provider config it belongs to.
   `python tools/sql_attack_smoke.py` (X1–X11: `Wrote? = no` on every attack row,
   the X11 control passes, and Days 11–14 re-run unchanged). A rejected attack
   costs **0 DB execution, 0 chats, 0 embeds**.
+- Day 16 adds planning: `ai_os/planner.py` (the `Plan`/`Step` data shape,
+  **fail-closed** `validate_plan`, the deterministic `topological_order`, the
+  `needs_plan` entry rule, and the model calls `plan`/`replan`/`repair_args`),
+  `ai_os/executor.py` (`run_plan`: execution state + **checkpoints**, the
+  **re-plan gate**, the bounded four-rung ladder, Day 15's classes deciding which
+  rungs a failure may climb — a `policy` rejection is a **wall** that climbs
+  none), and `ai_os/state.py` (the **ephemeral** state + the checkpoint format that
+  round-trips). `run_agent(plan=…)` delegates; with no plan the loop is Day 12
+  unchanged, so a **one-step plan is the identity case**. The headline is
+  **`conclusion ⊆ evidence`** — an answer may assert only what the plan observed —
+  and the counterweight is P9: a trivial question is **not** over-planned. See
+  `docs/concepts/planning.md`, `docs/evaluations/planning-day16.md`, and
+  `python tools/plan_smoke.py` (P1–P9, the fabricated twin the only `FAIL`). The
+  real model's *plan quality* is **Day 21's** measure; durable state is **Day 17's**.
