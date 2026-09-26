@@ -640,6 +640,122 @@ def step_trace(step: int, rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+# ======================================================== Day 16 — the plan
+# A plan is a *claim about the future* ("these steps will answer this"), so the
+# trace must grade plan **adherence** — did execution follow the plan, and where it
+# did not, why — not merely the final answer. These columns are to Day 16 what
+# `failure_kind` was to Day 13: the plan's own contract, serialized.
+
+PLAN_TERMINATIONS: dict[str, str] = {
+    "answer": "the plan completed / the model answered — the answer is drawn from "
+              "the plan's own observations",
+    "invalid_plan": "fail-closed — the plan failed validation (unregistered tool, "
+                    "invalid args, unknown dependency, or a cycle) and was never "
+                    "executed; a grounding failure, not a model failure",
+    "infeasible": "the plan's estimated cost exceeded the run budget — refused "
+                  "*before* spending, never half-executed into a spent ledger",
+    "paused": "a checkpoint interruption, not a termination — the run is resumable "
+              "at the next step (P4)",
+    "policy_wall": "Day 15's wall — a step attempted a forbidden request; the plan "
+                   "stopped and surfaced it and **no rung was climbed**: the retry "
+                   "ladder must not help a model past a denial",
+    "dependency_violation": "the executor refused to run a step whose dependencies "
+                            "were not satisfied — the DAG, not luck, ordered the run",
+    "plan_exhausted": "the evidence was insufficient (or a step failed) and no "
+                      "replan was available — the answer says what was checked and "
+                      "asserts no cause the plan never observed",
+}
+
+
+def plan_adherence(plan_steps: list[dict[str, Any]],
+                   state: dict[str, Any]) -> dict[str, Any]:
+    """Did execution follow the plan? Per step: planned tool vs the call emitted.
+
+    A correct agent may legally walk a row in more than one order, so this grades
+    the *step's* tool, not the sequence; and a step that emitted nothing (skipped /
+    pending) is not counted as a deviation. Recorded, so a bad plan and an
+    unfollowed plan are different facts with different owners.
+    """
+    records = {r["id"]: r for r in (state.get("steps") or [])}
+    rows: list[dict[str, Any]] = []
+    executed = 0
+    for step in plan_steps:
+        sid = step.get("id")
+        rec = records.get(sid) or {}
+        emitted = [t for t in (str(rec.get("tool") or "").split(", ")) if t]
+        planned = step.get("tool")
+        if emitted:
+            executed += 1
+        rows.append({
+            "step_id": sid,
+            "planned_tool": planned,
+            "executed": emitted,
+            "status": rec.get("status"),
+            "adhered": bool(emitted) and planned in emitted,
+        })
+    followed = [r["adhered"] for r in rows if r["executed"]]
+    return {"rows": rows, "executed_steps": executed,
+            "adhered": all(followed) if followed else True,
+            "deviations": [r["step_id"] for r in rows if r["executed"] and not r["adhered"]]}
+
+
+def conclusion_subset_evidence(mentioned: list[str],
+                               evidence: list[str],
+                               asserted: dict[str, Any] | None = None
+                               ) -> dict[str, Any]:
+    """`conclusion ⊆ evidence` — Day 16's headline invariant.
+
+    The third translation of the same rule (`cited ⊆ retrieved` Day 6,
+    `asserted ⊆ returned` Day 14): parse the final answer's entities/claims and
+    assert membership in the **plan's collected observations**. An id the plan never
+    observed is a fabrication; a number the plan's data records never returned is an
+    unsupported assertion. The two halves are reported separately and together, so
+    a failure localizes to the answer contract, never to vibes.
+    """
+    obs = set(evidence or [])
+    fabricated = [c for c in (mentioned or []) if c not in obs]
+    verdict = asserted or {"ok": True, "unsupported": [], "unsupported_entities": []}
+    unsupported = list(verdict.get("unsupported") or []) + \
+        list(verdict.get("unsupported_entities") or [])
+    return {
+        "ok": not fabricated and bool(verdict.get("ok", True)),
+        "fabricated": fabricated,
+        "unsupported": unsupported,
+        "cited_subset_retrieved": not fabricated,
+        "asserted_subset_returned": bool(verdict.get("ok", True)),
+    }
+
+
+def plan_columns(state: dict[str, Any], *, over_planned: bool, plan_source: str,
+                 conclusion: dict[str, Any], adherence: dict[str, Any],
+                 extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The §9 plan-table columns, assembled from the state and the verdicts.
+
+    One row per run, every cell a real run's: the plan's source, whether a trivial
+    question was over-planned, how many steps were planned vs executed, the rungs
+    fired (and that a policy wall fired **none**), the reinstated
+    `conclusion ⊆ evidence` headline, and the checkpoint index the run would resume
+    from. `extra` carries the day's additions (replans, policy walls, budget).
+    """
+    out = {
+        "plan_source": plan_source,
+        "over_planned": bool(over_planned),
+        "steps_planned": len(state.get("plan_ids") or []),
+        "steps_executed": adherence.get("executed_steps", 0),
+        "plan_adhered": adherence.get("adhered", True),
+        "plan_deviations": adherence.get("deviations", []),
+        "rungs": [r.get("rung") for r in (state.get("rungs") or [])],
+        "policy_walls": len(state.get("policy_walls") or []),
+        "replans": int(state.get("replans") or 0),
+        "checkpoint_idx": len(state.get("checkpoints") or []),
+        "resume_from": state.get("resume_from"),
+        "conclusion_subset_evidence": conclusion.get("ok", False),
+        "conclusion_unsupported": conclusion.get("unsupported", []),
+    }
+    out.update(extra or {})
+    return out
+
+
 def grounding_over_transcript(mentioned: list[str],
                               steps: list[dict[str, Any]]) -> dict[str, Any]:
     """`cited ⊆ retrieved` over the *whole transcript* — Day 12's invariant.

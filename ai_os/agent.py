@@ -498,6 +498,7 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
               fallbacks: int | None = None,
               clock=time.monotonic,
               temperature: float = 0.0, max_tokens: int = 2048,
+              plan=None,
               ) -> dict[str, Any]:
     """Reason → choose → execute → observe → reason again → answer.
 
@@ -536,10 +537,31 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
     looping" are distinguishable — the way Day 12 made "answer" distinguishable
     from "max_steps". `clock` is injectable so the timeout wall is testable
     without real sleeping.
+
+    Day 16 §4 adds one optional parameter: **`plan`**. With a `Plan` the loop's
+    agenda is pre-written — the request delegates to `executor.run_plan`, which walks
+    the plan's steps through these same atoms while tracking execution state and
+    checkpoints. With `plan=None` nothing below changes, which is what makes a
+    **one-step plan the identity case** and keeps Day 12's exits, guards, and costs
+    exactly where they were.
     """
     q = (request or "").strip()
     if not q:
         raise ValueError("request must not be empty")
+
+    if plan is not None:
+        # Day 16 §4 — the plan is the loop's **agenda, not its replacement**: a
+        # planned request delegates to the executor, which walks the plan through
+        # this same loop's atoms (one `chat_with_tools` turn per step, the registry,
+        # `execute_bounded`, the ladder). With no plan the body below is Day 12
+        # *unchanged* — and a one-step plan is the identity case (P9), which is why
+        # `run_agent(max_steps=1)` still is Day 11.
+        from ai_os.executor import run_plan
+        return run_plan(plan, registry, gateway, budget_chars=budget_chars,
+                        tool_timeout_s=tool_timeout_s, tool_retries=tool_retries,
+                        budget_usd=budget_usd, temperature=temperature,
+                        max_tokens=max_tokens, clock=clock)
+
     steps_cap = agent_max_steps_from_env() if max_steps is None else max(1, max_steps)
     obs_budget = (agent_budget_chars_from_env() if budget_chars is None
                   else budget_chars)
