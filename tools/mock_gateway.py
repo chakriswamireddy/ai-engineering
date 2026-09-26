@@ -22,7 +22,11 @@ entry is one of:
                  Day 13's failure modes: tc_d13_repeat / tc_d13_osc_a|b /
                  tc_d13_docs_miss / tc_d13_contra_step1|2 / tc_d13_contra_agree)
   answer_*    -> Day 11: a scripted answer turn (see ANSWER_SCENARIOS:
-                 answer_code / answer_fabricated / answer_refusal_restated)
+                 answer_code / answer_fabricated / answer_refusal_restated;
+                 Day 16 adds the planner's replies — answer_d16_plan_good /
+                 answer_d16_plan_bad / answer_d16_plan_fixed (a JSON plan the
+                 parser validates) and answer_d16_nocause (the honest non-answer
+                 the `conclusion ⊆ evidence` gate forces))
 
 Admin control (both ports):
   POST /admin/reset {"openai": [...], "anthropic": [...], "retry_after": 0.3}
@@ -117,6 +121,43 @@ D15_SQL_CONTROL = (                                                     # X11 �
     "GROUP BY p.name "
     "ORDER BY revenue DESC LIMIT 10"
 )
+
+# Day 16 — the *stored plan* the stub "model" supplies (P1/P2) and its rejected
+# twin, plus the honest non-answer the plan's `conclusion ⊆ evidence` gate forces.
+# The plan is a DAG of tool calls: `payment` depends on `order_state` (the
+# curriculum's dependency edge), and every step names a registered tool. A model
+# asked for a plan must reply JSON of this shape; the offline harness grades the
+# plan with `ai_os/planner.py`, so the fixture and the parser assert on one source.
+D16_PLAN_GOOD = json.dumps({
+    "steps": [
+        {"id": "find_customer", "tool": "get_customer", "args": {"id": "1"},
+         "depends_on": [],
+         "expected": "the customer record for the id in the question"},
+        {"id": "find_checkout", "tool": "search_saleor_docs",
+         "args": {"query": "how do I create a checkout", "k": 4}, "depends_on": [],
+         "expected": "a doc chunk describing the checkout create/complete flow"},
+        {"id": "order_state", "tool": "get_order", "args": {"id": "1"},
+         "depends_on": ["find_customer"],
+         "expected": "the order's status, total and lines"},
+        {"id": "payment", "tool": "run_saleor_sql",
+         "args": {"sql": "SELECT id, status, total_gross_amount FROM order_order "
+                         "WHERE id = '1'"},
+         "depends_on": ["order_state"],
+         "expected": "the order/payment status row for that order"},
+        {"id": "docs", "tool": "search_saleor_docs",
+         "args": {"query": "checkout completion", "k": 4}, "depends_on": [],
+         "expected": "documentation on completing a checkout"},
+    ]
+})
+# The rejected twin: the model names a tool the registry does not hold, so the
+# plan is refused *before* anything runs and (with one informative retry) the
+# correction is a new plan, not a speculative execution.
+D16_PLAN_BAD = json.dumps({
+    "steps": [
+        {"id": "find_customer", "tool": "get_invoice", "args": {"id": "1"},
+         "depends_on": [], "expected": "the invoice record"},
+    ]
+})
 
 # Day 11 — scripted tool-call scenarios. The stub grows a voice: a script entry
 # that names a tool scenario makes the model *ask* instead of type, and the
@@ -343,6 +384,20 @@ ANSWER_SCENARIOS: dict[str, str] = {
     "answer_d15_control": (
         "Desk Lamp led with 96.0 net revenue (rank 1), then Blue T-Shirt at 59.97 "
         "(rank 2) and Coffee Mug at 38.0 (rank 3) across 3 products in the window."
+    ),
+    # Day 16 — the planner's scripted replies (a JSON plan the parser validates,
+    # its rejected twin, and its correction after the informative retry), plus the
+    # honest non-answer the `conclusion ⊆ evidence` gate forces when the plan's
+    # evidence is insufficient: no cause is asserted, and what was checked is named.
+    "answer_d16_plan_good": D16_PLAN_GOOD,
+    "answer_d16_plan_bad": D16_PLAN_BAD,
+    "answer_d16_plan_fixed": D16_PLAN_GOOD,
+    "answer_d16_nocause": (
+        "I could not determine why the customer could not complete checkout: the "
+        "checkout and payment records the plan needed are absent from the evidence "
+        "gathered, so no cause can be asserted. What was checked: the checkout "
+        "documentation query refused (the corpus does not cover it) and the order "
+        "and payment steps returned no matching rows."
     ),
 }
 
