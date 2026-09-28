@@ -55,6 +55,12 @@ from ai_os.contract import ToolCall
 from ai_os.data import asserted_subset_returned
 from ai_os.rag import NOT_COVERED
 from ai_os.sql_safety import POLICY as POLICY_CLASS
+from ai_os.state import (
+    STATE_OFF,
+    STATE_ON,
+    load_conversation,
+    persist_conversation,
+)
 from ai_os.tools import (
     ERROR_TIMEOUT,
     ERROR_TOOL,
@@ -148,6 +154,13 @@ def agent_tool_retries_from_env() -> int:
 
 def agent_fallbacks_from_env() -> int:
     return max(0, _env_int("AGENT_FALLBACKS", DEFAULT_FALLBACKS))
+
+
+def _new_run_id() -> str:
+    """A per-run provenance id (Day 17) — state is attributable to the run that
+    wrote it (`recalled ⊆ authored`). Injectable at the call site for determinism."""
+    import uuid
+    return f"run-{uuid.uuid4().hex[:12]}"
 
 
 # Ids the answer is allowed to cite: `module#Symbol` (code) and `doc_id#heading`
@@ -499,6 +512,9 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
               clock=time.monotonic,
               temperature: float = 0.0, max_tokens: int = 2048,
               plan=None,
+              state=None, principal: str | None = None,
+              session_id: str | None = None, task_id: str | None = None,
+              run_id: str | None = None,
               ) -> dict[str, Any]:
     """Reason → choose → execute → observe → reason again → answer.
 
@@ -544,10 +560,23 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
     checkpoints. With `plan=None` nothing below changes, which is what makes a
     **one-step plan the identity case** and keeps Day 12's exits, guards, and costs
     exactly where they were.
+
+    Day 17 §4 adds one optional parameter: **`state`** (a `StateStore`). With a
+    store and a `session_id`, the loop's **conversation state** persists per
+    session/principal — prior turns are loaded as headers on the transcript (not a
+    hidden variable), so a back-reference is answered from the stored exchange, and
+    a self-correction stays attributed to the same conversation. Working/task state
+    is the executor's shelf (it has the plan position and the hypothesis). With
+    `state=None` nothing below changes: the store **augments** the run and never
+    replaces it, which is what makes **state off ≡ Days 12–16** (S9).
     """
     q = (request or "").strip()
     if not q:
         raise ValueError("request must not be empty")
+
+    store_on = state is not None
+    principal = principal or (state.principal if state is not None else None)
+    run_id = run_id or _new_run_id()
 
     if plan is not None:
         # Day 16 §4 — the plan is the loop's **agenda, not its replacement**: a
@@ -555,12 +584,22 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
         # this same loop's atoms (one `chat_with_tools` turn per step, the registry,
         # `execute_bounded`, the ladder). With no plan the body below is Day 12
         # *unchanged* — and a one-step plan is the identity case (P9), which is why
-        # `run_agent(max_steps=1)` still is Day 11.
+        # `run_agent(max_steps=1)` still is Day 11. Day 17 passes the store through
+        # so the executor can put its **task state** on a shelf (D17).
         from ai_os.executor import run_plan
-        return run_plan(plan, registry, gateway, budget_chars=budget_chars,
-                        tool_timeout_s=tool_timeout_s, tool_retries=tool_retries,
-                        budget_usd=budget_usd, temperature=temperature,
-                        max_tokens=max_tokens, clock=clock)
+        result = run_plan(plan, registry, gateway, budget_chars=budget_chars,
+                          tool_timeout_s=tool_timeout_s, tool_retries=tool_retries,
+                          budget_usd=budget_usd, temperature=temperature,
+                          max_tokens=max_tokens, clock=clock,
+                          state_store=state, principal=principal,
+                          task_id=task_id, run_id=run_id)
+        if store_on and session_id:
+            persist_conversation(state, principal, session_id, [
+                {"role": "user", "content": q},
+                {"role": "assistant", "content": result.get("answer", "")},
+            ], run_id=run_id)
+            result["session_id"] = session_id
+        return result
 
     steps_cap = agent_max_steps_from_env() if max_steps is None else max(1, max_steps)
     obs_budget = (agent_budget_chars_from_env() if budget_chars is None
@@ -578,10 +617,16 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
                     else max(0, fallbacks))
     ledger_start = len(gateway.ledger.records)
 
-    transcript: list[dict[str, Any]] = [
-        {"role": "system", "content": REASONING_PROMPT},
-        {"role": "user", "content": q},
-    ]
+    # Day 17 §4 — conversation state: prior turns for this session are *headers on
+    # the transcript*, not a hidden variable (Day 12's no-hidden-variable rule
+    # survives the upgrade to a store). With no store the list is empty, so the
+    # transcript below is byte-for-byte Day 12.
+    prior_turns = (load_conversation(state, principal, session_id)
+                   if (store_on and session_id) else [])
+    transcript: list[dict[str, Any]] = (
+        [{"role": "system", "content": REASONING_PROMPT}]
+        + prior_turns
+        + [{"role": "user", "content": q}])
     steps: list[dict[str, Any]] = []
     all_calls: list[Any] = []
     executed_rows: list[dict[str, Any]] = []
@@ -795,7 +840,7 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
         pivot_recovered=_pivot_recovered(steps), contradictions=contradictions,
         policy_hits=policy_hits)
 
-    return {
+    result: dict[str, Any] = {
         "question": q,
         "answer": answer_text,
         "turns": len(steps) + 1,
@@ -850,6 +895,21 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
         "rejection_classes": rejection_classes(steps),
         "cost_estimates": cost_estimates(steps),
     }
+
+    # Day 17 §4 — persist the conversation delta so the next turn in this session
+    # is answerable from the stored exchange. The store records *what the run
+    # already produced* (the question and the answer); it never invents a turn.
+    if store_on and session_id:
+        persist_conversation(state, principal, session_id, [
+            {"role": "user", "content": q},
+            {"role": "assistant", "content": answer_text},
+        ], run_id=run_id)
+    result["state_on_off"] = STATE_ON if store_on else STATE_OFF
+    result["state_principal"] = principal
+    result["session_id"] = session_id
+    result["run_id"] = run_id
+    result["conversation_turns"] = len(prior_turns)
+    return result
 
 
 def run_tool_answer(question: str, registry: ToolRegistry, gateway, *,

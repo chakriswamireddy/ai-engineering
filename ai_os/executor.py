@@ -43,6 +43,7 @@ from ai_os.agent import (
     _call_row,
     _ledger_delta,
     _ledger_row,
+    _new_run_id,
     _run_cost,
     _tool_message,
     agent_budget_chars_from_env,
@@ -67,7 +68,14 @@ from ai_os.planner import (
 )
 from ai_os.sql_safety import POLICY as POLICY_CLASS
 from ai_os.sql_safety import REPAIRABLE
-from ai_os.state import ExecutionState
+from ai_os.state import (
+    STATE_OFF,
+    STATE_ON,
+    ExecutionState,
+    load_task_state,
+    persist_task_state,
+    task_key,
+)
 from ai_os.tools import (
     ERROR_TIMEOUT,
     REJECTION_KINDS,
@@ -332,6 +340,11 @@ def run_plan(plan: Plan, registry: ToolRegistry, gateway, *,
              stop_after: int | None = None,
              state: ExecutionState | None = None,
              resume: bool = False,
+             state_store=None,
+             principal: str | None = None,
+             task_id: str | None = None,
+             run_id: str | None = None,
+             resume_from_store: bool = False,
              ) -> dict[str, Any]:
     """Walk a validated plan: execute · checkpoint · adapt · answer.
 
@@ -346,6 +359,14 @@ def run_plan(plan: Plan, registry: ToolRegistry, gateway, *,
     Returns a run object shaped like `run_agent`'s, plus the plan columns — so the
     A-report can read both worlds with one eye, and a plan run's verdict is a
     reproducible row rather than a narrated transcript.
+
+    Day 17 §5 makes the checkpoint **durable**: with a `state_store`, every
+    checkpoint is also a `put("/task/{task_id}", …)` — so `execution state` leaves
+    the process. `resume_from_store=True` loads that record and continues at the
+    first uncompleted step (a run resumed in a *new process*, S3); the read-only
+    tools are what make the re-run safe (a completed step is skipped, not repeated).
+    With `state_store=None` nothing changes: the executor is Day 16 unchanged, which
+    is the S9 off-switch.
     """
     replan_cap = max_replans_from_env() if max_replans is None else max(0, max_replans)
     repair_cap = max_repairs_from_env() if max_repairs is None else max(0, max_repairs)
@@ -363,11 +384,32 @@ def run_plan(plan: Plan, registry: ToolRegistry, gateway, *,
         replan_fn = _default_replan(gateway)
     ledger_start = len(gateway.ledger.records)
 
+    # Day 17 §5 — resolve the store, then load the checkpoint it holds. The task is
+    # keyed by `task_id`; a fresh process resumes because the *file* survived.
+    store_on = state_store is not None
+    if store_on:
+        principal = principal or state_store.principal
+        run_id = run_id or _new_run_id()
+        task_id = task_id or f"task-{run_id}"
+    resumed_from_store = False
+    if state is None and resume_from_store and store_on:
+        payload = load_task_state(state_store, principal, task_id)
+        if payload is not None:
+            state = ExecutionState.from_dict(payload)
+            resume = True
+            resumed_from_store = True
+
     validation = validate_plan(plan.steps, registry)
     st = state if state is not None else ExecutionState.fresh(plan.question, plan)
     for sid in plan.ids:                       # a stored state keeps its own order
         if sid not in st.plan_ids:
             st.plan_ids.append(sid)
+
+    def flush(sid: str) -> None:
+        """Hot to execute, cold to persist: the checkpoint, written to its shelf."""
+        if store_on and task_id:
+            persist_task_state(state_store, principal, task_id, st.as_dict(),
+                               run_id=run_id, step=sid, source="executor")
 
     est = estimate_cost(plan, plan_chats=0 if plan.source == PLAN_SOURCE_STORED else 1)
     over_planned = bool(plan.source == PLAN_SOURCE_STORED and len(plan.steps) > 1
@@ -402,6 +444,7 @@ def run_plan(plan: Plan, registry: ToolRegistry, gateway, *,
                 st.set_status(sid, "failed",
                               error=f"unmet dependency: {unmet}")
                 st.checkpoint(sid)
+                flush(sid)
                 termination = "dependency_violation"
                 break
 
@@ -466,6 +509,7 @@ def run_plan(plan: Plan, registry: ToolRegistry, gateway, *,
                 st.set_status(sid, "failed", error="policy violation",
                               diverged=True)
                 st.checkpoint(sid)
+                flush(sid)
                 termination = "policy_wall"       # a wall: no rung was climbed
                 break
 
@@ -480,6 +524,7 @@ def run_plan(plan: Plan, registry: ToolRegistry, gateway, *,
             st.set_status(sid, "done" if ok else "failed", diverged=not satisfied,
                           error=step_error)
             st.checkpoint(sid)
+            flush(sid)
 
             if not satisfied:
                 # §5's re-plan gate: the evidence invalidated the plan's shape.
@@ -571,6 +616,15 @@ def run_plan(plan: Plan, registry: ToolRegistry, gateway, *,
         "checkpoints": state_dict["checkpoints"],
         "checkpoint_idx": len(st.checkpoints),
         "resume_from": st.resume_from(),
+        # Day 17 §5 — the state contract: whether the store was on, who owns the
+        # task, the shelf key the checkpoint lives at, and whether this run loaded
+        # its position from the store (a resume in a new process) rather than fresh.
+        "state_on_off": STATE_ON if store_on else STATE_OFF,
+        "state_principal": principal,
+        "task_id": task_id if store_on else None,
+        "task_state_key": (task_key(task_id) if (store_on and task_id) else None),
+        "resumed_from_store": resumed_from_store,
+        "hypothesis": st.hypothesis,
         "evidence": st.evidence_union(),
         "citations": mentioned,
         "fabricated": grounding["fabricated"],
