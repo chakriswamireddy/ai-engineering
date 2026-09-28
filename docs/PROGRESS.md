@@ -1,10 +1,10 @@
-# Progress — ai-layer (Days 2–10)
+# Progress — ai-layer (Days 2–17)
 
 > Live status of what is implemented, verified, and still open in this repo.
 > Kept up to date as days are worked; the canonical per-day detail lives in
 > `docs/day-plan/day-N-notes.md`.
 
-Updated: 2026-09-25
+Updated: 2026-09-28
 
 ## Status legend
 
@@ -34,6 +34,7 @@ Updated: 2026-09-25
 | 14 | Data Agent | PARTIAL (all MECH green offline; Q1–Q8 with **`asserted ⊆ returned = ok` on every answered row** (the fabricated twin excepted) + the **two independent read-only guards** (validator rejects before execution; the engine refuses a bypassed write) + the schema card (DB schema, not `schema.graphql`) + row-limit/truncation + `no_data` as a finding + the `unknown_column` repair; A1–A8 / T1–T7 / F1–F9 re-run through the same harness; real-model *SQL generation + grounding* `PENDING` Day 21, real Postgres latency/schema reconciliation `PENDING` a live role) | `ai_os/data.py` (new), `ai_os/tools.py` (`run_saleor_sql`, `describe_saleor_schema`, real resolvers), `ai_os/trace.py`/`ai_os/agent.py` (data columns + the invariant), `tools/data_smoke.py`, `tools/mock_gateway.py` (`tc_d14_*`/`answer_d14_*`), `docs/concepts/text-to-sql.md`, `docs/evaluations/data-day14.md` |
 | 15 | Safe Text-to-SQL | PARTIAL (all MECH green offline; X1–X11 with **`Wrote? = no` on every attack row** — the DB byte-for-byte unchanged — and **`X11 false-reject? = no`**; the allow-list parser (not a deny-list), the policy (table allow / PII column deny / enforced glossary), single-statement + homoglyph normalization, the **two rejection classes** with `policy_violations` stopping the run on a policy hit, the cost pre-check, the shape-aware `LIMIT`, and the *server-side* `statement_timeout` (proven offline by its mapping); Q1–Q8 / A1–A8 / T1–T7 / F1–F9 re-run unchanged through the hardened executor; **X10's real-model behaviour `PENDING` Day 25/26 + Day 21, parser soundness `PENDING` long-term hardening, real Postgres timeout/`EXPLAIN` `PENDING` a live role**) | `ai_os/sql_safety.py` (new), `policy.yaml` (new), `ai_os/data.py` (server timeouts + safety routing + `rejection_class`), `ai_os/tools.py` (`ToolResult.rejection_class`), `ai_os/trace.py` (safety columns), `ai_os/agent.py` (the policy stop), `tools/sql_attack_smoke.py` (new), `tools/mock_gateway.py` (`tc_d15_*`/`answer_d15_*`), `docs/concepts/safe-sql.md`, `docs/evaluations/sql-safety-day15.md` |
 | 16 | Agent Planning | PARTIAL (all MECH green offline; P1–P9 with **`conclusion ⊆ evidence = ok` on every answered row** — the fabricated twin the only `FAIL`, and the point of the fixture — and **`over-planned? = no` on P9**; plan validation fail-closed (registered tools · schema args · acyclic · deps exist — an invalid plan runs **zero steps, zero bills**), execution state + **checkpoints** (resume at *k+1* without re-running a completed step; replay reproduces the evidence), the re-plan gate (divergence → replan), the bounded retry ladder (repair · retry · fallback · replan) with the **policy wall climbing no rung** (`rungs: []`), and the 6→7 gate; T1–T7 / A1–A8 / F1–F9 / Q1–Q8 / X1–X11 re-run unchanged; **real-model plan quality `PENDING` Day 21, durable state `PENDING` Day 17/18, parallel DAG branches named not built**) | `ai_os/planner.py` (new), `ai_os/executor.py` (new), `ai_os/state.py` (new), `ai_os/agent.py` (`run_agent(plan=…)`), `ai_os/trace.py` (plan columns + `PLAN_TERMINATIONS`), `tools/plan_smoke.py` (new), `tools/mock_gateway.py` (`D16_PLAN_*`/`answer_d16_*`), `docs/concepts/planning.md`, `docs/evaluations/planning-day16.md` |
+| 17 | Memory and State | PARTIAL (all MECH green offline; S1–S9 with **`recalled ⊆ authored = ok` on every row that recalls** + the **S9 control** (state off ≡ Days 12–16); the file-backed **store** (provenance-mandatory, **closed** to non-authored writes, expiry-acts-absent, first-class `forget` + compaction, the size cap), **resume across a process** (a new interpreter continues at *k+1*, the completed step not re-run — safe because the tools are read-only), byte-identical **serialization/replay**, and the **context-keyed boundary**; episodic recall + semantic distillation `PENDING` Day 18/21) | `ai_os/state.py` (the store), `ai_os/agent.py` (conversation state), `ai_os/executor.py` (task state + resume), `ai_os/trace.py` (state columns + `recalled_subset_authored`), `tools/state_smoke.py` (new), `docs/concepts/state-memory.md`, `docs/evaluations/state-day17.md` |
 
 ---
 
@@ -727,11 +728,98 @@ keeping the change small. Concept + evaluation: `docs/concepts/planning.md`,
 
 ---
 
+## Day 17 — Memory and State `PARTIAL`
+
+Days 12–16 built an agent that remembers **only while it works** — Day 12's
+transcript died with the process, and Day 16's execution state and checkpoints were
+deliberately ephemeral ("the persistent store is Day 17's seam, named not built").
+Day 17 builds that seam. The curriculum's question — *"Understand what an agent needs
+to remember"* — is answered structurally: the **three states** first
+(**working** = this task's facts + hypothesis, **conversation** = the session's
+transcript, **task** = the plan/steps/evidence/ledger as a durable record), and only
+**then** the question of persistent memory, *"only if useful."* The deliverable is
+the **agent state/checkpoint system** — a layered **store** that gives Day 16's
+checkpoint a home, with serialization/replay, retention (TTL · expiry · first-class
+**deletion**), and provenance making every recalled claim traceable to the run that
+authored it. Concept + evaluation: `docs/concepts/state-memory.md`,
+`docs/evaluations/state-day17.md`.
+
+- `ai_os/state.py` (the store; Day 16's `StepRecord`/`Checkpoint`/`ExecutionState`
+  are unchanged above it) — `StateRecord` (`{kind, principal, key, payload, ttl,
+  expires_at, created_by: run_id+step+source, created_at, accessed_at, schema}`) and
+  `StateStore` (`put`/`get`/`list_for`/`recall`/`delete`/`forget`/`expire`/`compact`/
+  `dump`/`load`/`round_trip`), file-backed JSON like the corpus stores. The five
+  decisions: **the schema is a contract** (`schema: 2`, versioned); **provenance is
+  mandatory** (a write with no `created_by`, or a `source` outside `AUTHORED_SOURCES`,
+  raises `ProvenanceError` **at write time**); **the store is closed** (a
+  provenance-less record in the file is *not admitted on load* → unreachable —
+  an injection cannot become a memory); **deletion is first-class** (`forget` removes
+  the record *and* its derived index; expiry acts as absence; `compact` reclaims);
+  **the OFF switch is real** (`enabled=False` → every read empty, every write a
+  no-op). Plus the key helpers (`task_key`/`conversation_key`/`working_key`) and the
+  wired helpers (`persist_task_state`/`load_task_state`/`working_state`,
+  `persist_conversation`/`load_conversation`).
+- `ai_os/executor.py` (extended) — `run_plan` gains `state_store` / `principal` /
+  `task_id` / `run_id` / `resume_from_store`: **every checkpoint is also a
+  `put("/task/{task_id}", …)`** (hot to execute, cold to persist), and
+  `resume_from_store=True` loads that record and continues at the first uncompleted
+  step — a run resumed in a **new process** (S3). Safe because the tools are
+  **read-only and re-runnable** (no side effect double-applied — Day 14/15's safety
+  property is what makes resume *correct*). The run object gains `state_on_off`,
+  `state_principal`, `task_id`, `task_state_key`, `resumed_from_store`, `hypothesis`.
+- `ai_os/agent.py` (extended, minimally) — `run_agent` gains an optional `state`
+  (+ `principal`/`session_id`/`task_id`/`run_id`): with a store and a `session_id`,
+  **conversation state** persists per session/principal — prior turns load as
+  *headers on the transcript*, never a hidden variable (Day 12's rule survives the
+  upgrade), and the new exchange appends after the run. An injectable `_new_run_id()`
+  makes provenance deterministic. With `state=None` nothing below changes, which is
+  what makes **state off ≡ Days 12–16** (S9).
+- `ai_os/trace.py` (extended) — `recalled_subset_authored(records)` (every recalled
+  record carries a `run_id` + an authored `source` — the §9 headline invariant
+  re-checked at the recall site) and `state_columns(…)` (the §9 row:
+  `state_on_off`/`state_kind`/`principal`/`recalled`/`provenance`/
+  `recalled_subset_authored`/`expired`/`deleted`). No existing function or row shape
+  moved.
+- `tools/state_smoke.py` (new) — **ALL DAY 17 (MECH) CHECKS PASSED**: S1 working
+  state (plan position + hypothesis served at turn 2, no re-derivation), S2
+  conversation state (per session/principal; a different session starts empty, a
+  different principal cannot read it), S3 task resume (**a new process** continues at
+  *k+1*, the completed step not re-run, the earlier evidence carried), S4
+  serialize/replay (byte-identical round-trip; replay reproduces the evidence), S5
+  retention (expired acts absent through get/list_for/recall; compaction reclaims;
+  hostile tiny-TTL + `max_records` eviction proven), S6 deletion (`forget` purges the
+  derived index; unreachable everywhere; visible in the trace), S7 provenance (the
+  closed write path — rejected at write time *and* not admitted on load), S8 boundary
+  (context-keyed reads; no bleed), S9 control (state off ≡ Days 12–16), and the
+  **no-regression** gate (re-runs `test_day7..10.py` + `tool_smoke` / `agent_smoke` /
+  `failure_smoke` / `data_smoke` / `sql_attack_smoke` / `plan_smoke`).
+- **Headline:** **`recalled ⊆ authored = ok` on every row that recalls** — the
+  differing translations are now a set: Days 6/14/16/17 = `cited ⊆ retrieved` /
+  `asserted ⊆ returned` / `conclusion ⊆ evidence` / `recalled ⊆ authored`. And
+  **S9** is the counterweight: a persistence layer that changed a memory-free answer
+  is a bug wearing a diary.
+- **No regression:** the store is **additive** — a cold shelf the loop and the
+  executor flush to. `ai_os/gateway.py`, the retriever, and the loop's control flow
+  are untouched; with `state=None`/`state_store=None` the transcript is byte-for-byte
+  Day 12 and the executor is Day 16 unchanged. Days 7–16's suites stay green.
+- **Cost shape:** state is **0 chats, 0 embeds** on the answer path — the store is
+  local I/O, one JSON append per checkpoint. The premium is **latency and disk, not
+  money**; a resume *saves* by skipping the completed step.
+- `PENDING`: relevance-scored recall of episodic records and semantic distillation
+  (episodes → grounded concepts, `authored ⊆ grounded`) are **Day 18's** system;
+  whether a real model's memory makes answers better is **Day 21's** benchmark on
+  this store; streaming conversation state (ordering across Day 4's SSE mid-stream
+  cuts) and multi-process synchronization of one task record are **named, not built**.
+  Re-verify with `python tools/state_smoke.py`.
+
+---
+
 ## Known gaps (what blocks "everything green for real")
 
-1. **Git:** Day 9 is committed (`39285dd`, `76af2e0`, `37bd8d9`, `d62acda`);
-   the newly added knobs + real-run docs are the uncommitted working-tree
-   change alongside the Day 11–15 plans.
+1. **Git:** Days 2–16 are committed (HEAD `31bbecd`, the Day-16 rollup); **Day 17**
+   lands on top as grouped `feat` / `test` / `docs` commits. The **Day-18+
+   implementation is unbuilt** — the concept/eval docs stop at Day 17, `ai_os/` has
+   no memory/observability modules, and Days 21–24's plan/notes docs sit untracked.
 2. **Chat quota / rate limits:** live chat now works via OpenRouter free models
    (`nex-agi/nex-n2.5-pro:free`, daily free cap ~50 req); embeddings via
    Cloudflare, free tier. Full semantic sweeps stay budgeted, not assumed.
@@ -863,6 +951,21 @@ keeping the change small. Concept + evaluation: `docs/concepts/planning.md`,
     an id or a figure is not caught) — the same honest limit Day 12's fabrication
     guard carries, owned by **Day 21**. Re-verify with `python tools/plan_smoke.py`.
 
+13. **Day 17 semantics** — the MECH half is green (`tools/state_smoke.py`; S1–S9 with
+    `recalled ⊆ authored = ok` on every row that recalls, the S9 control, the
+    closed write path, expiry/deletion/compaction, cross-process resume, and
+    byte-identical serialization; Days 7–16 re-run unchanged through the store).
+    Still `PENDING`: (a) **relevance-scored recall of episodic records** — the store
+    serves a recorded investigation verbatim by `task_id`; scoring candidate episodes
+    for a *new* question is **Day 18/21's**; (b) **semantic distillation** (episodes
+    → grounded concepts, `authored ⊆ grounded`) is **Day 18's** system, named not
+    built; (c) whether a real model's memory makes answers **better** is **Day 21's**
+    benchmark on this store; (d) **streaming conversation state** (message ordering
+    across Day 4's SSE mid-stream cuts) and **multi-process synchronization** of one
+    task record are *named, not built*; (e) `recalled ⊆ authored` proves *who wrote*
+    a record, not that it is *true* — grounding a distilled claim is Day 18's,
+    adjudication is Day 21's. Re-verify with `python tools/state_smoke.py`.
+
 ## How to re-verify, in one line
 
 ```bash
@@ -884,6 +987,7 @@ python tools/failure_smoke.py           # day 13 F1–F9 (guards + fabricated? c
 python tools/data_smoke.py              # day 14 Q1–Q8 (read-only guards + asserted ⊆ returned) + A1–A8 / T1–T7 / F1–F9 re-run
 python tools/sql_attack_smoke.py        # day 15 X1–X11 (attack set + control) + Wrote?=no + the Days 11–14 re-run
 python tools/plan_smoke.py              # day 16 P1–P9 (plan validation · state · checkpoints · ladder · policy wall) + the Days 11–15 re-run
+python tools/state_smoke.py             # day 17 S1–S9 (the store · provenance · expiry/deletion · cross-process resume · serialize/replay · the S9 control) + the Days 7–16 re-run
 LLM_PROVIDERS=cloudflare: python tools/build_code_store.py --corpus corpus_code/saleor --out data/code_store.json --batch 100  # real build (resume; see gap 6)
 python tools/retrieval_day10.py --store data/code_store.json --doc-store data/store.json  # real corpora
 ```
