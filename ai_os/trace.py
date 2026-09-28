@@ -36,6 +36,7 @@ from ai_os.rag import (
     citation,
     k_from_budget,
 )
+from ai_os.state import AUTHORED_SOURCES, STATE_OFF, STATE_ON
 
 # --------------------------------------------------------------- verdicts
 # The §4 decision tree's terminals. Each routes to exactly one owning day.
@@ -783,3 +784,54 @@ def grounding_over_transcript(mentioned: list[str],
         "fabricated": fabricated,
         "cited_subset_retrieved": not fabricated,
     }
+
+
+# ======================================================== Day 17 — the state
+# §9's state table columns. State is store I/O, not generation — so the columns
+# are the store's own verdicts (which shelf, whose, expired? deleted?) plus the
+# day's headline invariant `recalled ⊆ authored`, proven on every row that recalls.
+
+def recalled_subset_authored(records: Sequence[Any]) -> bool:
+    """`recalled ⊆ authored` — every recalled record carries honest provenance.
+
+    A record is recallable only if the store's own write path admitted it, which
+    requires a `run_id` and a `source` the runtime authored (§3). A record the
+    system did not write — an import, an injected string, a "fact" with no writer —
+    can never appear here, because it never passed the write path (S7).
+    """
+    for rec in records:
+        cb = getattr(rec, "created_by", None)
+        if not isinstance(cb, dict) or not cb.get("run_id") \
+                or cb.get("source") not in AUTHORED_SOURCES:
+            return False
+    return True
+
+
+def state_columns(*, enabled: bool = True, principal: str | None = None,
+                  records: Sequence[Any] = (), kind: str | None = None,
+                  resume_task_id: str | None = None, expired: bool = False,
+                  deleted: bool = False,
+                  extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The §9 state row: what was recalled, from where, and by whose authority.
+
+    `provenance` is the `run/step/source` triple of every recalled record — the
+    raw material of `recalled ⊆ authored`, and the field that makes a recalled
+    claim traceable to the run that wrote it. `state_on_off` is the day's
+    counterweight: with state off there is nothing to recall and nothing changed.
+    """
+    recs = list(records or [])
+    provenance = sorted({r.provenance() for r in recs
+                         if hasattr(r, "provenance")})
+    out: dict[str, Any] = {
+        "state_on_off": STATE_ON if enabled else STATE_OFF,
+        "state_kind": kind,
+        "principal": principal,
+        "recalled": len(recs),
+        "provenance": provenance,
+        "recalled_subset_authored": recalled_subset_authored(recs),
+        "expired": bool(expired),
+        "deleted": bool(deleted),
+        "resume_task_id": resume_task_id,
+    }
+    out.update(extra or {})
+    return out
