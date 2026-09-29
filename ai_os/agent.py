@@ -385,6 +385,11 @@ def _call_row(call, vr: ToolResult, result: ToolResult,
     }
     if result.error_kind:
         row["error_kind"] = result.error_kind
+    if result.rejection_class:
+        # Day 15/19 — the follow-up the loop must take. Carried on **every** tool,
+        # not only the data ones: the role gate's out-of-role denial is a `policy`
+        # rejection that stops the run (it is never even executed).
+        row["rejection_class"] = result.rejection_class
     if result.retryable:
         row["retryable"] = True
     if result.fallback_from:
@@ -525,6 +530,8 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
               session_id: str | None = None, task_id: str | None = None,
               run_id: str | None = None,
               memory_store=None,
+              routed_to: str | None = None,
+              role: str | None = None,
               ) -> dict[str, Any]:
     """Reason → choose → execute → observe → reason again → answer.
 
@@ -579,6 +586,12 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
     is the executor's shelf (it has the plan position and the hypothesis). With
     `state=None` nothing below changes: the store **augments** the run and never
     replaces it, which is what makes **state off ≡ Days 12–16** (S9).
+
+    Day 19 §4 adds two **recorded** parameters: **`routed_to`** (the role the
+    Day-19 rule table assigned) and **`role`** (the role a `RoleAgent` is bound
+    to). They are fields on the run, never a hidden variable — routing changes no
+    answer, evidence, or exit — which is exactly what keeps Topology A
+    byte-for-byte Days 12–18 and makes the G9 control meaningful.
     """
     q = (request or "").strip()
     if not q:
@@ -609,6 +622,8 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
                 {"role": "assistant", "content": result.get("answer", "")},
             ], run_id=run_id)
             result["session_id"] = session_id
+        result.setdefault("routed_to", routed_to)
+        result.setdefault("role", role)
         return result
 
     steps_cap = agent_max_steps_from_env() if max_steps is None else max(1, max_steps)
@@ -715,6 +730,13 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
                 rejections += 1
                 if vr.error_kind:
                     last_rejection_kind = vr.error_kind
+                # §7 — a `policy` rejection is a wall even at validation: the role
+                # gate denies an out-of-role tool here (never executed), and
+                # self-correcting across the privilege boundary is exactly the
+                # bypass Day 15/19 forbid. It stops the run like an executed one.
+                if vr.rejection_class == POLICY_CLASS:
+                    policy_hits += 1
+                    step_policy = True
                 msg, clamped = _tool_message(call, vr, obs_budget)
                 observations.append(msg)
                 row = _call_row(call, vr, vr, clamped)
@@ -924,6 +946,12 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
         "policy_violations": policy_violations(steps),
         "rejection_classes": rejection_classes(steps),
         "cost_estimates": cost_estimates(steps),
+        # Day 19 — the routing contract: recorded fields only. `routed_to` is the
+        # router's decision (or an override); `role` names the role a `RoleAgent`
+        # is *bound* to (a specialist), and stays None on the single loop. Neither
+        # changes the answer — Topology A ≡ Days 12–18 (G9).
+        "routed_to": routed_to,
+        "role": role,
     }
 
     # Day 17 §4 — persist the conversation delta so the next turn in this session
@@ -985,3 +1013,125 @@ def run_tool_answer(question: str, registry: ToolRegistry, gateway, *,
     return run_agent(question, registry, gateway, max_steps=1,
                      max_tool_calls_per_step=cap, temperature=temperature,
                      max_tokens=max_tokens)
+
+
+# ==================================================== Day 19 — roles & routing
+# §4 — the honest half of the multi-agent hypothesis: *specialize the context, keep
+# the loop.* Three roles, each exactly a tool group + a policy (Day 11 + Day 15),
+# already existed on one loop; Day 19 asks whether duplicating the *loop* per role
+# buys anything. Topology A keeps one loop and only routes the entry surface; Topology
+# B duplicates the loop per role. Both use these definitions, so the only variable is
+# the topology.
+#
+# The tool groups are disjoint on purpose, so an out-of-role call is a *policy*
+# refusal at the specialist's gate (G4) and not an ambiguity. The mapping to this
+# series' seven tools: **knowledge** = the documentation surface (prose/concepts),
+# **engineering** = the code surface (symbols/implementations), **data** = the
+# schema-grounded read-only SQL surface plus the fixed record resolvers. (The
+# curriculum's "git/run/test" engineering tools do not exist in this repo; the code
+# surface is the faithful stand-in, and the receipt contract is indifferent to which
+# tool produced the evidence.)
+
+ROLES: tuple[str, ...] = ("knowledge", "data", "engineering")
+
+ROLE_TOOLS: dict[str, tuple[str, ...]] = {
+    "knowledge": ("search_saleor_docs",),
+    "engineering": ("search_saleor_code",),
+    "data": ("run_saleor_sql", "describe_saleor_schema",
+             "get_product", "get_order", "get_customer"),
+}
+
+ROUTING_ENV = "ROLE_CONTEXT_ROUTING"
+
+# The router's rule table, `MECH` and transparent: an **explicit surface name** wins
+# over a family keyword, and the day-8 `rule_section` reflex is reused (a question
+# that names a surface is routed there, not scored). First match wins; no match is
+# `None` (the neutral, unrouted case that keeps Topology A ≡ Days 12–18).
+_EXPLICIT_SURFACE: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("data", ("sql", "database", "postgres", "schema", "table", "column")),
+    ("knowledge", ("documentation", "docs")),
+    ("engineering", ("source code", "codebase", "function", "class", "symbol",
+                     "module", "mutation")),
+)
+_FAMILY_SURFACE: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("data", ("revenue", "how many", "how much", "count", "sum", "aggregate",
+              "join", "rows", "total")),
+    ("engineering", ("implemented", "where is", "which file", "handler",
+                     "defined", "code")),
+    ("knowledge", ("how do i", "what does", "guide", "quickstart", "concept",
+                   "explain", "according to")),
+)
+
+
+def role_context_routing_from_env() -> bool:
+    """`ROLE_CONTEXT_ROUTING=0` neutralises the router (Topology A ≡ Days 12–18)."""
+    return os.getenv(ROUTING_ENV, "1").strip().lower() not in {
+        "0", "off", "false", "no"}
+
+
+def route_question(question: str, *, forced: str | None = None,
+                   rules: bool = True) -> dict[str, Any]:
+    """Classify a question into `knowledge | data | engineering` (or `None`).
+
+    A deterministic rule-table decision — **0 chats**, transparent (`signal` names
+    the token that fired), and **overridable** (`forced` wins, mirroring an explicit
+    surface name). `routing_on_off` records the env switch so the G9 control can
+    assert the machinery is genuinely off.
+    """
+    q = f" {(question or '').lower().strip()} "
+    routing_on = role_context_routing_from_env()
+    if forced is not None:
+        return {"question": question, "routed_to": forced if forced in ROLES else None,
+                "signal": "forced", "overridden": True,
+                "routing_on_off": "on" if routing_on else "off"}
+    if not rules or not routing_on:
+        return {"question": question, "routed_to": None, "signal": "routing off",
+                "overridden": False, "routing_on_off": "on" if routing_on else "off"}
+    for tier, signal_name in ((_EXPLICIT_SURFACE, "explicit"),
+                              (_FAMILY_SURFACE, "family")):
+        for role, tokens in tier:
+            for token in tokens:
+                if token in q:
+                    return {"question": question, "routed_to": role,
+                            "signal": f"{signal_name}:{token.strip()}",
+                            "overridden": False,
+                            "routing_on_off": "on" if routing_on else "off"}
+    return {"question": question, "routed_to": None, "signal": "no-rule",
+            "overridden": False, "routing_on_off": "on" if routing_on else "off"}
+
+
+class RoleAgent:
+    """A single loop bound to one role's tool group — `make_agent(role)`'s product.
+
+    Not a new program: `run()` is Day 12's `run_agent` with a *narrower registry*
+    (the role's tools) and the role recorded on the run. The role's out-of-role gate
+    rides in the registry (`ToolRegistry.scope`), so privilege containment is a
+    property of the loop's own contract surface, not a check bolted on outside.
+    """
+
+    def __init__(self, role: str, registry: ToolRegistry) -> None:
+        self.role = role
+        self.registry = registry
+
+    def names(self) -> list[str]:
+        return self.registry.names()
+
+    def denied(self) -> dict[str, str]:
+        return self.registry.denied()
+
+    def run(self, question: str, gateway, **kwargs) -> dict[str, Any]:
+        return run_agent(question, self.registry, gateway,
+                         routed_to=self.role, role=self.role, **kwargs)
+
+
+def make_agent(role: str, *, registry: ToolRegistry,
+               reason: str = "out of role") -> RoleAgent:
+    """Bind the existing loop to `role`'s tool group (a tool-list slice).
+
+    `registry` is the **full** registry (the same one Topology A uses); the role's
+    view is derived by `scope`, so a specialist is provably the same loop with a
+    narrower contract — the architectural honesty that keeps Topology B cheap.
+    """
+    if role not in ROLE_TOOLS:
+        raise ValueError(f"unknown role {role!r} (known: {list(ROLES)})")
+    return RoleAgent(role, registry.scope(ROLE_TOOLS[role], reason=reason))
