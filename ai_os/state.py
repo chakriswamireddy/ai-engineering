@@ -284,13 +284,29 @@ DEFAULT_STATE_SCHEMA = 2
 # The **authors** — the runtime components allowed to write. `source` is checked
 # against this set, so "import"/"external"/"injected" are not authorable: the
 # store is closed to writes it did not make (§3, decision 3).
+#
+# Day 18 adds `distiller`: the semantic shelf's writer is a *consumer* of the
+# store, not a new store — the distiller mints `kind=semantic` records through
+# this same closed write path, so its output is admitted only because it carries
+# provenance (S7 untouched; a distilled claim the system did not author is still
+# unreachable).
 AUTHORED_SOURCES = frozenset(
-    {"agent", "executor", "session", "trace", "run", "checkpoint"})
+    {"agent", "executor", "session", "trace", "run", "checkpoint", "distiller"})
 
 # The three shelves' kinds (the lifetime axis, §2's table).
 TASK_KIND = "task"
 CONVERSATION_KIND = "conversation"
 WORKING_KIND = "working"
+
+# Day 18 — the memory shelves. Episodic = what happened (a receipt, recalled
+# verbatim); semantic = what is generally true (a distilled lesson, `authored ⊆
+# grounded`); preference = *data about the user*, cited as data, never a lesson.
+EPISODIC_KIND = "episodic"
+SEMANTIC_KIND = "semantic"
+PREFERENCE_KIND = "preference"
+
+# §5 — the sample-size rule: a lesson from one run is an anecdote, never minted.
+DEFAULT_MIN_SOURCES = 2
 
 STATE_ON = "on"
 STATE_OFF = "off"
@@ -310,6 +326,29 @@ def conversation_key(session_id: str) -> str:
 
 def working_key(task_id: str) -> str:
     return f"/working/{task_id}"
+
+
+# Day 18 — the memory shelves' key shapes. `Recall` (memory.py) and `forget`'s
+# re-grounding parse these prefixes, so a concept's `source_episodes` (task ids)
+# map to episodic keys deterministically.
+def episode_key(task_id: str) -> str:
+    return f"/episodic/{task_id}"
+
+
+def concept_key(concept_id: str) -> str:
+    return f"/semantic/{concept_id}"
+
+
+def preference_key(name: str) -> str:
+    return f"/preference/{name}"
+
+
+EPISODE_KEY_PREFIX = "/episodic/"
+
+
+def episode_task_id(key: str) -> str:
+    """The task id an episodic key names (`/episodic/{task_id}` → `{task_id}`)."""
+    return str(key)[len(EPISODE_KEY_PREFIX):] if str(key).startswith(EPISODE_KEY_PREFIX) else ""
 
 
 def _env_float(name: str, default: float) -> float:
@@ -362,22 +401,47 @@ class StateRecord:
     expires_at: float | None = None
     accessed_at: float | None = None
     schema: int = DEFAULT_STATE_SCHEMA
+    # Day 18 §6 — semantic expiry's *meter* beside the clock. A concept is served
+    # only while its `strength` clears its `recall_threshold`; below it the concept
+    # is "alive but unserved" (the clock is the backstop, not the policy). Episodic
+    # / task records leave both `None` and are unaffected.
+    strength: float | None = None
+    recall_threshold: float | None = None
 
     def is_expired(self, now: float) -> bool:
         return self.expires_at is not None and now >= self.expires_at
+
+    def is_decayed(self) -> bool:
+        """A relevance-expired semantic record: alive, but below its serve τ.
+
+        The clock is consulted separately (`is_expired`); this is Day 18's added
+        meter, and a record that trips it **acts absent on the recall path** while
+        remaining visible to `list_for` (a principal may always see what it holds).
+        """
+        if self.strength is None or self.recall_threshold is None:
+            return False
+        return float(self.strength) < float(self.recall_threshold)
+
+    def is_served(self, now: float) -> bool:
+        return not self.is_expired(now) and not self.is_decayed()
 
     def provenance(self) -> str:
         cb = self.created_by or {}
         return f"{cb.get('run_id')}/{cb.get('step')}/{cb.get('source')}"
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "kind": self.kind, "principal": self.principal, "key": self.key,
             "payload": self.payload, "created_by": dict(self.created_by or {}),
             "created_at": self.created_at, "ttl": self.ttl,
             "expires_at": self.expires_at, "accessed_at": self.accessed_at,
             "schema": self.schema,
         }
+        if self.strength is not None:
+            out["strength"] = self.strength
+        if self.recall_threshold is not None:
+            out["recall_threshold"] = self.recall_threshold
+        return out
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "StateRecord | None":
@@ -405,6 +469,10 @@ class StateRecord:
             accessed_at=(None if raw.get("accessed_at") is None
                          else float(raw["accessed_at"])),
             schema=int(raw.get("schema") or DEFAULT_STATE_SCHEMA),
+            strength=(None if raw.get("strength") is None
+                      else float(raw["strength"])),
+            recall_threshold=(None if raw.get("recall_threshold") is None
+                              else float(raw["recall_threshold"])),
         )
 
 
@@ -441,6 +509,7 @@ class StateStore:
         self.dropped: list[str] = []        # provenance-less records refused at load
         self.evicted: list[str] = []        # keys removed by the size cap
         self.compacted = 0                  # records physically reclaimed by TTL
+        self.regrounded: list[dict[str, Any]] = []  # Day 18: concepts re-grounded by forget
         self.load()
 
     @classmethod
@@ -474,11 +543,15 @@ class StateStore:
         return {"run_id": run_id, "step": created_by.get("step"), "source": source}
 
     def put(self, principal: str, kind: str, key: str, payload: Any, *,
-            created_by: Any, ttl: float | None | str = "inherit") -> StateRecord | None:
+            created_by: Any, ttl: float | None | str = "inherit",
+            strength: float | None = None,
+            recall_threshold: float | None = None) -> StateRecord | None:
         """Write a record. Fail-closed on missing/foreign provenance (§3).
 
         `ttl="inherit"` (the default) uses the store default; `ttl=None`/`0` means
         no expiry. Returns the stored record, or `None` when the store is disabled.
+        `strength`/`recall_threshold` are Day 18's semantic meter (left `None` for
+        every non-semantic record).
         """
         if not self.enabled:
             return None
@@ -490,7 +563,10 @@ class StateStore:
         expires = None if ttl is None else now + ttl
         rec = StateRecord(kind=str(kind), principal=str(principal), key=str(key),
                           payload=payload, created_by=prov, created_at=now,
-                          ttl=ttl, expires_at=expires, accessed_at=now)
+                          ttl=ttl, expires_at=expires, accessed_at=now,
+                          strength=(None if strength is None else float(strength)),
+                          recall_threshold=(None if recall_threshold is None
+                                            else float(recall_threshold)))
         ident = self._id(principal, kind, key)
         self.records[ident] = rec
         self._index_add(principal, kind, key)
@@ -516,6 +592,19 @@ class StateStore:
         rec.accessed_at = now
         self._maybe_save()
         return rec
+
+    def touch(self, principal: str, kind: str, key: str) -> None:
+        """Refresh `accessed_at` on a served record (Day 18's re-prompt signal).
+
+        Decay is *age vs neglect*: a successful re-serving records that the memory
+        earned its keep, so the recall path touches what it serves. Recency is not
+        truth — this is the decay meter's input, not a refresh of a concept's
+        *strength* (a concept is never refreshed by re-serving alone, §6).
+        """
+        rec = self.records.get(self._id(principal, kind, key))
+        if rec is not None and not rec.is_expired(self.clock()):
+            rec.accessed_at = self.clock()
+            self._maybe_save()
 
     def list_for(self, principal: str, kind: str | None = None,
                  key_prefix: str = "") -> list[StateRecord]:
@@ -574,13 +663,21 @@ class StateStore:
         return True
 
     def forget(self, principal: str, key: str | None = None,
-               kind: str | None = None) -> int:
+               kind: str | None = None, *, min_sources: int | None = None) -> int:
         """§6 — a first-class retraction: record + derived aggregate, together.
 
         `forget(principal, key)` removes every record the principal holds under
         `key` (any kind) and purges the index, so the record is unreachable through
         `get`/`list_for`/`recall`. Returns how many were removed.
+
+        Day 18 extends "derived aggregate" to **semantic memory**: every concept
+        whose `source_episodes` cite a deleted episode is re-grounded (M5) — its
+        source list shrinks, and a concept that no longer clears the sample-size
+        rule (`≥ min_sources`) is retired with it. A concept already absorbed into
+        a past answer cannot be un-remembered from that answer ("you cannot
+        un-distill"), but *future* recall stops.
         """
+        removed_keys: list[tuple[str, str]] = []
         removed = 0
         for ident, _rec in list(self.records.items()):
             p, k, rk = ident
@@ -592,10 +689,57 @@ class StateStore:
                 continue
             del self.records[ident]
             self._index_remove(p, k, rk)
+            removed_keys.append((k, rk))
             removed += 1
         if removed:
+            self._reground(principal, removed_keys, min_sources)
             self._maybe_save()
         return removed
+
+    def _reground(self, principal: str, removed_keys: list[tuple[str, str]],
+                  min_sources: int | None) -> None:
+        """Re-ground every concept that cites a just-deleted episode (M5).
+
+        A concept is an *aggregate* of its source episodes; when a source is
+        deleted the aggregate must be recomputed, not left citing a record that no
+        longer exists. Two outcomes, both recorded in `self.regrounded`:
+        retirement (now below `min_sources` — a lesson that lost its evidence is an
+        anecdote again) and demotion (strength falls below the recall threshold, so
+        the concept is alive but unserved).
+        """
+        gone = {episode_task_id(rk) for k, rk in removed_keys
+                if k == EPISODIC_KIND}
+        gone.discard("")
+        if not gone:
+            return
+        ms = DEFAULT_MIN_SOURCES if min_sources is None else max(1, int(min_sources))
+        for ident, rec in list(self.records.items()):
+            p, k, rk = ident
+            if p != str(principal) or k != SEMANTIC_KIND:
+                continue
+            payload = rec.payload if isinstance(rec.payload, dict) else {}
+            sources = list(payload.get("source_episodes") or [])
+            if not (set(sources) & gone):
+                continue
+            kept = [s for s in sources if s not in gone]
+            considered = int(payload.get("episodes_considered") or len(sources) or 1)
+            strength = (len(kept) / considered) if considered else 0.0
+            entry = {"concept": rk, "removed_source": sorted(set(sources) & gone),
+                     "remaining_sources": kept, "strength": round(strength, 4)}
+            if len(kept) < ms:
+                del self.records[ident]
+                self._index_remove(p, k, rk)
+                entry["action"] = "retired"
+                entry["reason"] = "below sample size after deletion"
+            else:
+                payload["source_episodes"] = kept
+                rec.payload = payload
+                if rec.recall_threshold is not None:
+                    rec.strength = strength
+                entry["action"] = ("demoted" if rec.is_decayed() else "re-grounded")
+                self.regrounded.append(entry)
+                continue
+            self.regrounded.append(entry)
 
     # ------------------------------------------------------------ retention
     def expire(self, now: float | None = None) -> int:
