@@ -26,6 +26,7 @@ import time
 from typing import Any, Iterator
 from urllib import error as urlerror
 
+from ai_os import observability as obs
 from ai_os.contract import (
     Completion, Embedding, ProviderError, ProviderTimeout, RateLimitError,
 )
@@ -71,77 +72,155 @@ class ModelGateway:
 
     # ------------------------------------------------------------------ chat
 
-    def chat(self, messages, **kw) -> Completion:
+    # ------------------------------------------------------ Day 23 tracing
+    # The tracer wraps the *real* boundary and never re-runs it. When tracing is
+    # off (no active trace, or `AI_TRACING=0`) every method below takes the same
+    # path it always did: same retries, same fallback, same ledger rows (O9).
+
+    def _record(self, tr, span_id: str, operation: str, attempt: int,
+                prompt_ref, **kw):
+        rec = self.ledger.record(
+            trace_id=(tr.trace_id if tr is not None else ""),
+            span_id=span_id or "", operation=operation, attempt=attempt,
+            prompt_ref=prompt_ref, **kw)
+        if tr is not None and getattr(tr, "recording", False):
+            tr.link(rec)
+        return rec
+
+    def _attempt(self, tr, lspan, operation: str, provider, model: str,
+                 attempt: int, depth: int, prompt_ref, fn, success_attrs=None):
+        """Run one provider call inside a `model.<op>.attempt` span.
+
+        The span covers only the call (not the backoff sleep), so a retry is a
+        sibling attempt with its own latency. Returns
+        `(value, error, span_id, latency_ms)`; on error `value` is None.
+        """
+        span = None
+        if tr is not None and getattr(tr, "recording", False) and lspan is not None:
+            span = tr.start_span(
+                obs.KIND_MODEL, f"model.{operation}.attempt", parent=lspan,
+                attributes={"operation": operation, "provider": provider.name,
+                            "model": model, "attempt": attempt,
+                            "fallback_depth": depth,
+                            "prompt": obs.prompt_attrs(prompt_ref)})
+        t0 = time.perf_counter()
+        try:
+            value = fn()
+        except BaseException as exc:
+            latency_ms = (time.perf_counter() - t0) * 1000
+            if span is not None:
+                span.update(latency_ms=round(latency_ms, 3),
+                            error_kind=obs.error_kind_of(exc),
+                            retryable=bool(getattr(exc, "retryable", False)))
+                obs.end_span(span, status=obs.status_for_error(exc),
+                             error=obs.error_fact(exc))
+                tr.leave(span)
+            return None, exc, "", latency_ms
+        latency_ms = (time.perf_counter() - t0) * 1000
+        if span is not None:
+            if success_attrs is not None:
+                span.update(**success_attrs(value))
+            span.update(latency_ms=round(latency_ms, 3))
+            obs.end_span(span, status=obs.STATUS_OK)
+            tr.leave(span)
+        return value, None, (span.span_id if span is not None else ""), latency_ms
+
+    def _retry_event(self, lspan, attempt: int, delay: float, err) -> None:
+        if lspan is not None:
+            lspan.add_event("retry_scheduled", attempt=attempt,
+                            delay_s=round(delay, 3), reason=type(err).__name__)
+
+    def chat(self, messages, *, prompt_ref=None, operation: str = "chat",
+             **kw) -> Completion:
+        tr = obs.current_trace()
+        if tr is None or not getattr(tr, "recording", False):
+            return self._chat(messages, prompt_ref=prompt_ref, operation=operation,
+                              tr=None, lspan=None, kw=kw)
+        with tr.span(obs.KIND_MODEL, f"model.{operation}",
+                     attributes={"operation": operation,
+                                 "prompt": obs.prompt_attrs(prompt_ref)}) as lspan:
+            return self._chat(messages, prompt_ref=prompt_ref, operation=operation,
+                              tr=tr, lspan=lspan, kw=kw)
+
+    def _chat(self, messages, *, prompt_ref, operation: str, tr, lspan, kw) -> Completion:
         deadline = (time.monotonic() + self.total_budget_s
                     if self.total_budget_s else None)
         last_err: ProviderError | None = None
         attempts_total = 0
 
-        for provider in self.providers:                 # fallback chain
-            for attempt in range(1, self.max_attempts + 1):   # retries
+        for depth, provider in enumerate(self.providers):      # fallback chain
+            for attempt in range(1, self.max_attempts + 1):    # retries
                 attempts_total += 1
                 if deadline is not None and time.monotonic() >= deadline:
                     err = ProviderTimeout(
                         "gateway", f"total budget of {self.total_budget_s}s exceeded")
-                    self.ledger.record(provider=provider.name, model=provider.model,
-                                       ok=False, error=f"budget: {last_err or err}")
+                    self._record(tr, "", operation, attempts_total, prompt_ref,
+                                 provider=provider.name, model=provider.model,
+                                 ok=False, error=f"budget: {last_err or err}")
                     self.last_error = err
                     raise err
 
-                t0 = time.perf_counter()
-                try:
-                    completion = provider.chat(messages, **kw)
-                except ProviderError as e:
-                    last_err = e
-                    self.last_error = e
-                    latency_ms = (time.perf_counter() - t0) * 1000
-                    self.ledger.record(provider=provider.name,
-                                       model=getattr(provider, "model", ""),
-                                       latency_ms=latency_ms, ok=False, error=str(e))
-                    self._log_failure(provider, attempt, e, latency_ms)
-                    if not e.retryable or attempt == self.max_attempts:
+                completion, raw_err, span_id, latency_ms = self._attempt(
+                    tr, lspan, operation, provider,
+                    getattr(provider, "model", ""), attempt, depth, prompt_ref,
+                    lambda: provider.chat(messages, **kw),
+                    success_attrs=lambda c: {
+                        "actual_model": c.model, "finish_reason": c.finish_reason,
+                        "input_tokens": c.usage.input_tokens,
+                        "output_tokens": c.usage.output_tokens})
+                if raw_err is not None:
+                    perr = self._normalize(provider, raw_err)
+                    if perr is None:
+                        raise raw_err
+                    last_err = perr
+                    self.last_error = perr
+                    self._record(tr, span_id, operation, attempts_total, prompt_ref,
+                                 provider=provider.name,
+                                 model=getattr(provider, "model", ""),
+                                 latency_ms=latency_ms, ok=False, error=str(perr))
+                    self._log_failure(provider, attempt, perr, latency_ms)
+                    if not perr.retryable or attempt == self.max_attempts:
                         break                      # never retry semantic errors
-                    delay = _backoff(attempt, e, self.base_delay, self.max_delay)
+                    delay = _backoff(attempt, perr, self.base_delay, self.max_delay)
+                    self._retry_event(lspan, attempt, delay, perr)
                     log.info("%s attempt %d/%d -> %s; sleeping %.2fs",
                              provider.name, attempt, self.max_attempts,
-                             type(e).__name__, delay)
+                             type(perr).__name__, delay)
                     time.sleep(delay)
-                except urlerror.URLError as e:
-                    wrapped = ProviderError(provider.name, f"network error: {e.reason}",
-                                            retryable=True)
-                    last_err = wrapped
-                    self.last_error = wrapped
-                    latency_ms = (time.perf_counter() - t0) * 1000
-                    self.ledger.record(provider=provider.name,
-                                       model=getattr(provider, "model", ""),
-                                       latency_ms=latency_ms, ok=False, error=str(wrapped))
-                    if attempt == self.max_attempts:
-                        break
-                    delay = _backoff(attempt, wrapped, self.base_delay, self.max_delay)
-                    time.sleep(delay)
-                else:
-                    latency_ms = (time.perf_counter() - t0) * 1000
-                    self.ledger.record(
-                        provider=provider.name, model=completion.model,
-                        input_tokens=completion.usage.input_tokens,
-                        output_tokens=completion.usage.output_tokens,
-                        latency_ms=latency_ms, ok=True)
-                    self.last_result = completion
-                    self.last_provider = provider.name
-                    self.last_latency_ms = latency_ms
-                    self.last_attempts = attempts_total
-                    self.last_error = None
-                    log.info("%s chat ok model=%s attempts=%d latency=%.1fms",
-                             provider.name, completion.model, attempts_total, latency_ms)
-                    return completion
+                    continue
+                self._record(tr, span_id, operation, attempts_total, prompt_ref,
+                             provider=provider.name, model=completion.model,
+                             input_tokens=completion.usage.input_tokens,
+                             output_tokens=completion.usage.output_tokens,
+                             latency_ms=latency_ms, ok=True)
+                self.last_result = completion
+                self.last_provider = provider.name
+                self.last_latency_ms = latency_ms
+                self.last_attempts = attempts_total
+                self.last_error = None
+                log.info("%s chat ok model=%s attempts=%d latency=%.1fms",
+                         provider.name, completion.model, attempts_total, latency_ms)
+                return completion
             if deadline is not None and time.monotonic() >= deadline:
                 break
 
         raise last_err or ProviderError("gateway", "no providers configured")
 
+    @staticmethod
+    def _normalize(provider, exc) -> ProviderError | None:
+        """Fold a raw provider exception into the Day-4 taxonomy (or None when
+        it is not a provider failure and must propagate untouched)."""
+        if isinstance(exc, ProviderError):
+            return exc
+        if isinstance(exc, urlerror.URLError):
+            return ProviderError(provider.name, f"network error: {exc.reason}",
+                                 retryable=True)
+        return None
+
     # ---------------------------------------------------------------- stream
 
-    def chat_with_tools(self, messages, tools, **kw) -> Completion:
+    def chat_with_tools(self, messages, tools, *, prompt_ref=None,
+                        operation: str = "chat_with_tools", **kw) -> Completion:
         """Day 11 §4 — `chat()` with one extra argument passed straight through.
 
         That is the whole feature, and that is the point: a tool-turn chat call
@@ -152,89 +231,144 @@ class ModelGateway:
         it is written in, which is Day 4's bet paying out its first real
         dividend: tool calling arrives as a pass-through, not a subsystem.
         """
-        return self.chat(messages, tools=tools, **kw)
+        return self.chat(messages, tools=tools, prompt_ref=prompt_ref,
+                         operation=operation, **kw)
 
-    def stream(self, messages, **kw) -> Iterator[dict[str, Any]]:
+    def stream(self, messages, *, prompt_ref=None, operation: str = "stream",
+               **kw) -> Iterator[dict[str, Any]]:
+        tr = obs.current_trace()
+        if tr is None or not getattr(tr, "recording", False):
+            yield from self._stream(messages, prompt_ref=prompt_ref,
+                                    operation=operation, tr=None, lspan=None, kw=kw)
+            return
+        with tr.span(obs.KIND_MODEL, f"model.{operation}",
+                     attributes={"operation": operation,
+                                 "prompt": obs.prompt_attrs(prompt_ref)}) as lspan:
+            yield from self._stream(messages, prompt_ref=prompt_ref,
+                                    operation=operation, tr=tr, lspan=lspan, kw=kw)
+
+    def _stream(self, messages, *, prompt_ref, operation: str, tr, lspan, kw):
         deadline = (time.monotonic() + self.total_budget_s
                     if self.total_budget_s else None)
         last_err: ProviderError | None = None
 
-        for provider in self.providers:
+        for depth, provider in enumerate(self.providers):
             for attempt in range(1, self.max_attempts + 1):
                 if deadline is not None and time.monotonic() >= deadline:
                     err = ProviderTimeout(
                         "gateway", f"total budget of {self.total_budget_s}s exceeded")
-                    self.ledger.record(provider=provider.name, model=getattr(provider, "model", ""),
-                                       ok=False, error=f"budget: {last_err or err}")
+                    self._record(tr, "", operation, attempt, prompt_ref,
+                                 provider=provider.name,
+                                 model=getattr(provider, "model", ""),
+                                 ok=False, error=f"budget: {last_err or err}")
                     self.last_error = err
                     raise err
 
+                span = None
+                if tr is not None and lspan is not None:
+                    span = tr.start_span(
+                        obs.KIND_MODEL, f"model.{operation}.attempt", parent=lspan,
+                        attributes={"operation": operation, "provider": provider.name,
+                                    "model": getattr(provider, "model", ""),
+                                    "attempt": attempt, "fallback_depth": depth,
+                                    "prompt": obs.prompt_attrs(prompt_ref)})
                 t0 = time.perf_counter()
                 delivered = 0
+                ttft_ms: float | None = None
                 last_chunk: dict[str, Any] | None = None
                 try:
                     for chunk in provider.stream(messages, **kw):
+                        if delivered == 0:
+                            ttft_ms = (time.perf_counter() - t0) * 1000
+                            if span is not None:
+                                span.update(ttft_ms=round(ttft_ms, 3))
                         delivered += 1
                         last_chunk = chunk
                         yield chunk
+                except BaseException as exc:
+                    latency_ms = (time.perf_counter() - t0) * 1000
+                    if span is not None:
+                        span.update(delivered=delivered, latency_ms=round(latency_ms, 3),
+                                    error_kind=obs.error_kind_of(exc),
+                                    retryable=bool(getattr(exc, "retryable", False)))
+                        obs.end_span(span, status=obs.status_for_error(exc),
+                                     error=obs.error_fact(exc))
+                        tr.leave(span)
+                    perr = self._normalize(provider, exc)
+                    if perr is None:
+                        raise
+                    last_err = perr
+                    self.last_error = perr
+                    self._record(tr, span.span_id if span is not None else "",
+                                 operation, attempt, prompt_ref,
+                                 provider=provider.name,
+                                 model=getattr(provider, "model", ""),
+                                 latency_ms=latency_ms, ok=False, error=str(perr))
+                    self._log_failure(provider, attempt, perr, latency_ms)
+                    # Any chunks already handed to the caller are theirs; a
+                    # mid-stream cut can't be transparently retried.
+                    if delivered > 0 or not perr.retryable:
+                        raise perr
+                    if attempt == self.max_attempts:
+                        break            # exhausted this provider -> fallback
+                    delay = _backoff(attempt, perr, self.base_delay, self.max_delay)
+                    self._retry_event(lspan, attempt, delay, perr)
+                    time.sleep(delay)
+                else:
                     # clean SSE termination ([DONE] / message_stop) reached
                     latency_ms = (time.perf_counter() - t0) * 1000
                     last_usage = (last_chunk or {}).get("usage") or {}
-                    self.ledger.record(
-                        provider=provider.name,
-                        model=(last_chunk or {}).get("model", getattr(provider, "model", "")),
-                        input_tokens=last_usage.get("input_tokens", 0),
-                        output_tokens=last_usage.get("output_tokens", 0),
-                        latency_ms=latency_ms, ok=True)
+                    model = (last_chunk or {}).get("model", getattr(provider, "model", ""))
+                    if span is not None:
+                        span.update(delivered=delivered, latency_ms=round(latency_ms, 3),
+                                    actual_model=model,
+                                    input_tokens=last_usage.get("input_tokens", 0),
+                                    output_tokens=last_usage.get("output_tokens", 0))
+                        obs.end_span(span, status=obs.STATUS_OK)
+                        tr.leave(span)
+                    self._record(tr, span.span_id if span is not None else "",
+                                 operation, attempt, prompt_ref,
+                                 provider=provider.name, model=model,
+                                 input_tokens=last_usage.get("input_tokens", 0),
+                                 output_tokens=last_usage.get("output_tokens", 0),
+                                 latency_ms=latency_ms, ok=True)
                     self.last_provider = provider.name
                     self.last_latency_ms = latency_ms
                     return
-                except ProviderError as e:
-                    last_err = e
-                    self.last_error = e
-                    latency_ms = (time.perf_counter() - t0) * 1000
-                    self.ledger.record(provider=provider.name,
-                                       model=getattr(provider, "model", ""),
-                                       latency_ms=latency_ms, ok=False, error=str(e))
-                    self._log_failure(provider, attempt, e, latency_ms)
-                    # Any chunks already handed to the caller are theirs; a
-                    # mid-stream cut can't be transparently retried.
-                    if delivered > 0 or not e.retryable:
-                        raise e
-                    if attempt == self.max_attempts:
-                        break            # exhausted this provider -> fallback
-                    delay = _backoff(attempt, e, self.base_delay, self.max_delay)
-                    time.sleep(delay)
-                except urlerror.URLError as e:
-                    wrapped = ProviderError(provider.name, f"network error: {e.reason}",
-                                            retryable=True)
-                    last_err = wrapped
-                    self.last_error = wrapped
-                    self._log_failure(provider, attempt, wrapped,
-                                      (time.perf_counter() - t0) * 1000)
-                    if attempt == self.max_attempts:
-                        break            # exhausted this provider -> fallback
-                    delay = _backoff(attempt, wrapped, self.base_delay, self.max_delay)
-                    time.sleep(delay)
 
         raise last_err or ProviderError("gateway", "no providers configured")
 
     # ---------------------------------------------------------------- embed
 
-    def embed(self, inputs: list[str]) -> list[Embedding]:
+    def embed(self, inputs: list[str], *, prompt_ref=None,
+              operation: str = "embed") -> list[Embedding]:
         """Day 5 §3 — `Provider.embed()` through the full Day 4 machinery.
 
         Identical policy to `chat()`: retry transient errors, never retry 401,
         exponential backoff honoring `Retry-After`, ordered fallback to the
         next provider, one `CallRecord` per attempt (success *and* failure).
         Providers without an `embed` capability are skipped in the chain.
+
+        Day 23 wraps each attempt in a `model.embed.attempt` span under the
+        request's retrieval/generation parent; the policy is unchanged (O9).
         """
+        tr = obs.current_trace()
+        if tr is None or not getattr(tr, "recording", False):
+            return self._embed(inputs, prompt_ref=prompt_ref,
+                               operation=operation, tr=None, lspan=None)
+        with tr.span(obs.KIND_MODEL, f"model.{operation}",
+                     attributes={"operation": operation,
+                                 "prompt": obs.prompt_attrs(prompt_ref)}) as lspan:
+            return self._embed(inputs, prompt_ref=prompt_ref,
+                               operation=operation, tr=tr, lspan=lspan)
+
+    def _embed(self, inputs, *, prompt_ref, operation, tr, lspan) -> list[Embedding]:
         deadline = (time.monotonic() + self.total_budget_s
                     if self.total_budget_s else None)
         last_err: ProviderError | None = None
         attempts_total = 0
 
-        for provider in self.providers:
+        for depth, provider in enumerate(self.providers):
             embed_call = getattr(provider, "embed", None)
             if embed_call is None:
                 continue                     # chat-only provider (e.g. Anthropic)
@@ -243,59 +377,54 @@ class ModelGateway:
                 if deadline is not None and time.monotonic() >= deadline:
                     err = ProviderTimeout(
                         "gateway", f"total budget of {self.total_budget_s}s exceeded")
-                    self.ledger.record(provider=provider.name,
-                                       model=getattr(provider, "embedding_model", ""),
-                                       ok=False, error=f"budget: {last_err or err}")
+                    self._record(tr, "", operation, attempts_total, prompt_ref,
+                                 provider=provider.name,
+                                 model=getattr(provider, "embedding_model", ""),
+                                 ok=False, error=f"budget: {last_err or err}")
                     self.last_error = err
                     raise err
 
-                t0 = time.perf_counter()
-                try:
-                    embeddings = embed_call(inputs)
-                except ProviderError as e:
-                    last_err = e
-                    self.last_error = e
-                    latency_ms = (time.perf_counter() - t0) * 1000
-                    self.ledger.record(provider=provider.name,
-                                       model=getattr(provider, "embedding_model", ""),
-                                       latency_ms=latency_ms, ok=False, error=str(e))
-                    self._log_failure(provider, attempt, e, latency_ms)
-                    if not e.retryable or attempt == self.max_attempts:
+                embeddings, raw_err, span_id, latency_ms = self._attempt(
+                    tr, lspan, operation, provider,
+                    getattr(provider, "embedding_model", ""), attempt, depth,
+                    prompt_ref, lambda: embed_call(inputs),
+                    success_attrs=lambda embs: {
+                        "actual_model": embs[0].model if embs else "",
+                        "inputs": len(inputs),
+                        "input_tokens": embs[0].usage.input_tokens if embs else 0})
+                if raw_err is not None:
+                    perr = self._normalize(provider, raw_err)
+                    if perr is None:
+                        raise raw_err
+                    last_err = perr
+                    self.last_error = perr
+                    self._record(tr, span_id, operation, attempts_total, prompt_ref,
+                                 provider=provider.name,
+                                 model=getattr(provider, "embedding_model", ""),
+                                 latency_ms=latency_ms, ok=False, error=str(perr))
+                    self._log_failure(provider, attempt, perr, latency_ms)
+                    if not perr.retryable or attempt == self.max_attempts:
                         break                  # 401/400 never retried
-                    delay = _backoff(attempt, e, self.base_delay, self.max_delay)
+                    delay = _backoff(attempt, perr, self.base_delay, self.max_delay)
+                    self._retry_event(lspan, attempt, delay, perr)
                     log.info("%s embed attempt %d/%d -> %s; sleeping %.2fs",
                              provider.name, attempt, self.max_attempts,
-                             type(e).__name__, delay)
+                             type(perr).__name__, delay)
                     time.sleep(delay)
-                except urlerror.URLError as e:
-                    wrapped = ProviderError(provider.name, f"network error: {e.reason}",
-                                            retryable=True)
-                    last_err = wrapped
-                    self.last_error = wrapped
-                    latency_ms = (time.perf_counter() - t0) * 1000
-                    self.ledger.record(provider=provider.name,
-                                       model=getattr(provider, "embedding_model", ""),
-                                       latency_ms=latency_ms, ok=False, error=str(wrapped))
-                    if attempt == self.max_attempts:
-                        break
-                    delay = _backoff(attempt, wrapped, self.base_delay, self.max_delay)
-                    time.sleep(delay)
-                else:
-                    latency_ms = (time.perf_counter() - t0) * 1000
-                    usage = embeddings[0].usage if embeddings else None
-                    self.ledger.record(
-                        provider=provider.name, model=embeddings[0].model,
-                        input_tokens=usage.input_tokens if usage else 0,
-                        output_tokens=0,
-                        latency_ms=latency_ms, ok=True)
-                    self.last_embeddings = embeddings
-                    self.last_embed_provider = provider.name
-                    self.last_embed_latency_ms = latency_ms
-                    self.last_error = None
-                    log.info("%s embed ok model=%s attempts=%d latency=%.1fms inputs=%d",
-                             provider.name, embeddings[0].model, attempts_total,
-                             latency_ms, len(inputs))
-                    return embeddings
+                    continue
+                usage = embeddings[0].usage if embeddings else None
+                self._record(tr, span_id, operation, attempts_total, prompt_ref,
+                             provider=provider.name, model=embeddings[0].model,
+                             input_tokens=usage.input_tokens if usage else 0,
+                             output_tokens=0, latency_ms=latency_ms, ok=True)
+                self.last_embeddings = embeddings
+                self.last_embed_provider = provider.name
+                self.last_embed_latency_ms = latency_ms
+                self.last_error = None
+                log.info("%s embed ok model=%s attempts=%d latency=%.1fms inputs=%d",
+                         provider.name, embeddings[0].model, attempts_total,
+                         latency_ms, len(inputs))
+                return embeddings
             if deadline is not None and time.monotonic() >= deadline:
                 break
 
