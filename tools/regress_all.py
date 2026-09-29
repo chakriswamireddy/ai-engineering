@@ -27,9 +27,10 @@ Three layers, all `MECH` (0 chats, 0 embeds — the stub stores are embedded off
    and `tools/{tool,agent,failure,data,sql_attack,plan,state,memory,architecture}_smoke.py`
    (T1–T7 · A1–A8 · F1–F9 · Q1–Q8 · X1–X11 · P1–P9 · S1–S9 · M1–M9 · G1–G9) plus
    `tools/bench_rag.py --fixtures` (Day 21's R1–R9: the properties of measurement
-   itself) and `tools/bench_agent.py --fixtures` (Day 22's AB1–AB9: the properties
-   of measuring *behaviour*), each required to exit 0, its failing rows echoed when
-   it does not.
+   itself), `tools/bench_agent.py --fixtures` (Day 22's AB1–AB9: the properties
+   of measuring *behaviour*), and `tools/trace_smoke.py` (Day 23's O1–O9: one
+   request's causal tree plus the O9 "observation changes nothing" control), each
+   required to exit 0, its failing rows echoed when it does not.
 3. **The golden rows** — `tools/eval_harness.py --stub` (the doc nine + code six +
    the judge-hunting F/G/H), required to come back 18/18.
 
@@ -71,6 +72,7 @@ SUITES: list[tuple[str, str, list[str]]] = [
     ("G1–G9 architecture", "tools/architecture_smoke.py", []),
     ("R1–R9 RAG bench", "tools/bench_rag.py", ["--fixtures"]),
     ("AB1–AB9 agent bench", "tools/bench_agent.py", ["--fixtures"]),
+    ("O1–O9 trace fixtures", "tools/trace_smoke.py", []),
 ]
 
 # The family replay (Day 8/9 retriever over the fixtures.py question sets) and
