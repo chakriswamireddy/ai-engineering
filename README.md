@@ -1,4 +1,4 @@
-# ai-layer — Days 4–17: Gateway → Search → RAG → Code RAG → Tools → Loop → Data → Safe SQL → Planning → State
+# ai-layer — Days 4–18: Gateway → Search → RAG → Code RAG → Tools → Loop → Data → Safe SQL → Planning → State → Memory
 
 A reusable AI layer built in layers:
 
@@ -70,6 +70,21 @@ A reusable AI layer built in layers:
     headline is **`recalled ⊆ authored`** — the fourth translation of `cited ⊆
     retrieved` — and the control is **S9**: with state off, the system is Days 12–16
     byte-for-byte.
+13. **Day 18 — Persistent Memory**: Day 17's store gets a **purpose**. A
+    **relevance-scored episodic recall** turns the series' retrieval engine on the
+    agent's *own* past — the *matching* investigation served above the most recent,
+    cited **as an episode**, never absorbed as a lesson — and a **distiller** (one
+    guarded chat) turns N agreeing episodes into one `kind=semantic` concept, minted
+    only under the mint-time gates **sample-size ≥ 2 · `authored ⊆ grounded` · no
+    source contradiction · no principal names**. Expiration becomes
+    **relevance-governed** (a concept below its strength τ acts absent *before* its
+    TTL; the clock is the backstop) with a **re-prompt loop** (re-distill · decay ·
+    retire), **`forget` re-grounds** every concept that cites a deleted episode, and
+    *user preferences* are honestly a **data table, not a memory**. The headline is
+    **`authored ⊆ grounded`** — recalling Day 17's `recalled ⊆ authored` — and the
+    control is **M8**: memory off ≡ Days 12–17, and memory on over an empty store too.
+    The recall path stays free (**0 chats, 0 embeds**); the distiller is the series'
+    first billable shelf (**1 chat per batch**), metered, not assumed.
 
 ```
 Application
@@ -110,14 +125,17 @@ raw HTTP via `urllib`.
 | `ai_os/sql_safety.py` | day 15: the safe SQL choke point — `normalize`, the allow-list `parse_readonly` grammar, `Policy` (from `policy.yaml`), the cost pre-check, the shape-aware `rewrite_limit`, and `classify()` (repairable vs policy) |
 | `ai_os/planner.py` | day 16: `Step`/`Plan`, `parse_plan` + fail-closed `validate_plan` (registered tools · schema args · acyclic · known deps), `topological_order`, `estimate_cost`, the `needs_plan` entry rule, and the model calls `plan`/`replan`/`repair_args` |
 | `ai_os/executor.py` | day 16: `run_plan` — the state machine that walks a plan through Day 12's atoms, tracking execution state + **checkpoints** (resume at *k+1*), the re-plan gate, the bounded ladder (repair · retry · fallback · replan), the **policy wall**, and `conclusion ⊆ evidence`; day 17: an optional `state_store` flushes **task state** to a shelf (`put("/task/{id}", …)`) and `resume_from_store` continues a run in a **new process** |
-| `ai_os/state.py` | day 16: `StepRecord`/`Checkpoint`/`ExecutionState` — the **ephemeral** execution state and the checkpoint format that round-trips; **day 17**: the persistent **store** — `StateRecord` + `StateStore` (`put`/`get`/`list_for`/`recall`/`delete`/`forget`/`expire`/`compact`/`round_trip`), the closed, provenance-enforced write path, TTL/expiry, and the key/wired helpers for working/conversation/task state |
+| `ai_os/state.py` | day 16: `StepRecord`/`Checkpoint`/`ExecutionState` — the **ephemeral** execution state and the checkpoint format that round-trips; **day 17**: the persistent **store** — `StateRecord` + `StateStore` (`put`/`get`/`list_for`/`recall`/`delete`/`forget`/`expire`/`compact`/`round_trip`), the closed, provenance-enforced write path, TTL/expiry, and the key/wired helpers for working/conversation/task state; **day 18**: the memory shelves (`episodic`/`semantic`/`preference`) + their keys, the `strength`/`recall_threshold` meter (`is_decayed`/`is_served`) and `touch`, `forget`'s **re-grounding** of every concept citing a deleted episode, and the `distiller` as an authorized author |
+| `ai_os/memory.py` | day 18: episodic memory — `episodicize` (the compact signature), `recall` (Day 8/9's scorer over the principal's episodes: lexicon + fusion + MMR/dedup + Day 7's τ + Day 6's top-k, **0 chats / 0 embeds**), `recall_block` (episodes **as** episodes — cite, never absorb), and the principal-keyed **preference data table** (`set_preference`/`read_preferences`) |
+| `ai_os/distill.py` | day 18: the distiller — one guarded chat over N episodes, the **mint-time gate** (`validate_concept`: sample size ≥ `MEMORY_MIN_SOURCES` · `authored ⊆ grounded` over the union of source evidence · no source contradiction · no principal names), `mint` (writes `kind=semantic` with provenance through the closed path), and the re-prompt verbs (`decay_concept` / `retire_concept` / `reprompt_action`) |
 | `policy.yaml` | day 15: the reviewable allow/deny document — statement heads, `tables_allow`, PII `columns_deny`, the enforced `definitions`, and the resource caps (all config, not code) |
-| `ai_os/agent.py` | day 11/12: `run_tool_answer` (one tool turn → grounded answer) + `run_agent` — the loop: transcript-as-state, three exits + `gave_up`, per-step observations; `cited ⊆ retrieved` over the accumulated transcript; `REASONING_PROMPT` is the reasoning-turn system prompt; day 16: an optional `plan` delegates to `executor.run_plan` (a one-step plan *is* the loop); day 17: an optional `state` (+ `session_id`) persists **conversation state** per session/principal — prior turns load as headers, never a hidden variable |
-| `tools/mock_gateway.py` | scripted dual-provider stub `:8700`/`:8701` (chat, embeddings, **tool_calls** scenarios: `tc_d12_*`/`tc_d13_*`/`tc_d14_*`/`tc_d15_*`; day 16's `D16_PLAN_*` stored plans + `answer_d16_*`) |
+| `ai_os/agent.py` | day 11/12: `run_tool_answer` (one tool turn → grounded answer) + `run_agent` — the loop: transcript-as-state, three exits + `gave_up`, per-step observations; `cited ⊆ retrieved` over the accumulated transcript; `REASONING_PROMPT` is the reasoning-turn system prompt; day 16: an optional `plan` delegates to `executor.run_plan` (a one-step plan *is* the loop); day 17: an optional `state` (+ `session_id`) persists **conversation state** per session/principal — prior turns load as headers, never a hidden variable; day 18: an optional `memory_store` runs the **recall pre-step** (scored episodic recall, cited as episodes), loads the **preference data table** as cited data, and at **run-end** indexes the finished run as an authored `kind=episodic` record (the deliverable's "finished run → episodic record" arrow) — with no store, or an empty shelf, the transcript is unchanged (M8), and `MEMORY_ENABLED=0` forces the subsystem off |
+| `tools/mock_gateway.py` | scripted dual-provider stub `:8700`/`:8701` (chat, embeddings, **tool_calls** scenarios: `tc_d12_*`/`tc_d13_*`/`tc_d14_*`/`tc_d15_*`; day 16's `D16_PLAN_*` stored plans + `answer_d16_*`; day 18's distiller JSON — `D18_CONCEPT*` + `answer_d18_*`) |
 | `tools/tool_smoke.py` | day 11: T1–T7 offline suite (selection, validation matrix, refusal, cap, dialect parity, no-regression) |
 | `tools/sql_attack_smoke.py` | day 15: X1–X11 offline attack set (parser, policy, PII, cost, LIMIT, the two rejection classes) + the `Wrote? = no` invariant + the Days 11–14 no-regression re-run |
 | `tools/plan_smoke.py` | day 16: P1–P9 offline suite (plan validation, execution state, checkpoints/resume, the re-plan gate, the ladder + policy wall, `conclusion ⊆ evidence` both ways, the P9 control) + the Days 11–15 no-regression re-run |
 | `tools/state_smoke.py` | day 17: S1–S9 offline suite (working/conversation/task state, cross-process resume, serialize/replay, TTL/expiry/compaction, first-class deletion, the closed write path, the boundary, the S9 off-switch) + **`recalled ⊆ authored`** + the Days 7–16 no-regression re-run |
+| `tools/memory_smoke.py` | day 18: M1–M9 offline suite (scored episodic recall vs recency, the distiller's mint gates, semantic expiry before the clock, `forget` re-grounding, privacy/preferences-as-data, the run-end episodic index, the M8 off/empty-store control) + **`recalled ⊆ authored`** and **`authored ⊆ grounded`** + the Days 7–17 no-regression re-run |
 | `tools/agent_smoke.py` | day 12: A1–A8 offline suite (loop, three exits + `gave_up`, depth-1 = Day 11, parallel observations, grounding over the transcript, cost shape, T1–T7 re-run); `--live` measures real-model composition against the real gateway |
 | `tools/gateway_smoke.py` | day 4 deliberate-failure suite + token economics |
 | `tools/build_rag_store.py` | embed a `corpus/` of markdown → `data/store.json` |
@@ -193,6 +211,8 @@ python tools/failure_smoke.py           # day 13 F1–F9 (guards, the failure ta
 python tools/data_smoke.py              # day 14 Q1–Q8 (read-only guards + asserted ⊆ returned)
 python tools/sql_attack_smoke.py        # day 15 X1–X11 (attack set + control; Wrote? = no) + the Days 11–14 re-run
 python tools/plan_smoke.py              # day 16 P1–P9 (plan validation · state · checkpoints · ladder · policy wall; conclusion ⊆ evidence) + the Days 11–15 re-run
+python tools/state_smoke.py             # day 17 S1–S9 (the store · provenance · expiry/deletion · cross-process resume · the S9 control) + the Days 7–16 re-run
+python tools/memory_smoke.py            # day 18 M1–M9 (scored episodic recall · the distiller's mint gates · semantic expiry · the M8 off/empty-store control) + the Days 7–17 re-run
 ```
 
 The stub serves both providers on `:8700` (OpenAI) and `:8701` (Anthropic)
@@ -297,6 +317,12 @@ and exits 2 rather than a false FAIL.
 | `STATE_DEFAULT_TTL` | `86400` | day 17: TTL a `ttl="inherit"` write receives (24h) |
 | `STATE_MAX_RECORDS` | `1000` | day 17: the size cap (oldest-first eviction) |
 | `STATE_PRINCIPAL` | `default` | day 17: the owner used when a run names none |
+| `MEMORY_ENABLED` | `1` | day 18: the memory switch; `0`/`off` → recall serves nothing (M8) |
+| `MEMORY_RECALL_TOP_K` | `5` | day 18: the served recall set's size (Day 6's budget floor) |
+| `MEMORY_RECALL_TAU` | `0.05` | day 18: Day 7's gate, on the memory shelf — below it, absent |
+| `MEMORY_MIN_SOURCES` | `2` | day 18: the distiller's sample-size rule (a receipt is not a lesson) |
+| `MEMORY_DISTILL_TTL` | `604800` | day 18: a concept's clock backstop (7d; relevance is the policy) |
+| `MEMORY_STRENGTH_DECAY` | `0.5` | day 18: the re-prompt loop's decay step (`strength × (1 − rate)`) |
 
 Omitted keys are a startup error in `build_gateway_from_env` (fail fast, not a
 runtime 401 surprise). Embedding model is passed per-provider, so the key lives
@@ -390,3 +416,18 @@ with the provider config it belongs to.
   `docs/concepts/state-memory.md`, `docs/evaluations/state-day17.md`, and
   `python tools/state_smoke.py` (S1–S9). State costs **0 chats, 0 embeds** on the
   answer path; episodic recall and semantic distillation are **Day 18's**.
+- Day 18 gives the store a **purpose**: `ai_os/memory.py` (**relevance-scored
+  episodic recall** — Day 8/9's scorer over the agent's own past, the *matching*
+  investigation served above the newest, cited **as an episode**; plus the
+  principal-keyed **preference data table**), `ai_os/distill.py` (**the distiller** —
+  one guarded chat, the mint-time gate **sample-size ≥ 2 · `authored ⊆ grounded` · no
+  source contradiction · no principal names**, and the re-prompt verbs
+  re-distill/decay/retire), the semantic `strength` meter + `forget`'s re-grounding in
+  `ai_os/state.py`, and the recall pre-step in `ai_os/agent.py`. The headline is
+  **`authored ⊆ grounded`** — recalling Day 17's **`recalled ⊆ authored`** — and the
+  control is **M8**: memory off ≡ Days 12–17, and memory on over an empty store too.
+  The recall path is **0 chats / 0 embeds**; the distiller is the series' first
+  billable shelf (**1 chat per batch**). See `docs/concepts/memory.md`,
+  `docs/evaluations/memory-day18.md`, and `python tools/memory_smoke.py` (M1–M9). One
+  honest limit, named not hidden: **"you cannot un-distill"** — deletion ends *future*
+  recall, not the past answers a concept was absorbed into.
