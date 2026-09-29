@@ -1,4 +1,4 @@
-# ai-layer — Days 4–21: Gateway → Search → RAG → Code RAG → Tools → Loop → Data → Safe SQL → Planning → State → Memory → Multi-Agent → Evaluation → RAG Benchmark
+# ai-layer — Days 4–22: Gateway → Search → RAG → Code RAG → Tools → Loop → Data → Safe SQL → Planning → State → Memory → Multi-Agent → Evaluation → RAG Benchmark → Agent Benchmark
 
 A reusable AI layer built in layers:
 
@@ -113,6 +113,17 @@ A reusable AI layer built in layers:
     doc store / code store, calibrates **τ** on real scores (R8), and hosts the
     **R1–R9** fixture set with the **R9 control** (the bench is not a fixer). All
     `MECH`, **0 chats**.
+17. **Day 22 — Agent Benchmark**: *measure agent behaviour*, don't watch it. Six
+    of the eight curriculum columns already lived in `run_agent`'s dict (task
+    success · tool selection · argument correctness · steps · cost · latency); the
+    metric core `ai_os/agent_bench.py` prints them and defines the two that never
+    had arithmetic — **unnecessary calls** (the pre-registered `necessary_calls`
+    envelope · the U1/U2/U3 rules · the owned `undecided` bucket) and **failure
+    recovery** (progress-after-failure · `fabricated = false` the gate ·
+    `gave_up` the honest zero). `tools/bench_agent.py` runs the **A-report** in two
+    labelled worlds (stub / real), pins `data/agent-baseline.json`, and hosts the
+    **AB1–AB9** fixture set with the **AB9 control**. All `MECH`, **0 chats** — the
+    judge reads one run dict and never re-executes the run.
 
 ```
 Application
@@ -166,6 +177,8 @@ raw HTTP via `urllib`.
 | `ai_os/semantic_judge.py` | day 21: layer 2 of `judge.py` — citation support · groundedness · answer relevance as **claim-coverage over the run's own evidence**; the deterministic subnet + the flagged per-claim lane (`EVAL_JUDGE=model`, off) |
 | `tools/eval_harness.py` | day 20: the evaluation harness (a **router, not a grader**) + the **V1–V9** evaluation set |
 | `tools/bench_rag.py` | day 21: the RAG benchmark runner — the R-report, `--stub`/`--real [--source doc\|code]`, `--k`, `--tau-sweep`, `--baseline`, and the **R1–R9** fixtures |
+| `ai_os/agent_bench.py` | day 22: the agent bench metric core — every column a pure function of one `run_agent` dict (the judge never re-executes): `task_success` · `tool_selection` (TSR@1/coverage/misses) · `argument_correctness` (+`arg_deviation`s) · `step_count` (the envelope) · `unnecessary_calls` (U1/U2/U3 + the owned `undecided`) · `necessary_call_coverage` (`necessary ⊆ made`) · `failure_recovery` (progress-after-failure, the `fabricated` gate) · `cost_row` · `latency_row` (per-step/tool attribution) · `attribute_failure` (retrieval vs agent debit) · `control_agrees` (AB9) |
+| `tools/bench_agent.py` | day 22: the agent benchmark runner — the **A-report** (`--stub` / `--real`), `--baseline`, and the **AB1–AB9** fixtures; the scripted `BenchGateway` (the hostile rows: injected wrong-tool / bad-args / no-progress / refusal→pivot / hang) |
 | `tools/regress_all.py` | day 20/21: Rule-2's regression gate — the retrieval families + every day suite (incl. the bench) + the golden rows, exactly as green |
 | `ai_os/agent.py` | day 11/12: `run_tool_answer` (one tool turn → grounded answer) + `run_agent` — the loop: transcript-as-state, three exits + `gave_up`, per-step observations; `cited ⊆ retrieved` over the accumulated transcript; `REASONING_PROMPT` is the reasoning-turn system prompt; day 16: an optional `plan` delegates to `executor.run_plan` (a one-step plan *is* the loop); day 17: an optional `state` (+ `session_id`) persists **conversation state** per session/principal — prior turns load as headers, never a hidden variable; day 18: an optional `memory_store` runs the **recall pre-step** (scored episodic recall, cited as episodes), loads the **preference data table** as cited data, and at **run-end** indexes the finished run as an authored `kind=episodic` record (the deliverable's "finished run → episodic record" arrow) — with no store, or an empty shelf, the transcript is unchanged (M8), and `MEMORY_ENABLED=0` forces the subsystem off |
 | `tools/mock_gateway.py` | scripted dual-provider stub `:8700`/`:8701` (chat, embeddings, **tool_calls** scenarios: `tc_d12_*`/`tc_d13_*`/`tc_d14_*`/`tc_d15_*`; day 16's `D16_PLAN_*` stored plans + `answer_d16_*`; day 18's distiller JSON — `D18_CONCEPT*` + `answer_d18_*`) |
@@ -255,6 +268,8 @@ python tools/architecture_smoke.py      # day 19 G1–G9 (the two topologies · 
 python tools/eval_harness.py --fixtures # day 20 V1–V9 (integrity · reproducibility · drift · the gate · the V9 control)
 python tools/bench_rag.py --fixtures    # day 21 R1–R9 (recall@K · precision@K · MRR · relevance · the semantic subnet · τ · the R9 control), 0 chats
 python tools/bench_rag.py --stub        # day 21 §9 R-report (stub: D1 precision 0.444; K1 fails support; I1 pending-human)
+python tools/bench_agent.py --fixtures  # day 22 AB1–AB9 (task success · TSR@1 · args · steps · unnecessary · recovery · cost · latency · the AB9 control), 0 new chats
+python tools/bench_agent.py --stub      # day 22 §9 A-report (the stub world; 21 rows, 21 verdicts)
 python tools/regress_all.py             # day 20/21 Rule-2 gate: doc nine + code six + every day suite (7–21) + the golden rows, exactly as green
 ```
 

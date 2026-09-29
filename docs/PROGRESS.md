@@ -1,4 +1,4 @@
-# Progress — ai-layer (Days 2–21)
+# Progress — ai-layer (Days 2–22)
 
 > Live status of what is implemented, verified, and still open in this repo.
 > Kept up to date as days are worked; the canonical per-day detail lives in
@@ -39,6 +39,7 @@ Updated: 2026-09-29
 | 19 | Multi-Agent Architecture | PARTIAL (all MECH green offline; G1–G9 with **`delegated ⊆ returned = ok` on every B row**, **per-hop leaks == 0**, and the **G9 control** (machinery off ≡ Days 12–18); **Topology A** = Days 12–18 + the **role-context router** (a rule table, 0 chats, overridable, neutral under `ROLE_CONTEXT_ROUTING=0`); **Topology B** = a **delegation loop** whose tools are `make_agent(role)` specialists (the existing loop with a **tool-list slice**; out-of-role = a `role_violation` **policy** stop) sharing **Day 18's store**; the **receipt contract** (only a `{task_id, evidence, conclusion, provenance}` record crosses the seam; a paraphrase/ghost delegation is **rejected by code** — the Chinese-whispers injection caught), **bounded delegation** (`MAX_DELEGATIONS` · `HANDOFF_TIMEOUT` · `DELEGATION_RETRY=1`, a *refused* hop never retried), **failure as a return value** (`failed(error:…)`/`failed(timeout)` receipts; other delegations survive; never fabricated), the **union-context cost ledger** (`specialist + orchestrator tokens`), and the **shared-store write policy** (specialists write episodes under their own principal+role; the orchestrator writes **only** `kind=orchestration`); under the stub the two-surface split **ties A on coverage and costs more**, so the table forces **`justified architecture = SINGLE`**; real-model delegation quality + context-isolation price `PENDING` Day 21/22) | `ai_os/receipt.py` (new), `ai_os/orchestrator.py` (new), `ai_os/agent.py` (`make_agent`/`RoleAgent`/`route_question`/`detect_surfaces` + `routed_to`/`role` + the validation-seam policy stop), `ai_os/tools.py` (`ToolRegistry.scope`/`denied` + `ERROR_ROLE`), `ai_os/memory.py` (`remember_episode(role=…)` + `write_orchestration`), `ai_os/state.py` (`ORCHESTRATION_KIND` + the `orchestrator` author), `ai_os/trace.py` (topology columns), `tools/mock_gateway.py` (`tc_d19_*`/`answer_d19_*`), `tools/architecture_smoke.py` (new), `docs/concepts/multi-agent.md`, `docs/evaluations/architecture-day19.md` |
 | 20 | Evaluation Fundamentals | PARTIAL (all MECH green offline; **V1–V9** with the golden-set validator + oracle-derivability (**a patched row refused by the hash before grading** — pre-registration in code), **byte-identical verdict rows** (the judge has no hidden sampling), the **judge-hunting rows F/G/H each failing their deterministic check** (fluency buys no pass), **model-lane drift recorded** with `deterministic_verdict` never flippable, the **regression gate** (`regress_all.py` — doc nine 9/9 + code six 6/6 + every day suite Days 7–19 + the golden rows, exactly as green), the **coverage rule** (doc nine + code six + F/G/H + E-family refusals, all five fields), the **zero-screentime report**, the **pre-registration flag** (a run before its row's registration), and the **V9 control** (harness off ≡ production, byte-for-byte); the judge is layered — layer 1 deterministic (0 chats), layer 2 semantic `PENDING` (Day 21 RAG / Day 22 agent), layer 3 LLM-as-judge **off by default** (explains, never decides); **`judged ⊆ pre-registered`** by construction; semantic verdicts `PENDING` a real run) | `ai_os/eval_dataset.py` (new), `ai_os/golden.yaml` (new), `tools/eval_harness.py` (new; the router + V1–V9), `ai_os/judge.py` (new), `tools/regress_all.py` (new), `docs/concepts/evaluation.md`, `docs/evaluations/eval-day20.md` |
 | 21 | RAG Evaluation | PARTIAL (all MECH green offline; **R1–R9** with the recall@K/MRR passthrough + the new **precision@K** over a pre-registered `relevant_also` (the honest `n/a` where relevance is undefined) + the free `rel()` relevance column + the semantic subnet (**citation support · groundedness · claim-coverage**, a `must_not` hit always a fail) + the τ calibration on the **real store** (answerable 0.794–0.853 vs E 0.775/0.783 → **+0.011, τ=0.794, 0 leaks**) + the **I1 `pending-human`** boundary + the **R9 control** (bench off ≡ production); the real doc-store R-report **reproduces Day 9's leak** — 4 of 7 answerable rows surface none — and the code corpus's real calibration is `PENDING` Day 10's store) | `ai_os/rag_bench.py` (new), `ai_os/semantic_judge.py` (new), `ai_os/golden.yaml` (`relevant_also`/`human_review`/`semantic_fail`), `tools/bench_rag.py` (new; the router + R1–R9), `ai_os/eval_dataset.py` (the length-guarded stem matcher), `tools/regress_all.py` (the R1–R9 row), `ai_os/questions.yaml`/`code_questions.yaml` (τ recorded), `docs/concepts/rag-benchmark.md`, `docs/evaluations/bench-day21.md` |
+| 22 | Agent Evaluation | PARTIAL (all MECH green offline; **AB1–AB9** with the six trace columns printed (task success · TSR@1 · args · steps · cost · latency) + the two newly defined (unnecessary calls via the pre-registered `necessary_calls` envelope, U1/U2/U3 + the owned `undecided`; failure recovery = progress-after-failure with the `fabricated` gate + `gave_up` the honest zero), the **AB9 control** (bench off ≡ production), the `--baseline` pin, and Days 7–21 re-run unchanged — the gate is now 18 rows; the real-model column is the day's real-key handoff) | `ai_os/agent_bench.py` (new), `tools/bench_agent.py` (new), `ai_os/golden.yaml` (`necessary_calls`/`expected_steps`/`expected_termination`), `ai_os/eval_dataset.py` (the envelope's parse/validate/hash), `data/agent-baseline.json` (new), `tools/regress_all.py` (the AB1–AB9 row), `docs/concepts/agent-benchmark.md`, `docs/evaluations/bench-day22.md` |
 
 ---
 
@@ -1391,6 +1392,59 @@ metric that needed the golden set to exist first. Concept + evaluation:
     Day 22's benchmark on the same golden set. Re-verify with
     `python tools/bench_rag.py --fixtures`.
 
+18. **Day 22 semantics** — the MECH half is green (`tools/bench_agent.py
+    --fixtures`; AB1–AB9 with the six inherited columns printed and the two new
+    ones defined — unnecessary calls via the pre-registered `necessary_calls`
+    envelope with U1/U2/U3 and the owned `undecided` bucket, failure recovery as
+    progress-after-failure with `fabricated = false` the gate and `gave_up` the
+    honest zero), the **AB9 control** (bench off ≡ production), the pinned
+    `data/agent-baseline.json`, and Days 7–21 re-run unchanged (the gate is 18
+    rows, 0 moved). Still `PENDING`: (a) **real-model behaviour** — will a real
+    model pick the expected tool per step, correct its arguments, stay inside the
+    step envelope, avoid unnecessary calls, and recover? — the Day-22 real-key
+    handoff (`python tools/bench_agent.py --real`); it closes Day 11's oldest
+    `PENDING` (tool choice) and Day 12's (multi-step drive) as columns; (b) the
+    **real code corpus** (CA1–CE1) awaits Day 10's quota-blocked
+    `data/code_store.json`; (c) **`necessary_calls` is enforceable only at the
+    tool/argument level** — a free-text query is never pre-registered, so a
+    wrong-but-in-envelope query that retrieves nothing new is not caught
+    structurally; (d) the **`undecided` bucket is structurally compulsory** for
+    real (non-refusal) answers (prose-shaping-but-uncited), the same answer Day
+    21 reached about its paid lane; (e) a **real-model row is one sample**, not
+    the distribution's mean (Day 30's batch); (f) **observability** (why that
+    latency, which model, which prompt) is **Day 23's** trace, **distributed
+    tracing** is **Day 24's**, and **judge poisoning** is **Day 25's**. Re-verify
+    with `python tools/bench_agent.py --fixtures`.
+
+## How to re-verify, in one line
+
+```bash
+python test_chunk.py && python test_search.py && python test_rag.py && python test_day7.py && python test_day8.py && python test_day9.py && python test_day10.py
+python tools/gateway_smoke.py
+python tools/rag_smoke.py
+python tools/rag_debug.py --stub       # day 7 offline mechanics
+python tools/retrieval_day8.py --stub  # day 8 offline comparison (6/9 → 7/9)
+python tools/retrieval_day9.py --stub  # day 9 offline comparison (ΣΔMRR +1.000, 0 leaks)
+python tools/retrieval_day9.py --stub --sweep   # λ×sim_tau×best_first + weights×order focus
+python tools/retrieval_day9.py --stub --lom     # lost-in-the-middle protocol (MECH)
+python tools/retrieval_day9.py --store data/store.json    # real-corpus comparison
+python tools/retrieval_day9.py --store data/store.json --sweep --lom  # real knobs + LOM
+python tools/retrieval_day10.py --stub  # day 10 doc-vs-code (code 6/6, doc 9/9)
+python tools/tool_smoke.py              # day 11 T1–T7 (calls, validation, cap, parity)
+python tools/agent_smoke.py             # day 12 A1–A8 (loop, three exits + gave_up, depth-1, grounding over transcript)
+python tools/agent_smoke.py --live      # day 12 A1/A6/A7 against the real gateway (retrieval on the stub stores)
+python tools/failure_smoke.py           # day 13 F1–F9 (guards + fabricated? column) + A1–A8 / T1–T7 re-run
+python tools/data_smoke.py              # day 14 Q1–Q8 (read-only guards + asserted ⊆ returned) + A1–A8 / T1–T7 / F1–F9 re-run
+python tools/sql_attack_smoke.py        # day 15 X1–X11 (attack set + control) + Wrote?=no + the Days 11–14 re-run
+python tools/plan_smoke.py              # day 16 P1–P9 (plan validation · state · checkpoints · ladder · policy wall) + the Days 11–15 re-run
+python tools/state_smoke.py             # day 17 S1–S9 (the store · provenance · expiry/deletion · cross-process resume · serialize/replay · the S9 control) + the Days 7–16 re-run
+python tools/memory_smoke.py            # day 18 M1–M9 (scored episodic recall · the distiller's mint gates · semantic expiry · forget re-grounding · privacy · the M8 off/empty-store control) + the Days 7–17 re-run
+python tools/bench_agent.py --fixtures   # day 22 AB1–AB9 (task success · TSR@1 · args · steps · unnecessary · recovery · cost · latency · the AB9 control), 0 new chats
+python tools/bench_agent.py --stub       # day 22 §9 A-report (stub world; 21 rows, 21 verdicts)
+python tools/bench_agent.py --real       # day 22 real-model agent benchmark (the Day-11/12 PENDING handoff)
+LLM_PROVIDERS=cloudflare: python tools/build_code_store.py --corpus corpus_code/saleor --out data/code_store.json --batch 100  # real build (resume; see gap 6)
+python tools/retrieval_day10.py --store data/code_store.json --doc-store data/store.json  # real corpora
+```
 ## How to re-verify, in one line
 
 ```bash
@@ -1422,6 +1476,9 @@ python tools/bench_rag.py --fixtures     # day 21 R1–R9 (recall@K · precision
 python tools/bench_rag.py --stub         # day 21 §9 R-report (stub store: D1 precision 0.444; K1 fails support; I1 pending-human)
 python tools/bench_rag.py --stub --tau-sweep   # day 21 §7 τ calibration (stub separation +0.250)
 python tools/bench_rag.py --real --source doc --store data/store.json --tau-sweep  # day 21 real doc-store R-report + τ (sep +0.011, τ=0.794)
+python tools/bench_agent.py --fixtures   # day 22 AB1–AB9 (task success · TSR@1 · args · steps · unnecessary · recovery · cost · latency · the AB9 control), 0 new chats
+python tools/bench_agent.py --stub       # day 22 §9 A-report (stub world; 21 rows, 21 verdicts)
+python tools/bench_agent.py --real       # day 22 real-model agent benchmark (the Day-11/12 PENDING handoff)
 python tools/regress_all.py              # day 20/21 Rule-2 gate: doc nine + code six + every day suite (7–21, bench included) + the golden rows, exactly as green
 python tools/regress_all.py --fast       # day 20 gate: fixtures + golden rows only
 LLM_PROVIDERS=cloudflare: python tools/build_code_store.py --corpus corpus_code/saleor --out data/code_store.json --batch 100  # real build (resume; see gap 6)
