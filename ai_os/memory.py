@@ -39,12 +39,14 @@ from ai_os.rerank import mmr
 from ai_os.retrieval import fuse_score
 from ai_os.state import (
     EPISODIC_KIND,
+    ORCHESTRATION_KIND,
     PREFERENCE_KIND,
     SEMANTIC_KIND,
     StateRecord,
     StateStore,
     episode_key,
     episode_task_id,
+    orchestration_key,
     preference_key,
 )
 
@@ -140,17 +142,53 @@ def episodicize(run: dict[str, Any], *, task_id: str | None = None) -> dict[str,
         "evidence": list(run.get("evidence") or []),
         "signature": compose_signature(question, tools, entities, answer),
     }
+    # Day 19 — a specialist's episode carries the *role* that authored it, so the
+    # shared shelf can tell one loop's investigation from another's. The role lives
+    # in the payload (not in `created_by`) because the store's provenance triple is
+    # the citation contract Day 17 fixed; a role is a property of the finding.
+    if run.get("role"):
+        payload["role"] = run["role"]
     return payload
 
 
 def remember_episode(store: StateStore, principal: str, episode: dict[str, Any], *,
-                     run_id: str, step: Any = "end",
+                     run_id: str, step: Any = "end", role: str | None = None,
                      ttl: float | None | str = "inherit") -> StateRecord | None:
-    """Write a finished investigation as an `kind=episodic` record (authored)."""
+    """Write a finished investigation as an `kind=episodic` record (authored).
+
+    Day 19 — a specialist writes under its own `principal` + `role` provenance: the
+    role rides in the payload, and the orchestrator may read it but never *authors*
+    one (the write policy, §7). `role=None` is the single loop, byte-for-byte
+    Days 17–18.
+    """
     payload = dict(episode)
+    if role:
+        payload["role"] = role
     tid = str(payload.get("task_id") or "")
     return store.put(principal, EPISODIC_KIND, episode_key(tid), payload,
                      created_by={"run_id": run_id, "step": step, "source": "agent"},
+                     ttl=ttl)
+
+
+def episode_role(record: StateRecord) -> str | None:
+    """The role that authored an episodic record (`None` for the single loop)."""
+    payload = record.payload if isinstance(record.payload, dict) else {}
+    return payload.get("role")
+
+
+def write_orchestration(store: StateStore, principal: str, name: str,
+                        payload: dict[str, Any], *, run_id: str,
+                        ttl: float | None | str = "inherit") -> StateRecord | None:
+    """The orchestrator's own shelf write: routing, delegations, verdicts.
+
+    The one real policy decision of §7: the orchestrator is a **router**, and a
+    router that authors investigations claims evidence it never personally grounded.
+    So it writes `kind=orchestration` only — never an episodic record — through the
+    same closed write path, with `source: "orchestrator"`.
+    """
+    return store.put(principal, ORCHESTRATION_KIND, orchestration_key(name), payload,
+                     created_by={"run_id": run_id, "step": "verdict",
+                                 "source": "orchestrator"},
                      ttl=ttl)
 
 

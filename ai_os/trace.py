@@ -912,3 +912,58 @@ def memory_columns(*, enabled: bool = True, principal: str | None = None,
     }
     out.update(extra or {})
     return out
+
+
+# ======================================================== Day 19 — the topology
+# §9's architecture table columns. The comparison's variable is *topology*, so the
+# trace must carry it: which topology ran, where the role-context router sent the
+# question, the delegations and their statuses, and the three judge columns — the
+# day's headline **`delegated ⊆ returned`**, the **per-hop grounding** leaks, and the
+# **context-union** cost that makes delegation's duplication a measured number.
+
+TOPOLOGY_SINGLE = "single"
+TOPOLOGY_ORCHESTRATOR = "orchestrator"
+DELEGATION_STATUSES: tuple[str, ...] = ("returned", "refused", "failed")
+
+DELEGATION_TERMINATIONS: dict[str, str] = {
+    "returned": "the specialist returned a receipt with evidence — citable",
+    "refused": "the specialist refused (no covering evidence / policy) — a named gap, "
+               "never retried into a different answer",
+    "failed": "the specialist crashed, timed out, or stopped without a finding — "
+              "retried once (bounded), then surfaced; never fabricated",
+}
+
+
+def topology_columns(*, topology: str, routed_to: str | None = None,
+                     delegations: Sequence[dict[str, Any]] = (),
+                     handoffs: int = 0, delegated_subset_returned: bool = True,
+                     handoff_fabricated: Sequence[str] = (),
+                     per_hop_leaks: int = 0, receipts_subset_authored: bool = True,
+                     context_union_tokens: int = 0, steps: int = 0,
+                     failure: bool = False,
+                     extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The §9 architecture row: one row per fixture, every cell a real run's.
+
+    `delegated_subset_returned` is the day's headline (an orchestrator's answer
+    cites only receipted evidence); `per_hop_leaks` is `cited ⊆ retrieved` summed
+    over the specialists; `context_union_tokens` bills a delegation as the union of
+    both contexts (orchestrator + specialist), because delegation duplicates rather
+    than replaces context. Topology A rows carry zeros here and are byte-for-byte
+    Days 12–18.
+    """
+    out: dict[str, Any] = {
+        "topology": topology,
+        "routed_to": routed_to,
+        "steps": int(steps),
+        "handoffs": int(handoffs),
+        "delegation_statuses": [str(d.get("status")) for d in delegations],
+        "delegations": [dict(d) for d in delegations],
+        "delegated_subset_returned": bool(delegated_subset_returned),
+        "handoff_fabricated": list(handoff_fabricated),
+        "per_hop_leaks": int(per_hop_leaks),
+        "receipts_subset_authored": bool(receipts_subset_authored),
+        "context_union_tokens": int(context_union_tokens),
+        "failure": bool(failure),
+    }
+    out.update(extra or {})
+    return out

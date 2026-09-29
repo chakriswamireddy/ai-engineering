@@ -291,7 +291,12 @@ DEFAULT_STATE_SCHEMA = 2
 # provenance (S7 untouched; a distilled claim the system did not author is still
 # unreachable).
 AUTHORED_SOURCES = frozenset(
-    {"agent", "executor", "session", "trace", "run", "checkpoint", "distiller"})
+    {"agent", "executor", "session", "trace", "run", "checkpoint", "distiller",
+     # Day 19 — the orchestrator is an *author of orchestration records only*
+     # (routing, delegations, verdicts), never of a specialist's episodes. Adding it
+     # here does not loosen `recalled ⊆ authored`: it admits a writer whose writes
+     # are a different `kind`, and the write policy (§7) forbids it the episodic shelf.
+     "orchestrator"})
 
 # The three shelves' kinds (the lifetime axis, §2's table).
 TASK_KIND = "task"
@@ -304,6 +309,10 @@ WORKING_KIND = "working"
 EPISODIC_KIND = "episodic"
 SEMANTIC_KIND = "semantic"
 PREFERENCE_KIND = "preference"
+# Day 19 — the orchestrator's own shelf: routing decisions, delegations, verdicts.
+# Deliberately *not* an episode: a router that authors investigations would claim
+# evidence it never personally grounded (§7, M7's boundary across roles).
+ORCHESTRATION_KIND = "orchestration"
 
 # §5 — the sample-size rule: a lesson from one run is an anecdote, never minted.
 DEFAULT_MIN_SOURCES = 2
@@ -341,6 +350,11 @@ def concept_key(concept_id: str) -> str:
 
 def preference_key(name: str) -> str:
     return f"/preference/{name}"
+
+
+def orchestration_key(name: str) -> str:
+    """The orchestrator's record key (routing/delegation/verdict — never an episode)."""
+    return f"/orchestration/{name}"
 
 
 EPISODE_KEY_PREFIX = "/episodic/"
