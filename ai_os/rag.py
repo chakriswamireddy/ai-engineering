@@ -19,6 +19,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from ai_os import observability as obs
 from ai_os.search import dot, normalize
 
 STORE_VERSION = 1
@@ -29,6 +30,12 @@ SYSTEM_PROMPT = (
     "If the context cannot answer the question, say: '{not_covered}'.\n"
     "Cite the source heading for each claim.\n\n{context}"
 )
+
+# Day 23 §6 — the RAG prompt's provenance. The semantic name says which intent
+# the template represents; the hash says which exact bytes ran. A template edit
+# changes the hash without a human remembering to bump a version string.
+RAG_PROMPT_VERSION = "v1"
+RAG_PROMPT_REF = obs.PromptRef.of("rag-answer", RAG_PROMPT_VERSION, SYSTEM_PROMPT)
 
 
 class RagError(Exception):
@@ -224,11 +231,50 @@ def run_rag(gateway, store, question: str, *, k: int | None = None,
     Returns answer + citations + retrieval/generation accounting. When no
     chunk fits the context budget, it refuses *by code* (an honest
     `not covered` answer) instead of asking the model to invent one.
+
+    Day 23 §7 — the run becomes a causal tree: `request → model.embed →
+    retrieval (document events) → model.chat → final answer`, with an explicit
+    prompt ref on the generation turn. Raw question and document text never
+    enter the trace — only ids, counts, ranks, sizes, and hashes. The pipeline
+    decisions (`k`, budget, gate, refusal) are exactly where they were.
     """
     q = question.strip()
     if not q:
         raise ValueError("question must not be empty")
 
+    tr = obs.current_trace()
+    own = tr is None or not getattr(tr, "recording", False)
+    if own:
+        tr = obs.start_trace("rag", attributes={
+            "route": "/rag", "question_sha256": obs.sha256_text(q),
+            "question_chars": len(q)})
+    else:
+        tr.add_event("request", route="/rag",
+                     question_sha256=obs.sha256_text(q), question_chars=len(q))
+    try:
+        result = _run_rag_traced(gateway, store, q, k=k, budget_chars=budget_chars,
+                                 max_tokens=max_tokens, temperature=temperature,
+                                 tr=tr)
+    except BaseException as exc:
+        if own:
+            obs.finish_trace(tr, status=obs.status_for_error(exc),
+                             error=obs.error_fact(exc))
+        raise
+    if own:
+        obs.finish_trace(tr)
+    if getattr(tr, "recording", False):
+        result["trace_id"] = tr.trace_id
+    return result
+
+
+def _ev(span, event: str, **attrs: Any) -> None:
+    """Emit an event when tracing is on; no-op on the `NullTrace` path (O9)."""
+    if span is not None:
+        span.add_event(event, **attrs)
+
+
+def _run_rag_traced(gateway, store, q: str, *, k, budget_chars, max_tokens,
+                    temperature, tr) -> dict[str, Any]:
     embeddings = gateway.embed([q])
     qvec = embeddings[0].vector
     if store.dimension and len(qvec) != store.dimension:
@@ -238,8 +284,22 @@ def run_rag(gateway, store, question: str, *, k: int | None = None,
 
     if k is None:
         k = k_from_budget(budget_chars, store.avg_chunk_len(), len(store))
-    results = store.retrieve(qvec, k)
-    context, used, kept = build_context(results, budget_chars)
+    with tr.span(obs.KIND_RETRIEVAL, "retrieval", attributes={
+            "query_sha256": obs.sha256_text(q), "k": k,
+            "store": store.embedding_model, "store_dim": store.dimension,
+            "budget_chars": budget_chars}) as rspan:
+        results = store.retrieve(qvec, k)
+        context, used, kept = build_context(results, budget_chars)
+        kept_ids = {c.chunk_id for _, c in kept}
+        for rank, (score, chunk) in enumerate(results, 1):
+            _ev(rspan, "document", doc_id=chunk.doc_id, chunk_id=chunk.chunk_id,
+                rank=rank, score=round(float(score), 4), chars=len(chunk.text),
+                text_sha256=obs.sha256_text(chunk.text),
+                kept=chunk.chunk_id in kept_ids,
+                drop_reason=(None if chunk.chunk_id in kept_ids else "budget"))
+        if rspan is not None:
+            rspan.update(candidates=len(results), context_chars=used,
+                         kept=len(kept), dropped=len(results) - len(kept))
 
     retrieval = {
         "model": embeddings[0].model,
@@ -252,6 +312,11 @@ def run_rag(gateway, store, question: str, *, k: int | None = None,
     }
 
     if not context or not kept:
+        tr.add_event("gate_refused", reason="empty context after budget",
+                     candidates=len(results))
+        tr.add_event("final_answer", refused=True, answer_chars=len(NOT_COVERED),
+                     answer_sha256=obs.sha256_text(NOT_COVERED),
+                     citations=len(results), model=None)
         return {
             "answer": NOT_COVERED,
             "citations": [citation(c, s) for s, c in results],
@@ -264,7 +329,14 @@ def run_rag(gateway, store, question: str, *, k: int | None = None,
     completion = gateway.chat(
         [{"role": "system", "content": system},
          {"role": "user", "content": q}],
-        temperature=temperature, max_tokens=max_tokens)
+        temperature=temperature, max_tokens=max_tokens,
+        prompt_ref=RAG_PROMPT_REF)
+    tr.add_event("final_answer", refused=False,
+                 answer_sha256=obs.sha256_text(completion.text),
+                 answer_chars=len(completion.text),
+                 citations=len(results), model=completion.model,
+                 finish_reason=completion.finish_reason,
+                 prompt_version=RAG_PROMPT_REF.version)
 
     return {
         "answer": completion.text,
