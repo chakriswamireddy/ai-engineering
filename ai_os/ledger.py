@@ -42,6 +42,18 @@ class CallRecord:
     latency_ms: float
     ok: bool
     error: str = ""
+    # Day 23 — additive provenance, not accounting. A trace id/span id make the
+    # row citable by the request's trace tree; `operation`/`attempt` and the
+    # prompt identity let a reader walk from a bill line back to the exact turn.
+    # Defaults keep every pre-Day-23 record byte-for-byte unchanged.
+    trace_id: str = ""
+    span_id: str = ""
+    operation: str = ""
+    attempt: int = 0
+    prompt_name: str = ""
+    prompt_version: str = ""
+    prompt_sha256: str = ""
+    price_status: str = "known"     # `unknown` = model absent from the table
 
 
 class Ledger:
@@ -66,8 +78,18 @@ class Ledger:
         latency_ms: float = 0.0,
         ok: bool = True,
         error: str = "",
+        trace_id: str = "",
+        span_id: str = "",
+        operation: str = "",
+        attempt: int = 0,
+        prompt_ref=None,
     ) -> CallRecord:
         usage = Usage(input_tokens, output_tokens, input_tokens + output_tokens)
+        prompt_name = prompt_version = prompt_sha256 = ""
+        if prompt_ref is not None:
+            prompt_name = getattr(prompt_ref, "name", "") or ""
+            prompt_version = getattr(prompt_ref, "version", "") or ""
+            prompt_sha256 = getattr(prompt_ref, "sha256", "") or ""
         rec = CallRecord(
             ts=time.time(),
             provider=provider,
@@ -78,6 +100,16 @@ class Ledger:
             latency_ms=round(latency_ms, 1),
             ok=ok,
             error=error,
+            trace_id=trace_id,
+            span_id=span_id,
+            operation=operation,
+            attempt=int(attempt),
+            prompt_name=prompt_name,
+            prompt_version=prompt_version,
+            prompt_sha256=prompt_sha256,
+            # Day 23 — an unknown model prices at $0 by design; the trace marks
+            # it, so `$0.00` is never mistaken for proof of free inference.
+            price_status="known" if model in self.prices else "unknown",
         )
         self.records.append(rec)
         return rec
