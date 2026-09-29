@@ -30,6 +30,23 @@ Day 21 adds two optional fields to the row, both under the same hash:
   fact must still call the reader (the corpus-can-be-wrong seam): the RAG bench
   marks such a row's verdict `PENDING-human` by design.
 
+Day 22 adds three optional fields to the row, both under the same hash — the
+*agent benchmark*'s pre-registered call envelope:
+
+- `necessary_calls` — the minimal call set a correct answer must have made,
+  `[{tool, args?}]` minted from task *structure* (never from a run's output), so
+  "was that call necessary?" is membership arithmetic in `necessary_calls`. A
+  necessary call is required, so it must appear in `expected_tools` (the
+  discipline check); absent/empty ⇒ `necessary ⊆ made` is `n/a`. Free-text
+  arguments (`query`/`sql`) are deliberately *not* pre-registered — only the
+  tool and any structured args are, because a correct agent may legally phrase a
+  search differently (the AB3 deviation is graded on structure, not prose).
+- `expected_steps` — the `{min, max}` step envelope `tool_steps` must fall in.
+  Absent ⇒ the step cell is `n/a`.
+- `expected_termination` — the loop exit the row expects (`answer`/`max_steps`/
+  `budget`/`gave_up`/…); default `answer`. An E-family row still terminates
+  `answer` — *what* it answers is the refusal, checked separately.
+
 This module is `MECH`: pure parsing, set membership, and arithmetic — 0 chats,
 0 embeds. The runner that presents rows to production is `tools/eval_harness.py`;
 the grader is `ai_os/judge.py`.
@@ -155,6 +172,23 @@ def known_tools() -> set[str]:
     return set(FALLBACK_TOOLS)
 
 
+# The loop's exits (Day 12's five + Day 13/15's diagnoses) — the authority
+# `expected_termination` is checked against. Imported lazily so this module
+# stays importable without dragging the trace in.
+FALLBACK_TERMINATIONS = ("answer", "max_steps", "budget", "gave_up",
+                         "no_progress", "oscillation", "tool_failure", "policy")
+
+
+def known_terminations() -> set[str]:
+    try:
+        from ai_os.trace import AGENT_TERMINATIONS
+        if AGENT_TERMINATIONS:
+            return set(AGENT_TERMINATIONS)
+    except Exception:
+        pass
+    return set(FALLBACK_TERMINATIONS)
+
+
 # ------------------------------------------------------------------ validation
 
 def _as_list(value: Any, field: str, rid: str) -> list:
@@ -163,6 +197,40 @@ def _as_list(value: Any, field: str, rid: str) -> list:
     if not isinstance(value, list):
         raise DatasetError(f"{rid}: {field} must be a list, got {type(value).__name__}")
     return value
+
+
+def _parse_necessary_calls(value: Any, rid: str) -> list[dict[str, Any]]:
+    """Day 22 §2 — the minimal call set, `[{tool, args?}]`, or raise.
+
+    Only the tool and *structured* args are pre-registered: a free-text `query`
+    is never part of the envelope, because a correct agent may legally phrase a
+    search differently — the envelope is enforceable at the tool/argument level
+    (the plan's own honest limit).
+    """
+    out: list[dict[str, Any]] = []
+    for item in _as_list(value, "necessary_calls", rid):
+        if not isinstance(item, dict) or not str(item.get("tool") or "").strip():
+            raise DatasetError(f"{rid}: necessary_calls entries need a `tool`")
+        args = item.get("args") or {}
+        if not isinstance(args, dict):
+            raise DatasetError(f"{rid}: necessary_calls args must be a mapping")
+        out.append({"tool": str(item["tool"]).strip(),
+                    "args": {str(k): v for k, v in args.items()}})
+    return out
+
+
+def _parse_step_envelope(value: Any, rid: str) -> dict[str, int] | None:
+    """`expected_steps: {min, max}` — the tool_steps envelope, or `None`."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise DatasetError(f"{rid}: expected_steps must be a mapping of {{min, max}}")
+    try:
+        lo = int(value.get("min", 0))
+        hi = int(value.get("max", lo))
+    except (TypeError, ValueError):
+        raise DatasetError(f"{rid}: expected_steps min/max must be integers")
+    return {"min": lo, "max": hi}
 
 
 def normalize_row(raw: dict[str, Any], registered_at: str) -> dict[str, Any]:
@@ -201,6 +269,10 @@ def normalize_row(raw: dict[str, Any], registered_at: str) -> dict[str, Any]:
                                               "relevant_also", rid)]
     human_review = bool(raw.get("human_review") or False)
     semantic_fail = bool(raw.get("semantic_fail") or False)
+    # Day 22 — the agent benchmark's pre-registered call envelope.
+    necessary_calls = _parse_necessary_calls(raw.get("necessary_calls"), rid)
+    expected_steps = _parse_step_envelope(raw.get("expected_steps"), rid)
+    expected_termination = str(raw.get("expected_termination") or "answer").strip()
 
     failure_category = raw.get("failure_category", None)
     if isinstance(failure_category, str):
@@ -228,6 +300,10 @@ def normalize_row(raw: dict[str, Any], registered_at: str) -> dict[str, Any]:
         "relevant_also": relevant_also,
         "human_review": human_review,
         "semantic_fail": semantic_fail,
+        # Day 22 — the agent benchmark's call envelope (hash-covered by construction).
+        "necessary_calls": necessary_calls,
+        "expected_steps": expected_steps,
+        "expected_termination": expected_termination,
         "registered_at": registered_at,
     }
     if kind == JUDGE_HUNTING_KIND:
@@ -288,6 +364,26 @@ def validate_row(row: dict[str, Any], *, corpus_text: dict[str, str] | None = No
     if row.get("semantic_fail") and row["kind"] != JUDGE_HUNTING_KIND:
         errors.append(f"{rid}: semantic_fail is only meaningful on a judge-hunting "
                       "row (a deterministic row's verdict is layer 1's)")
+
+    # Day 22 — the agent benchmark's call envelope (pre-registration discipline).
+    if row["kind"] == JUDGE_HUNTING_KIND and row.get("necessary_calls"):
+        errors.append(f"{rid}: judge-hunting rows carry no call envelope "
+                      "(they are graded against a probe, not a run)")
+    for nc in row.get("necessary_calls") or []:
+        if nc["tool"] not in row["expected_tools"]:
+            errors.append(f"{rid}: necessary call {nc['tool']!r} is not in "
+                          f"expected_tools {sorted(row['expected_tools'])} "
+                          "(a necessary call is a required one)")
+        if nc["tool"] not in known:
+            errors.append(f"{rid}: necessary call tool {nc['tool']!r} not in the registry")
+    env = row.get("expected_steps")
+    if env is not None:
+        if env["min"] < 0 or env["max"] < env["min"]:
+            errors.append(f"{rid}: expected_steps envelope invalid {env}")
+    if str(row.get("expected_termination") or "") not in known_terminations():
+        errors.append(f"{rid}: expected_termination "
+                      f"{row.get('expected_termination')!r} is not a loop exit "
+                      f"{sorted(known_terminations())}")
 
     if corpus_text is not None:
         missing = [e for e in row["expected_evidence"] if e not in corpus_text]

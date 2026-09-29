@@ -32,6 +32,23 @@
 #                     deterministic harness must not expect layer 1 to reject it;
 #                     the RAG bench issues the verdict (K1).
 #
+# Day 22's added fields (also hash-pinned) — the *agent benchmark*'s call envelope:
+#   necessary_calls     — the minimal call set a correct answer must have made,
+#                         `[{tool, args?}]`, minted from task structure (never from
+#                         a run's output). "Was that call necessary?" becomes
+#                         membership in this set: a made call outside it is a U-rule
+#                         candidate, and the `undecided` bucket (owned, never
+#                         counted) refuses to grade what the trace cannot prove.
+#                         A necessary call is required, so it must be listed in
+#                         expected_tools (validator-enforced). Free-text `query`/`sql`
+#                         is NOT pre-registered — only tool + structured args — so a
+#                         correct agent may phrase a search differently (AB3's
+#                         `arg_deviation` grades structure, not prose).
+#   expected_steps      — `{min, max}`, the tool_steps envelope ([] ⇒ n/a).
+#   expected_termination— the loop exit the row expects (default `answer`); an
+#                         E-family row still terminates `answer` — *what* it answers
+#                         is the refusal, checked separately (AB1).
+#
 # `predicted`/`fix` ride along from Day 7/10 so a failing row still names its
 # owner. `must_not` is the wrong sense that must not be retrieved (Family C).
 #
@@ -48,7 +65,7 @@
 
 dataset_version: 1
 registered_at: "2026-09-28"
-dataset_hash: "a936c02e032b4c1edfbba5d25a38bbd9ee254203ab6fb9c57fb6ed687598909e"
+dataset_hash: "a3e0df99ecf3fd3020f866bfb0f28c9d505fa7877756cdd435109fcb91af4aaf"
 
 rows:
   # ------------------------------------------------- the doc nine (A–E), verbatim
@@ -67,6 +84,10 @@ rows:
         - "a checkout accepts cart lines, an email, and a shipping method"
       must_not_assert: []
     expected_tools: ["search_saleor_docs"]
+    necessary_calls:
+      - tool: search_saleor_docs
+    expected_steps: {min: 1, max: 2}
+    expected_termination: answer
     failure_category: null
     predicted: "none (control)"
     fix: null
@@ -91,6 +112,10 @@ rows:
         - "the order flows through fulfillment and shipping"
       must_not_assert: []
     expected_tools: ["search_saleor_docs"]
+    necessary_calls:
+      - tool: search_saleor_docs
+    expected_steps: {min: 1, max: 3}
+    expected_termination: answer
     failure_category: null
     predicted: "missing retrieval (partial) — one query lands in one region"
     fix: "multi-query decomposition (Day 8)"
@@ -113,6 +138,10 @@ rows:
         - "checkoutComplete returns the created order"
       must_not_assert: []
     expected_tools: ["search_saleor_docs"]
+    necessary_calls:
+      - tool: search_saleor_docs
+    expected_steps: {min: 1, max: 3}
+    expected_termination: answer
     failure_category: null
     predicted: "excessive context + partial retrieval"
     fix: "rerank + context ordering (Day 9)"
@@ -131,6 +160,10 @@ rows:
         - "apps expose webhooks and run sync endpoints"
       must_not_assert: []
     expected_tools: ["search_saleor_docs"]
+    necessary_calls:
+      - tool: search_saleor_docs
+    expected_steps: {min: 1, max: 3}
+    expected_termination: answer
     failure_category: null
     predicted: "irrelevant retrieval — one vector averaged across the senses of 'app'"
     fix: "query rewriting / metadata filter (Day 8)"
@@ -153,6 +186,10 @@ rows:
         - "a field belongs to the GraphQL schema"
       must_not_assert: []
     expected_tools: ["search_saleor_docs"]
+    necessary_calls:
+      - tool: search_saleor_docs
+    expected_steps: {min: 1, max: 3}
+    expected_termination: answer
     failure_category: null
     predicted: "wrong entity (rung 4) — GraphQL field docs outrank product attribute docs"
     fix: "query rewriting (Day 8)"
@@ -175,6 +212,10 @@ rows:
         - "the mutation returns the created order"
       must_not_assert: []
     expected_tools: ["search_saleor_docs"]
+    necessary_calls:
+      - tool: search_saleor_docs
+    expected_steps: {min: 1, max: 2}
+    expected_termination: answer
     failure_category: null
     predicted: "duplicated context — 4 of 5 slots are near-dupes of one meaning"
     fix: "rerank + diversity/MMR (Day 9)"
@@ -198,6 +239,10 @@ rows:
         - "choose lines and set email and delivery method"
       must_not_assert: []
     expected_tools: ["search_saleor_docs"]
+    necessary_calls:
+      - tool: search_saleor_docs
+    expected_steps: {min: 1, max: 3}
+    expected_termination: answer
     failure_category: null
     predicted: "duplicated context — the same fact served twice"
     fix: "context dedup (Day 9)"
@@ -215,6 +260,9 @@ rows:
       must_not_assert:
         - "Saleor Cloud costs a specific price per month"
     expected_tools: []
+    necessary_calls: []
+    expected_steps: {min: 1, max: 2}
+    expected_termination: answer
     failure_category: "refusal"
     predicted: "hallucination — K neighbours are returned anyway; no gate"
     fix: "similarity gate (shippable today)"
@@ -232,6 +280,9 @@ rows:
       must_not_assert:
         - "the Shopify webhook handler is configured in Saleor"
     expected_tools: []
+    necessary_calls: []
+    expected_steps: {min: 1, max: 2}
+    expected_termination: answer
     failure_category: "refusal"
     predicted: "hallucination via near-miss — adjacent docs score plausibly"
     fix: "gate + threshold calibration"
@@ -255,6 +306,10 @@ rows:
         - "complete_checkout is the domain service behind the CheckoutComplete mutation"
       must_not_assert: []
     expected_tools: ["search_saleor_code"]
+    necessary_calls:
+      - tool: search_saleor_code
+    expected_steps: {min: 1, max: 3}
+    expected_termination: answer
     failure_category: null
     predicted: "single-hit — the API mutation and the domain service are one concept"
     fix: "the double-hit is *correct*: a cross-layer pair is a feature"
@@ -275,6 +330,10 @@ rows:
         - "create_order_from_checkout creates an Order from a completed Checkout"
       must_not_assert: []
     expected_tools: ["search_saleor_code"]
+    necessary_calls:
+      - tool: search_saleor_code
+    expected_steps: {min: 1, max: 3}
+    expected_termination: answer
     failure_category: null
     predicted: "the service symbol is retrieved but its imports are not walked"
     fix: "imports are stored on the chunk; walking the graph is Day 12/16"
@@ -297,6 +356,10 @@ rows:
         - "WebhookEventAsyncType is the set of async webhook event types"
       must_not_assert: []
     expected_tools: ["search_saleor_code"]
+    necessary_calls:
+      - tool: search_saleor_code
+    expected_steps: {min: 1, max: 3}
+    expected_termination: answer
     failure_category: null
     predicted: "the payment half is found; the event-type constant is missed"
     fix: "multi-query decomposition + module filter (Day 8, retargeted)"
@@ -317,6 +380,10 @@ rows:
         - "Checkout is the GraphQL API type"
       must_not_assert: []
     expected_tools: ["search_saleor_code"]
+    necessary_calls:
+      - tool: search_saleor_code
+    expected_steps: {min: 1, max: 3}
+    expected_termination: answer
     failure_category: null
     predicted: "one sense wins — a Django model, a GraphQL type and a module share one identifier"
     fix: "assert on module#Symbol, never bare names; the module_prefix filter separates the senses"
@@ -338,6 +405,10 @@ rows:
         - "test that completing a missing checkout does not create an order"
       must_not_assert: []
     expected_tools: ["search_saleor_code"]
+    necessary_calls:
+      - tool: search_saleor_code
+    expected_steps: {min: 1, max: 3}
+    expected_termination: answer
     failure_category: null
     predicted: "a family of mock/factory twins crowds the slot"
     fix: "MMR + dedup cull the twins (Day 9, unchanged)"
@@ -355,6 +426,9 @@ rows:
       must_not_assert:
         - "the Shopify webhook handler is defined in a Saleor module"
     expected_tools: []
+    necessary_calls: []
+    expected_steps: {min: 1, max: 2}
+    expected_termination: answer
     failure_category: "refusal"
     predicted: "hallucination — a plausible-but-nonexistent symbol is forged"
     fix: "the fused-score gate refuses; never a forged identifier"
