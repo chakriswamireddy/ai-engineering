@@ -51,6 +51,7 @@ import re
 import time
 from typing import Any
 
+from ai_os import observability as obs
 from ai_os.contract import ToolCall
 from ai_os.data import asserted_subset_returned
 from ai_os.memory import (
@@ -262,6 +263,22 @@ REASONING_PROMPT = (
     "6. Answer only from the evidence you gathered, citing the module#Symbol / "
     "doc_id ids that appear in the tool results."
 )
+
+# Day 23 §7 — explicit prompt provenance for the loop's three prompt families.
+# The reasoning prompt rides every tool turn; the termination notes ride the
+# forced final turn. A version says which intent the template encodes, the hash
+# pins the exact bytes, and neither is inferred from the string at call time.
+REASONING_PROMPT_REF = obs.PromptRef.of("agent-reasoning", "v1", REASONING_PROMPT)
+TERMINATION_PROMPT_REFS = {
+    name: obs.PromptRef.of(f"agent-termination-{name}", "v1", text)
+    for name, text in TERMINATION_NOTE.items()
+}
+
+
+def _ev(span, event: str, **attrs: Any) -> None:
+    """Emit an event when tracing is on; a no-op on the `NullTrace` path (O9)."""
+    if span is not None:
+        span.add_event(event, **attrs)
 
 
 def mentioned_ids(text: str) -> list[str]:
@@ -626,6 +643,20 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
         result.setdefault("role", role)
         return result
 
+    # Day 23 §7 — one root for the request. A direct `run_agent` call mints it;
+    # a nested loop (already inside a request trace) attaches to the active one.
+    # `own` decides who closes the root, so an outer request is never finished
+    # by an inner loop.
+    tr = obs.current_trace()
+    own_trace = tr is None or not getattr(tr, "recording", False)
+    if own_trace:
+        tr = obs.start_trace("agent", attributes={
+            "route": "agent", "request_sha256": obs.sha256_text(q),
+            "request_chars": len(q)})
+    else:
+        tr.add_event("request", route="agent", request_sha256=obs.sha256_text(q),
+                     request_chars=len(q))
+
     steps_cap = agent_max_steps_from_env() if max_steps is None else max(1, max_steps)
     obs_budget = (agent_budget_chars_from_env() if budget_chars is None
                   else budget_chars)
@@ -692,183 +723,219 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
     answer_text = ""
 
     while True:
-        completion = gateway.chat_with_tools(transcript, tools=registry.schemas(),
-                                             temperature=temperature,
-                                             max_tokens=max_tokens)
-        if not completion.tool_calls:
-            answer_text = completion.text
-            termination = "answer"                      # exit 1
-            break
+        step_no = len(steps) + 1
+        # Day 23 §7 — each iteration is a step span; every proposal, validation,
+        # result, and model turn is linked to it. A `break` closes the span
+        # cleanly, so a terminated loop still has a complete tree (O6).
+        with tr.span(obs.KIND_STEP, f"agent.step.{step_no}",
+                     attributes={"step": step_no}) as sspan:
+            completion = gateway.chat_with_tools(
+                transcript, tools=registry.schemas(),
+                prompt_ref=REASONING_PROMPT_REF, operation="chat_with_tools",
+                temperature=temperature, max_tokens=max_tokens)
+            _ev(sspan, "model_turn", tool_calls=len(completion.tool_calls or []) if completion.tool_calls else 0,
+                has_text=bool((completion.text or "").strip()))
+            if not completion.tool_calls:
+                answer_text = completion.text
+                termination = "answer"                  # exit 1
+                break
 
-        if len(steps) >= steps_cap:
+            if len(steps) >= steps_cap:
+                capped_calls = list(completion.tool_calls)
+                for capped in capped_calls:
+                    _ev(sspan, "tool_call", name=capped.name, executed=False,
+                        reason="max_steps",
+                        args_sha256=obs.sha256_text(capped.arguments or ""))
+                termination = "max_steps"
+                break
             # The model asked again with no steps left. The calls are *recorded,
             # not executed* (exit 2) — evidence of the spiral, not a step. This
             # branch is why the loop still calls once more after the last allowed
             # tool step: `run_agent(max_steps=1)` never lands here on a single
             # tool turn, so Day 11's `run_tool_answer` is reproduced exactly
             # (one tool turn + one *natural* answer, never a bogus cap note).
-            capped_calls = list(completion.tool_calls)
-            termination = "max_steps"
-            break
+            all_calls.extend(completion.tool_calls)
+            calls = completion.tool_calls
+            newly_deferred: list[Any] = []
+            if (max_tool_calls_per_step is not None
+                    and len(calls) > max_tool_calls_per_step):
+                newly_deferred = list(calls[max_tool_calls_per_step:])
+                deferred.extend(newly_deferred)
+                calls = calls[:max_tool_calls_per_step]
+            for dcall in newly_deferred:
+                _ev(sspan, "tool_call", name=dcall.name, executed=False,
+                    reason="max_tool_calls_per_step",
+                    args_sha256=obs.sha256_text(dcall.arguments or ""))
 
-        all_calls.extend(completion.tool_calls)
-        calls = completion.tool_calls
-        if max_tool_calls_per_step is not None and len(calls) > max_tool_calls_per_step:
-            deferred.extend(calls[max_tool_calls_per_step:])
-            calls = calls[:max_tool_calls_per_step]
+            observations: list[dict[str, Any]] = []
+            rows: list[dict[str, Any]] = []
+            step_failures = 0
+            step_policy = False
+            for call in calls:
+                _ev(sspan, "tool_call", name=call.name, executed=True,
+                    args_sha256=obs.sha256_text(call.arguments or ""),
+                    args_keys=sorted((call.parsed() or {}).keys()))
+                vr = registry.validate_args(call.name, call.arguments)
+                _ev(sspan, "tool_validation", name=call.name, ok=vr.ok,
+                    error_kind=vr.error_kind, rejection_class=vr.rejection_class)
+                if not vr.ok:
+                    # §2 — a *rejection* ("you asked wrong"): no execution, no
+                    # fingerprint (a call that never ran is not a step's identity),
+                    # no ladder — Day 12's self-correction owns it.
+                    rejections += 1
+                    if vr.error_kind:
+                        last_rejection_kind = vr.error_kind
+                    # §7 — a `policy` rejection is a wall even at validation: the role
+                    # gate denies an out-of-role tool here (never executed), and
+                    # self-correcting across the privilege boundary is exactly the
+                    # bypass Day 15/19 forbid. It stops the run like an executed one.
+                    if vr.rejection_class == POLICY_CLASS:
+                        policy_hits += 1
+                        step_policy = True
+                    msg, clamped = _tool_message(call, vr, obs_budget)
+                    observations.append(msg)
+                    row = _call_row(call, vr, vr, clamped)
+                    rows.append(row)
+                    executed_rows.append(row)
+                    ledger_rows.append(_ledger_row(call, vr, clamped))
+                    continue
 
-        observations: list[dict[str, Any]] = []
-        rows: list[dict[str, Any]] = []
-        step_failures = 0
-        step_policy = False
-        for call in calls:
-            vr = registry.validate_args(call.name, call.arguments)
-            if not vr.ok:
-                # §2 — a *rejection* ("you asked wrong"): no execution, no
-                # fingerprint (a call that never ran is not a step's identity),
-                # no ladder — Day 12's self-correction owns it.
-                rejections += 1
-                if vr.error_kind:
-                    last_rejection_kind = vr.error_kind
-                # §7 — a `policy` rejection is a wall even at validation: the role
-                # gate denies an out-of-role tool here (never executed), and
-                # self-correcting across the privilege boundary is exactly the
-                # bypass Day 15/19 forbid. It stops the run like an executed one.
-                if vr.rejection_class == POLICY_CLASS:
-                    policy_hits += 1
-                    step_policy = True
-                msg, clamped = _tool_message(call, vr, obs_budget)
-                observations.append(msg)
-                row = _call_row(call, vr, vr, clamped)
-                rows.append(row)
-                executed_rows.append(row)
-                ledger_rows.append(_ledger_row(call, vr, clamped))
-                continue
-
-            # §6 — climb the ladder on a tool error. Day 15: a *policy* rejection
-            # is excluded from both rungs — re-issuing a forbidden query (or
-            # substituting a sibling tool for it) is the loop assisting a bypass.
-            result, elapsed_ms = execute_bounded(
-                registry, call.name, vr.args or {},
-                tool_timeout_s=timeout_cap, clock=clock)
-            retries = failures = timeouts = 0
-            if result.rejection_class == POLICY_CLASS:
-                policy_hits += 1
-                step_policy = True
-            elif result.error_kind in TOOL_ERROR_KINDS:
-                failures += 1
-                timeouts += int(result.error_kind == ERROR_TIMEOUT)
-            # Rung 1 — retry the *same* call (execution retry, not self-correction;
-            # different counter, different config, because a 502 and a missing
-            # `query` are not the same animal).
-            while (result.error_kind in TOOL_ERROR_KINDS and result.retryable
-                   and result.rejection_class != POLICY_CLASS
-                   and retries < retry_cap):
-                retries += 1
-                result, more = execute_bounded(
+                # §6 — climb the ladder on a tool error. Day 15: a *policy* rejection
+                # is excluded from both rungs — re-issuing a forbidden query (or
+                # substituting a sibling tool for it) is the loop assisting a bypass.
+                result, elapsed_ms = execute_bounded(
                     registry, call.name, vr.args or {},
                     tool_timeout_s=timeout_cap, clock=clock)
-                elapsed_ms += more
-                if result.error_kind in TOOL_ERROR_KINDS:
+                retries = failures = timeouts = 0
+                if result.rejection_class == POLICY_CLASS:
+                    policy_hits += 1
+                    step_policy = True
+                elif result.error_kind in TOOL_ERROR_KINDS:
                     failures += 1
                     timeouts += int(result.error_kind == ERROR_TIMEOUT)
-            # Rung 2 — a sibling *corpus* tool, only with the question's intent
-            # and only if the rung is still budgeted. The substitution is
-            # disclosed (`fallback_from`) — a silent one is F1's disease.
-            fallback: dict[str, Any] | None = None
-            if (result.error_kind in TOOL_ERROR_KINDS
-                    and result.rejection_class != POLICY_CLASS
-                    and fallbacks_used < fallback_cap):
-                sibling = SIBLING_TOOLS.get(call.name)
-                if sibling and sibling in registry.names():
-                    allowed = registry.properties(sibling)
-                    s_args = {k: v for k, v in (vr.args or {}).items() if k in allowed}
-                    fb_vr = registry.validate_args(sibling, json.dumps(s_args))
-                    if fb_vr.ok:
-                        fb_result, fb_elapsed = execute_bounded(
-                            registry, sibling, fb_vr.args or {},
-                            tool_timeout_s=timeout_cap, clock=clock)
-                        elapsed_ms += fb_elapsed
-                        fallbacks_used += 1
-                        if fb_result.error_kind in TOOL_ERROR_KINDS:
-                            failures += 1
-                            timeouts += int(fb_result.error_kind == ERROR_TIMEOUT)
-                        fb_result.fallback_from = call.name
-                        result = fb_result
-                        fallback = {"from": call.name, "to": sibling,
-                                    "ok": fb_result.ok}
-                        fallback_log.append({"step": len(steps) + 1, **fallback})
-            if result.rejection_class == POLICY_CLASS and not step_policy:
-                # A retry/substitution that ended in a policy rejection still
-                # counts and still stops the run.
-                policy_hits += 1
-                step_policy = True
-            if result.error_kind in TOOL_ERROR_KINDS:
-                step_failures += 1
-            tool_timeouts_total += timeouts
+                # Rung 1 — retry the *same* call (execution retry, not self-correction;
+                # different counter, different config, because a 502 and a missing
+                # `query` are not the same animal).
+                while (result.error_kind in TOOL_ERROR_KINDS and result.retryable
+                       and result.rejection_class != POLICY_CLASS
+                       and retries < retry_cap):
+                    retries += 1
+                    result, more = execute_bounded(
+                        registry, call.name, vr.args or {},
+                        tool_timeout_s=timeout_cap, clock=clock)
+                    elapsed_ms += more
+                    if result.error_kind in TOOL_ERROR_KINDS:
+                        failures += 1
+                        timeouts += int(result.error_kind == ERROR_TIMEOUT)
+                # Rung 2 — a sibling *corpus* tool, only with the question's intent
+                # and only if the rung is still budgeted. The substitution is
+                # disclosed (`fallback_from`) — a silent one is F1's disease.
+                fallback: dict[str, Any] | None = None
+                if (result.error_kind in TOOL_ERROR_KINDS
+                        and result.rejection_class != POLICY_CLASS
+                        and fallbacks_used < fallback_cap):
+                    sibling = SIBLING_TOOLS.get(call.name)
+                    if sibling and sibling in registry.names():
+                        allowed = registry.properties(sibling)
+                        s_args = {k: v for k, v in (vr.args or {}).items() if k in allowed}
+                        fb_vr = registry.validate_args(sibling, json.dumps(s_args))
+                        if fb_vr.ok:
+                            fb_result, fb_elapsed = execute_bounded(
+                                registry, sibling, fb_vr.args or {},
+                                tool_timeout_s=timeout_cap, clock=clock)
+                            elapsed_ms += fb_elapsed
+                            fallbacks_used += 1
+                            if fb_result.error_kind in TOOL_ERROR_KINDS:
+                                failures += 1
+                                timeouts += int(fb_result.error_kind == ERROR_TIMEOUT)
+                            fb_result.fallback_from = call.name
+                            result = fb_result
+                            fallback = {"from": call.name, "to": sibling,
+                                        "ok": fb_result.ok}
+                            fallback_log.append({"step": len(steps) + 1, **fallback})
+                if result.rejection_class == POLICY_CLASS and not step_policy:
+                    # A retry/substitution that ended in a policy rejection still
+                    # counts and still stops the run.
+                    policy_hits += 1
+                    step_policy = True
+                if result.error_kind in TOOL_ERROR_KINDS:
+                    step_failures += 1
+                tool_timeouts_total += timeouts
 
-            msg, clamped = _tool_message(call, result, obs_budget)
-            observations.append(msg)
-            row = _call_row(call, vr, result, clamped,
-                            elapsed_ms=elapsed_ms, retries=retries,
-                            fallbacks=1 if fallback else 0, failures=failures,
-                            timeouts=timeouts, fallback=fallback,
-                            fp=fingerprint(call))
-            rows.append(row)
-            executed_rows.append(row)
-            ledger_rows.append(_ledger_row(call, result, clamped))
-            if result.refused:
-                refusals += 1
+                msg, clamped = _tool_message(call, result, obs_budget)
+                observations.append(msg)
+                # Day 23 §7 — the result event links the observation to its step:
+                # ok/refused, the typed error, evidence count, and the wall. The
+                # proposal and its validation above are its siblings.
+                _ev(sspan, "tool_result", name=call.name, ok=result.ok,
+                    refused=result.refused, error_kind=result.error_kind,
+                    rejection_class=result.rejection_class,
+                    evidence=len(result.evidence),
+                    has_data=result.data is not None,
+                    elapsed_ms=round(float(elapsed_ms), 3),
+                    fallback_from=result.fallback_from)
+                row = _call_row(call, vr, result, clamped,
+                                elapsed_ms=elapsed_ms, retries=retries,
+                                fallbacks=1 if fallback else 0, failures=failures,
+                                timeouts=timeouts, fallback=fallback,
+                                fp=fingerprint(call))
+                rows.append(row)
+                executed_rows.append(row)
+                ledger_rows.append(_ledger_row(call, result, clamped))
+                if result.refused:
+                    refusals += 1
 
-        # Observations are appended as `tool` messages, never summarized — the
-        # transcript is the memory, and the wire requires one result per call.
-        transcript.append({"role": "assistant", "content": completion.text or None,
-                           "tool_calls": calls})
-        transcript.extend(observations)
-        step_no = len(steps) + 1
-        row_trace = step_trace(step_no, rows)
-        if deferred and max_tool_calls_per_step is not None:
-            row_trace["truncated"] = True             # calls recorded, not executed
-            row_trace["deferred"] = [c.as_dict() for c in deferred]
-        steps.append(row_trace)
-        signatures.extend(row_trace["fingerprints"])
+            # Observations are appended as `tool` messages, never summarized — the
+            # transcript is the memory, and the wire requires one result per call.
+            transcript.append({"role": "assistant", "content": completion.text or None,
+                               "tool_calls": calls})
+            transcript.extend(observations)
+            row_trace = step_trace(step_no, rows)
+            if deferred and max_tool_calls_per_step is not None:
+                row_trace["truncated"] = True         # calls recorded, not executed
+                row_trace["deferred"] = [c.as_dict() for c in deferred]
+            steps.append(row_trace)
+            signatures.extend(row_trace["fingerprints"])
 
-        # §7 — a policy rejection *stops* the run, before any diagnosis. It is a
-        # wall, not a wall to route around: the model asked for something it may
-        # not have, so self-correction must not apply and the loop must not
-        # invite another attempt. Checked first so a policy hit owns the terminal,
-        # not `no_progress`/`oscillation`/`tool_failure` arriving the same step.
-        if step_policy:
-            termination = "policy"
-            break
+            # §7 — a policy rejection *stops* the run, before any diagnosis. It is a
+            # wall, not a wall to route around: the model asked for something it may
+            # not have, so self-correction must not apply and the loop must not
+            # invite another attempt. Checked first so a policy hit owns the terminal,
+            # not `no_progress`/`oscillation`/`tool_failure` arriving the same step.
+            if step_policy:
+                termination = "policy"
+                break
 
-        # §4 — diagnose *before* the cap. Repeat first (stricter/faster), then a
-        # short cycle; both name the disease the cap could only call max_steps.
-        if detect_repeat(signatures):
-            no_progress_at_step = step_no
-            termination = "no_progress"
-            break
-        if detect_oscillation(signatures, window):
-            oscillation_detected = True
-            termination = "oscillation"
-            break
-        # §6 rung 4 — every call this step failed as a tool error and the ladder
-        # is spent: stop honestly, surfacing what evidence existed.
-        if calls and step_failures == len(calls):
-            termination = "tool_failure"
-            break
-        if cost_cap is not None and _run_cost(gateway.ledger, ledger_start) >= cost_cap:
-            termination = "budget"                      # exit 3
-            break
-        if rejections > correct_cap:
-            gave_up = True
-            termination = "gave_up"
-            break
+            # §4 — diagnose *before* the cap. Repeat first (stricter/faster), then a
+            # short cycle; both name the disease the cap could only call max_steps.
+            if detect_repeat(signatures):
+                no_progress_at_step = step_no
+                termination = "no_progress"
+                break
+            if detect_oscillation(signatures, window):
+                oscillation_detected = True
+                termination = "oscillation"
+                break
+            # §6 rung 4 — every call this step failed as a tool error and the ladder
+            # is spent: stop honestly, surfacing what evidence existed.
+            if calls and step_failures == len(calls):
+                termination = "tool_failure"
+                break
+            if cost_cap is not None and _run_cost(gateway.ledger, ledger_start) >= cost_cap:
+                termination = "budget"                  # exit 3
+                break
+            if rejections > correct_cap:
+                gave_up = True
+                termination = "gave_up"
+                break
 
     if termination != "answer":
         note = {"role": "system", "content": TERMINATION_NOTE[termination]}
+        # Day 23 §7 — the forced final turn is a real chat call and is traced
+        # like any other; its prompt is the termination note's own PromptRef.
         final = gateway.chat(transcript + [note], temperature=temperature,
-                             max_tokens=max_tokens)
+                             max_tokens=max_tokens, operation="chat",
+                             prompt_ref=TERMINATION_PROMPT_REFS.get(termination))
         answer_text = final.text
 
     mentioned = mentioned_ids(answer_text)
@@ -992,6 +1059,25 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
         result["episodic_indexed"] = True
     else:
         result["episodic_indexed"] = False
+
+    # Day 23 §7 — the final-answer event: status, answer hash/size, citations,
+    # termination, grounding flags, and the run's ledger cost. The response
+    # itself already exists at the caller; the metadata trace proves *which*
+    # bytes of it were returned without storing the prose. The root closes once,
+    # here, and only if this loop minted it (a nested loop never closes an
+    # outer request's root).
+    tr.add_event("final_answer", termination=termination,
+                 answer_sha256=obs.sha256_text(answer_text),
+                 answer_chars=len(answer_text), citations=len(mentioned),
+                 fabricated=bool(grounding["fabricated"]),
+                 cited_subset_retrieved=bool(grounding["cited_subset_retrieved"]),
+                 refused=refused_all, steps=len(steps),
+                 tool_calls=len(all_calls), failure_kind=failure_kind,
+                 cost_usd=round(_run_cost(gateway.ledger, ledger_start), 8))
+    if getattr(tr, "recording", False):
+        result["trace_id"] = tr.trace_id
+    if own_trace:
+        obs.finish_trace(tr)
     return result
 
 
