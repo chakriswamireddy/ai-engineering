@@ -19,6 +19,17 @@ all written **before any run**, where
   is an **integrity failure**, not a run (V1/V8). Day 7's "pre-registration is the
   line between a report and curve-fitting" becomes `assert hash == pinned_hash`.
 
+Day 21 adds two optional fields to the row, both under the same hash:
+
+- `relevant_also` — docs known to be *on-topic but not required*, minted from
+  corpus structure (never from retrieval output) so `precision@K` is membership
+  arithmetic over `expected ∪ relevant_also`. It is disjoint from
+  `expected_evidence` by construction (a relevant doc is not a required one);
+  absent/empty ⇒ the precision cell is `n/a`, never `0.0`.
+- `human_review` — the boundary where every deterministic cell may pass and the
+  fact must still call the reader (the corpus-can-be-wrong seam): the RAG bench
+  marks such a row's verdict `PENDING-human` by design.
+
 This module is `MECH`: pure parsing, set membership, and arithmetic — 0 chats,
 0 embeds. The runner that presents rows to production is `tools/eval_harness.py`;
 the grader is `ai_os/judge.py`.
@@ -66,6 +77,15 @@ KINDS = (AGENT_KIND, JUDGE_HUNTING_KIND)
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 _STEM_LEN = 4
+# The inflectional slack the stem may absorb (plural, tense, gerund: `-s`, `-ed`,
+# `-ing`). The bound is load-bearing, not cosmetic: `checkout` and `checkoutCreate`
+# share their first four chars, so a bare 4-char stem lets a page that only says
+# "checkout" license a claim about `checkoutCreate` — exactly the R5/K1 fixture
+# (a citation that is real and in-context yet does not support the claim). Six
+# chars apart, the two never collapse; `created`/`create` (one apart) still fold.
+_MAX_INFLECTION = 3
+
+
 class DatasetError(Exception):
     """A malformed golden row: the entry, not the pipeline, owns the failure."""
 
@@ -94,17 +114,25 @@ def discriminative_tokens(text: str) -> list[str]:
 def _licensed(claim_token: str, evidence_tokens: Iterable[str]) -> bool:
     """Is a claim term licensed by an evidence term — the same word or a light
     inflection of it?
+
+    Same 4-char stem *and* within `_MAX_INFLECTION` chars of the claim term, so
+    `created`/`create` fold but `checkout` never licenses `checkoutCreate` (the
+    R5/K1 support fixture: a citation can be real and wrong).
     """
     stem = _stem(claim_token)
-    return any(_stem(w) == stem for w in evidence_tokens)
+    return any(_stem(w) == stem and abs(len(w) - len(claim_token)) <= _MAX_INFLECTION
+               for w in evidence_tokens)
 
 
 def claim_derivable(claim: str, evidence_texts: Iterable[str]) -> bool:
     """`MECH`: is every content term of `claim` present in the evidence text?
 
     Stem matching absorbs the plurals/inflections the series' tokenizers already
-    fold elsewhere. A claim with no discriminative term (all stopwords / short
-    words) is trivially derivable.
+    fold elsewhere, but the length guard stops it collapsing *distinct compound
+    identifiers* (`checkout` vs `checkoutCreate`) onto one another — so a claim's
+    content term must genuinely be carried by the evidence, not merely share a
+    prefix with a shorter one. A claim with no discriminative term (all stopwords
+    / short words) is trivially derivable.
     """
     toks = discriminative_tokens(claim)
     if not toks:
@@ -168,6 +196,11 @@ def normalize_row(raw: dict[str, Any], registered_at: str) -> dict[str, Any]:
     tools = [str(t) for t in _as_list(raw.get("expected_tools"), "expected_tools", rid)]
     must_not = [str(m) for m in _as_list(raw.get("must_not"), "must_not", rid)]
     must_refuse = bool(raw.get("must_refuse") or False)
+    # Day 21 — the relevance oracle (precision@K) and the human-review boundary.
+    relevant_also = [str(e) for e in _as_list(raw.get("relevant_also"),
+                                              "relevant_also", rid)]
+    human_review = bool(raw.get("human_review") or False)
+    semantic_fail = bool(raw.get("semantic_fail") or False)
 
     failure_category = raw.get("failure_category", None)
     if isinstance(failure_category, str):
@@ -192,6 +225,9 @@ def normalize_row(raw: dict[str, Any], registered_at: str) -> dict[str, Any]:
         "fix": raw.get("fix"),
         "must_not": must_not,
         "must_refuse": must_refuse,
+        "relevant_also": relevant_also,
+        "human_review": human_review,
+        "semantic_fail": semantic_fail,
         "registered_at": registered_at,
     }
     if kind == JUDGE_HUNTING_KIND:
@@ -237,10 +273,29 @@ def validate_row(row: dict[str, Any], *, corpus_text: dict[str, str] | None = No
         if bad in row["expected_evidence"]:
             errors.append(f"{rid}: {bad!r} is both expected and must_not")
 
+    # Day 21 — the relevance oracle's own discipline (precision@K's premise).
+    relevant = list(row.get("relevant_also") or [])
+    if relevant and row["kind"] == JUDGE_HUNTING_KIND:
+        errors.append(f"{rid}: judge-hunting rows carry no relevance set "
+                      "(precision is n/a — relevance is the trap)")
+    overlap = sorted(set(relevant) & set(row["expected_evidence"]))
+    if overlap:
+        errors.append(f"{rid}: relevant_also overlaps the required set "
+                      f"{overlap} (a relevant doc is not a required one)")
+    contradiction = sorted(set(relevant) & set(row["must_not"]))
+    if contradiction:
+        errors.append(f"{rid}: {contradiction} is both relevant_also and must_not")
+    if row.get("semantic_fail") and row["kind"] != JUDGE_HUNTING_KIND:
+        errors.append(f"{rid}: semantic_fail is only meaningful on a judge-hunting "
+                      "row (a deterministic row's verdict is layer 1's)")
+
     if corpus_text is not None:
         missing = [e for e in row["expected_evidence"] if e not in corpus_text]
         if missing:
             errors.append(f"{rid}: expected evidence not in the corpus: {missing}")
+        rel_missing = [e for e in relevant if e not in corpus_text]
+        if rel_missing:
+            errors.append(f"{rid}: relevant_also not in the corpus: {rel_missing}")
         texts = [corpus_text[e] for e in row["expected_evidence"] if e in corpus_text]
         if row["must_refuse"]:
             texts = []  # a refusal row's claims are about behaviour, not facts

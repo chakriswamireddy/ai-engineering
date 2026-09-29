@@ -16,7 +16,15 @@
 # Run:  python tools/retrieval_day10.py --stub     (offline mechanics)
 #       python tools/retrieval_day10.py --store data/code_store.json
 
-tau: 0.55          # carried from Day 7; the code corpus recalibrates it (Day 21)
+# Day 21 §7 — the code corpus's real calibration is BLOCKED on Day 10's build:
+# the full Saleor code store is Cloudflare-quota-limited (≈16k of 29,156 symbols
+# embedded), so there is no real fused top-1 separation to fit. On the stub the
+# separation is +0.250 — a demo, not a calibration. Until the real store lands the
+# gate keeps Day 7's carried value and the refusal verdict is the semantic tier.
+# Re-run once data/code_store.json exists:
+#   python tools/bench_rag.py --real --source code --code-store data/code_store.json --tau-sweep
+tau: 0.55
+refusal: semantic  # PENDING the real code-store calibration (Day 10's quota-blocked build)
 budget_chars: 4000 # code bodies are long; the symbol is the unit, bodies cited
 
 questions:

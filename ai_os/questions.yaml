@@ -8,9 +8,10 @@
 #              from the corpus structure, not from retrieval output)
 #   must_not   the WRONG sense a one-hot query might retrieve instead (Family C)
 #   must_refuse  E-family: no page answers it; correct behaviour is refusal
-#   tau        similarity gate for a must_refuse question. PLACEHOLDER — to be
-#              CALIBRATED (PENDING) from the top-1 score separation between
-#              Family A (known answerable) and Family E (known unanswerable).
+#   tau        similarity gate for a must_refuse question. CALIBRATED Day 21
+#              (§7): the top-1 score separation between Family A (answerable)
+#              and Family E (unanswerable) is measured on the real store by
+#              `python tools/bench_rag.py --real --tau-sweep` — see below.
 #   predicted  the hypothesis this question is expected to indict, from the
 #              Day 7 notes §5 table — written to be confirmed or killed.
 #   fix        the fix the predicted class routes to (Day 8/9's backlog).
@@ -19,7 +20,17 @@
 #       python tools/rag_debug.py             (real store + gateway; chat
 #                                              skipped when quota is spent)
 
-tau: 0.55          # to be calibrated, not trusted: see day-7-notes.md §6
+# Day 21 §7 — the calibration, on the real store (11,061 Saleor chunks,
+# bge-base-en-v1.5, k=9), replacing Day 7's "to be calibrated, not trusted":
+#   answerable fused top-1 (A/B/C/D): 0.794 … 0.853   (min 0.794)
+#   E-family fused top-1 (E1/E2):     0.775, 0.783    (max 0.783)
+#   separation = min-answerable − max-E = +0.011  →  τ = 0.794 refuses both E,
+#   0 leaks. The margin is thin (0.011 over two E samples), so the fitted gate
+#   ships while the DURABLE refusal verdict stays the semantic tier: an answer
+#   whose claims trace to no shown evidence is refused by code, never fabricated.
+#   Re-run: python tools/bench_rag.py --real --store data/store.json --tau-sweep
+tau: 0.794
+refusal: semantic  # the durable refusal signal (R8); the score gate is the fast path
 budget_chars: 1200
 
 questions:

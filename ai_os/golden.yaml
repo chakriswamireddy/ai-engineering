@@ -16,6 +16,22 @@
 #   failure_category   — the expected outcome shape: null (answered), "refusal"
 #                       (out-of-corpus), or a Day 13 failure_kind
 #
+# Day 21's added fields (also hash-pinned):
+#   relevant_also   — docs known to be *on-topic but not required*, minted from
+#                     corpus structure under the same oracle discipline as
+#                     expected_evidence, so Precision@K is membership arithmetic
+#                     over `expected ∪ relevant_also`. Disjoint from the required
+#                     set by construction. Absent ⇒ precision is `n/a` (E-family;
+#                     judge-hunting rows — relevance is the trap).
+#   human_review    — the corpus-can-be-wrong boundary: every deterministic cell
+#                     may pass and the fact must still call the reader. The RAG
+#                     bench marks the verdict `PENDING-human` by design (I1).
+#   semantic_fail   — a judge-hunting row whose rejection is a *semantic* cell
+#                     (Day 21's citation-support), not a deterministic one. Layer 1
+#                     correctly passes it — `cited ⊆ retrieved` holds — so the
+#                     deterministic harness must not expect layer 1 to reject it;
+#                     the RAG bench issues the verdict (K1).
+#
 # `predicted`/`fix` ride along from Day 7/10 so a failing row still names its
 # owner. `must_not` is the wrong sense that must not be retrieved (Family C).
 #
@@ -32,7 +48,7 @@
 
 dataset_version: 1
 registered_at: "2026-09-28"
-dataset_hash: "94d343ad20c94dabaad03e9ec89036fe58c486040d8d39dde4bc0ae23377a1f4"
+dataset_hash: "a936c02e032b4c1edfbba5d25a38bbd9ee254203ab6fb9c57fb6ed687598909e"
 
 rows:
   # ------------------------------------------------- the doc nine (A–E), verbatim
@@ -42,6 +58,9 @@ rows:
     family: "A — obvious (control)"
     question: "What is a checkout in Saleor?"
     expected_evidence: ["quickstart/api#create-a-checkout"]
+    relevant_also:
+      - "developer/checkout/api-guide#creating-a-checkout-session"
+      - "developer/checkout/lifecycle#completing-checkout"
     expected_answer:
       claims:
         - "a checkout is created with checkoutCreate"
@@ -63,6 +82,9 @@ rows:
       - "quickstart/api#create-a-checkout"
       - "developer/checkout/lifecycle#completing-checkout"
       - "developer/order/overview#lifecycle"
+    relevant_also:
+      - "developer/checkout/api-guide#completing-checkout"
+      - "developer/checkout/api-guide#creating-a-checkout-session"
     expected_answer:
       claims:
         - "checkoutComplete turns a checkout into an order"
@@ -83,6 +105,9 @@ rows:
     expected_evidence:
       - "developer/checkout/api-guide#completing-checkout"
       - "developer/checkout/lifecycle#completing-checkout"
+    relevant_also:
+      - "quickstart/api#create-a-checkout"
+      - "developer/order/overview#lifecycle"
     expected_answer:
       claims:
         - "checkoutComplete returns the created order"
@@ -140,6 +165,10 @@ rows:
     family: "D — similar documents"
     question: "How do I complete a checkout?"
     expected_evidence: ["developer/checkout/api-guide#completing-checkout"]
+    relevant_also:
+      - "developer/checkout/lifecycle#completing-checkout"
+      - "developer/checkout/api-guide#creating-a-checkout-session"
+      - "quickstart/api#create-a-checkout"
     expected_answer:
       claims:
         - "call checkoutComplete on the checkout"
@@ -160,6 +189,9 @@ rows:
     expected_evidence:
       - "quickstart/api#create-a-checkout"
       - "developer/checkout/api-guide#creating-a-checkout-session"
+    relevant_also:
+      - "developer/checkout/api-guide#completing-checkout"
+      - "developer/checkout/lifecycle#completing-checkout"
     expected_answer:
       claims:
         - "a checkout session starts with checkoutCreate"
@@ -215,6 +247,8 @@ rows:
     expected_evidence:
       - "saleor/checkout/complete_checkout.py#complete_checkout"
       - "saleor/graphql/checkout/mutations/checkout_complete.py#CheckoutComplete"
+    relevant_also:
+      - "saleor/checkout/complete_checkout.py#create_order_from_checkout"
     expected_answer:
       claims:
         - "complete_checkout validates, charges the payment, and creates the order"
@@ -234,6 +268,8 @@ rows:
     question: "What happens between checkout completion and order creation?"
     expected_evidence:
       - "saleor/checkout/complete_checkout.py#create_order_from_checkout"
+    relevant_also:
+      - "saleor/checkout/complete_checkout.py#complete_checkout"
     expected_answer:
       claims:
         - "create_order_from_checkout creates an Order from a completed Checkout"
@@ -253,6 +289,8 @@ rows:
     expected_evidence:
       - "saleor/payment/gateway.py#process_payment"
       - "saleor/webhook/event_types.py#WebhookEventAsyncType"
+    relevant_also:
+      - "saleor/checkout/complete_checkout.py#complete_checkout"
     expected_answer:
       claims:
         - "process_payment fires the success webhook when the payment succeeds"
@@ -293,6 +331,8 @@ rows:
     question: "Show the test that exercises checkout completion."
     expected_evidence:
       - "saleor/checkout/tests/test_checkout_complete.py#test_complete_checkout_when_checkout_doesnt_exists"
+    relevant_also:
+      - "saleor/checkout/factories.py#CheckoutFactory"
     expected_answer:
       claims:
         - "test that completing a missing checkout does not create an order"
@@ -386,3 +426,74 @@ rows:
       answer: "A checkout is created with checkoutCreate and requires a Saleor Cloud paid plan (quickstart/api#create-a-checkout)."
       citations: ["quickstart/api#create-a-checkout"]
       evidence: ["quickstart/api#create-a-checkout"]
+
+  # ------------------- Day 21's adversarial rows (I1/J1/K1 — the semantic tier)
+  - id: I1
+    kind: judge_hunting
+    source: judge-hunting
+    family: "judge-hunting — corpus can be wrong (contradiction)"
+    question: "How does a checkout become an order?"
+    expected_evidence: ["developer/checkout/lifecycle#completing-checkout"]
+    expected_answer:
+      claims:
+        - "checkoutComplete turns a checkout into an order"
+      must_not_assert: []
+    expected_tools: []
+    failure_category: null
+    predicted: "every citation cell passes and the fact is still wrong — the page contradicts itself"
+    fix: "the boundary where evaluation must call the reader human (PENDING-human)"
+    must_not: []
+    must_refuse: false
+    human_review: true
+    probe:
+      answer: "checkoutComplete turns a checkout into an order (developer/checkout/lifecycle#completing-checkout)."
+      citations: ["developer/checkout/lifecycle#completing-checkout"]
+      evidence: ["developer/checkout/lifecycle#completing-checkout"]
+
+  - id: J1
+    kind: judge_hunting
+    source: judge-hunting
+    family: "judge-hunting — claim leak (must_not_assert)"
+    question: "What is a checkout in Saleor?"
+    expected_evidence: ["quickstart/api#create-a-checkout"]
+    expected_answer:
+      claims:
+        - "a checkout is created with checkoutCreate"
+      must_not_assert:
+        - "a checkout is deleted with checkoutRemove"
+    expected_tools: []
+    failure_category: null
+    predicted: "an answer that asserts a forbidden claim — a coverage failure of class forbidden"
+    fix: "the answer-relevance cell rejects it — a must_not hit is a category error (R7)"
+    must_not: []
+    must_refuse: false
+    probe:
+      answer: "A checkout is created with checkoutCreate and a checkout is deleted with checkoutRemove (quickstart/api#create-a-checkout)."
+      citations: ["quickstart/api#create-a-checkout"]
+      evidence: ["quickstart/api#create-a-checkout"]
+
+  - id: K1
+    kind: judge_hunting
+    source: judge-hunting
+    family: "judge-hunting — near-miss quote (citation support)"
+    question: "What is a checkout in Saleor?"
+    expected_evidence:
+      - "quickstart/api#create-a-checkout"
+      - "developer/order/overview#lifecycle"
+    expected_answer:
+      claims:
+        - "a checkout is created with checkoutCreate"
+      must_not_assert: []
+    expected_tools: []
+    failure_category: null
+    predicted: "a citation that is in-context but does not support the claim — a citation can be real and wrong"
+    fix: "the semantic citation-support cell rejects it while `cited ⊆ retrieved` passes (R5)"
+    must_not: []
+    must_refuse: false
+    semantic_fail: true
+    probe:
+      answer: "A checkout is created with checkoutCreate (developer/order/overview#lifecycle)."
+      citations: ["developer/order/overview#lifecycle"]
+      evidence:
+        - "quickstart/api#create-a-checkout"
+        - "developer/order/overview#lifecycle"

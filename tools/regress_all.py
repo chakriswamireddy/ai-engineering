@@ -26,7 +26,8 @@ Three layers, all `MECH` (0 chats, 0 embeds — the stub stores are embedded off
 2. **The day suites, replayed as subprocesses** — `test_day7.py` … `test_day10.py`
    and `tools/{tool,agent,failure,data,sql_attack,plan,state,memory,architecture}_smoke.py`
    (T1–T7 · A1–A8 · F1–F9 · Q1–Q8 · X1–X11 · P1–P9 · S1–S9 · M1–M9 · G1–G9) plus
-   each required to exit 0, its failing rows echoed when it does not.
+   `tools/bench_rag.py --fixtures` (Day 21's R1–R9: the properties of measurement
+   itself), each required to exit 0, its failing rows echoed when it does not.
 3. **The golden rows** — `tools/eval_harness.py --stub` (the doc nine + code six +
    the judge-hunting F/G/H), required to come back 18/18.
 
@@ -51,7 +52,7 @@ FAILS = 0
 
 # The day suites, each mapping to the fixture families it owns. The label is the
 # row set the suite is the home of; the gate's job is that each still exits 0.
-# `(label, script, argv)`.
+# `(label, script, argv)` — the Day 21 bench is the one suite that needs a flag.
 SUITES: list[tuple[str, str, list[str]]] = [
     ("Day 7 decision tree (MECH)", "test_day7.py", []),
     ("Day 8 retrieval (A–E)", "test_day8.py", []),
@@ -66,6 +67,7 @@ SUITES: list[tuple[str, str, list[str]]] = [
     ("S1–S9 state", "tools/state_smoke.py", []),
     ("M1–M9 memory", "tools/memory_smoke.py", []),
     ("G1–G9 architecture", "tools/architecture_smoke.py", []),
+    ("R1–R9 RAG bench", "tools/bench_rag.py", ["--fixtures"]),
 ]
 
 # The family replay (Day 8/9 retriever over the fixtures.py question sets) and
