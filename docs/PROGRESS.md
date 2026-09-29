@@ -1,4 +1,4 @@
-# Progress — ai-layer (Days 2–19)
+# Progress — ai-layer (Days 2–20)
 
 > Live status of what is implemented, verified, and still open in this repo.
 > Kept up to date as days are worked; the canonical per-day detail lives in
@@ -37,6 +37,7 @@ Updated: 2026-09-29
 | 17 | Memory and State | PARTIAL (all MECH green offline; S1–S9 with **`recalled ⊆ authored = ok` on every row that recalls** + the **S9 control** (state off ≡ Days 12–16); the file-backed **store** (provenance-mandatory, **closed** to non-authored writes, expiry-acts-absent, first-class `forget` + compaction, the size cap), **resume across a process** (a new interpreter continues at *k+1*, the completed step not re-run — safe because the tools are read-only), byte-identical **serialization/replay**, and the **context-keyed boundary**; episodic recall + semantic distillation `PENDING` Day 18/21) | `ai_os/state.py` (the store), `ai_os/agent.py` (conversation state), `ai_os/executor.py` (task state + resume), `ai_os/trace.py` (state columns + `recalled_subset_authored`), `tools/state_smoke.py` (new), `docs/concepts/state-memory.md`, `docs/evaluations/state-day17.md` |
 | 18 | Persistent Memory | PARTIAL (all MECH green offline; M1–M9 with **`recalled ⊆ authored = ok` on every row that recalls** **and** **`authored ⊆ grounded = ok` on every row that mints** (M3's three rejection rows prove the minter *cannot* lie) + the **M8 control** (memory off ≡ Days 12–17, and memory on over an empty store ≡ too); **relevance-scored episodic recall** (Day 8/9's scorer over stored signatures — the *matching* investigation above the newest, 0 chats/0 embeds), the **distiller** (one guarded chat → `{claim, source_episodes, strength, ttl, created_by}`, minted only under **sample-size ≥ 2 · `authored ⊆ grounded` · no source contradiction · no principal names**), **semantic expiry** (a concept below its strength τ acts absent **before** its TTL; the clock is the backstop) with the **re-prompt loop** (re-distill · decay · retire), **`forget` re-grounding** every concept citing a deleted episode (re-ground or retire), the **preference data table** (`kind=preference`, never distilled, principal-keyed), and the **"only if useful" meter** (recall 0 chats vs a fresh investigation's ≥1); real-model distillation quality + the real "useful?" verdict `PENDING` Day 21) | `ai_os/memory.py` (new), `ai_os/distill.py` (new), `ai_os/state.py` (`strength`/`recall_threshold`/`touch` + `forget` re-grounding + the `distiller` author + the memory shelves), `ai_os/agent.py` (the recall pre-step + preferences), `ai_os/trace.py` (memory columns), `tools/mock_gateway.py` (`answer_d18_*`), `tools/memory_smoke.py` (new), `docs/concepts/memory.md`, `docs/evaluations/memory-day18.md` |
 | 19 | Multi-Agent Architecture | PARTIAL (all MECH green offline; G1–G9 with **`delegated ⊆ returned = ok` on every B row**, **per-hop leaks == 0**, and the **G9 control** (machinery off ≡ Days 12–18); **Topology A** = Days 12–18 + the **role-context router** (a rule table, 0 chats, overridable, neutral under `ROLE_CONTEXT_ROUTING=0`); **Topology B** = a **delegation loop** whose tools are `make_agent(role)` specialists (the existing loop with a **tool-list slice**; out-of-role = a `role_violation` **policy** stop) sharing **Day 18's store**; the **receipt contract** (only a `{task_id, evidence, conclusion, provenance}` record crosses the seam; a paraphrase/ghost delegation is **rejected by code** — the Chinese-whispers injection caught), **bounded delegation** (`MAX_DELEGATIONS` · `HANDOFF_TIMEOUT` · `DELEGATION_RETRY=1`, a *refused* hop never retried), **failure as a return value** (`failed(error:…)`/`failed(timeout)` receipts; other delegations survive; never fabricated), the **union-context cost ledger** (`specialist + orchestrator tokens`), and the **shared-store write policy** (specialists write episodes under their own principal+role; the orchestrator writes **only** `kind=orchestration`); under the stub the two-surface split **ties A on coverage and costs more**, so the table forces **`justified architecture = SINGLE`**; real-model delegation quality + context-isolation price `PENDING` Day 21/22) | `ai_os/receipt.py` (new), `ai_os/orchestrator.py` (new), `ai_os/agent.py` (`make_agent`/`RoleAgent`/`route_question`/`detect_surfaces` + `routed_to`/`role` + the validation-seam policy stop), `ai_os/tools.py` (`ToolRegistry.scope`/`denied` + `ERROR_ROLE`), `ai_os/memory.py` (`remember_episode(role=…)` + `write_orchestration`), `ai_os/state.py` (`ORCHESTRATION_KIND` + the `orchestrator` author), `ai_os/trace.py` (topology columns), `tools/mock_gateway.py` (`tc_d19_*`/`answer_d19_*`), `tools/architecture_smoke.py` (new), `docs/concepts/multi-agent.md`, `docs/evaluations/architecture-day19.md` |
+| 20 | Evaluation Fundamentals | PARTIAL (all MECH green offline; **V1–V9** with the golden-set validator + oracle-derivability (**a patched row refused by the hash before grading** — pre-registration in code), **byte-identical verdict rows** (the judge has no hidden sampling), the **judge-hunting rows F/G/H each failing their deterministic check** (fluency buys no pass), **model-lane drift recorded** with `deterministic_verdict` never flippable, the **regression gate** (`regress_all.py` — doc nine 9/9 + code six 6/6 + every day suite Days 7–19 + the golden rows, exactly as green), the **coverage rule** (doc nine + code six + F/G/H + E-family refusals, all five fields), the **zero-screentime report**, the **pre-registration flag** (a run before its row's registration), and the **V9 control** (harness off ≡ production, byte-for-byte); the judge is layered — layer 1 deterministic (0 chats), layer 2 semantic `PENDING` (Day 21 RAG / Day 22 agent), layer 3 LLM-as-judge **off by default** (explains, never decides); **`judged ⊆ pre-registered`** by construction; semantic verdicts `PENDING` a real run) | `ai_os/eval_dataset.py` (new), `ai_os/golden.yaml` (new), `tools/eval_harness.py` (new; the router + V1–V9), `ai_os/judge.py` (new), `tools/regress_all.py` (new), `docs/concepts/evaluation.md`, `docs/evaluations/eval-day20.md` |
 
 ---
 
@@ -992,16 +993,88 @@ series already built. Concept + evaluation: `docs/concepts/multi-agent.md`,
   observability (Day 24's distributed trace) are *named, not built*. Re-verify with
   `python tools/architecture_smoke.py`.
 
+## Day 20 — Evaluation Fundamentals `PARTIAL`
+
+Days 7–19 each graded themselves **by hand** — a human built the fixture, read the
+table, and said "green." Day 20 is the curriculum's smallest sentence and the one
+everything else was aiming at: **"stop judging AI quality manually."** It builds the
+**first evaluation harness** — a golden dataset, a judge, and a regression gate —
+over the pre-registration the series has sworn by since Day 7. Concept + evaluation:
+`docs/concepts/evaluation.md`, `docs/evaluations/eval-day20.md`.
+
+- `ai_os/eval_dataset.py` (new) — the **five-field, hash-pinned golden row**:
+  `question · expected_evidence · expected_answer · expected_tools · failure_category`.
+  `expected_answer` is **not** a model-voice paragraph but `{claims[],
+  must_not_assert[]}`, and it is **oracle-derivable**: every content term of a claim
+  must appear in the row's expected evidence, or the row is **malformed** and rejected
+  (a token-grounded analogue of Day 18's `authored ⊆ grounded`). `expected_tools` are
+  checked against the Day 11 registry / Day 19 role table; `registered_at` + a
+  **content hash** pin the pre-registration; `load_golden` **refuses to grade under a
+  stale hash** (`IntegrityError`), and `rows_registered_before` **flags** a run that
+  started before its row's registration. `check_against_sources` keeps the doc/code
+  rows verbatim from `questions.yaml`/`code_questions.yaml`.
+- `ai_os/golden.yaml` (new) — the seed set: the doc nine (A–E) + code six (CA1–CE1)
+  verbatim, plus the **judge-hunting** rows **F** (fluent but wrong), **G** (fabricated
+  citation), **H** (citation-present, answer-unsupported), and the E-family refusals —
+  18 rows, all five fields filled pre-run, hash-pinned.
+- `tools/eval_harness.py` (new) — the **router**: presents each golden question to
+  production exactly as a user would (stub/real, memory on-off, topology) and returns
+  `{question, trace, ledger, config}` **without touching answer-path code**; refuses to
+  grade under a stale hash (V1/V8). Also hosts the **V1–V9** evaluation set
+  (`--fixtures`).
+- `ai_os/judge.py` (new) — the **layered grader**. Layer 1 is deterministic (`MECH`,
+  0 chats): `expected ⊆ retrieved` (+ recall@K/MRR), `cited ⊆ retrieved`, `conclusion ⊆
+  evidence` (claim coverage + `must_not_assert`), `tool == expected_tools`, `must_not`,
+  `refusal == expected`, `failure == category`, cost, latency — each failing check
+  naming **one owner**. Layer 2 is the semantic **slot**
+  (`citation_correctness`/`answer_relevance`/`groundedness`) left `PENDING` with owners
+  (Day 21 RAG / Day 22 agent). Layer 3 is the optional **LLM-as-judge** lane behind
+  `EVAL_JUDGE=deterministic|model|none`, **off by default** — it may *explain* a
+  `pending`, never *decide* one; `deterministic_verdict` is only ever set by layer 1.
+- `tools/regress_all.py` (new) — **Rule 2's ratchet as a command**: the doc nine
+  (A1–E2) and code six (CA1–CE1) walked through the Day-8/9 retriever, every day suite
+  (`test_day7.py`…`test_day10.py`, `tools/*_smoke.py` — T1–T7 · A1–A8 · F1–F9 · Q1–Q8 ·
+  X1–X11 · P1–P9 · S1–S9 · M1–M9 · G1–G9), and the golden rows — each required to come
+  back **exactly as green**.
+- **ALL DAY 20 (V1–V9) CHECKS PASSED** (14 fixture checks + the golden table):
+  V1 the integrity check + its **patched-row refusal** (pre-registration in code);
+  V2 **byte-identical verdict rows** (the judge has no hidden sampling); V3 the
+  judge-hunting **F/G/H + a confident out-of-corpus row each fail** their deterministic
+  check (fluency buys no pass); V4 **model-lane drift recorded** while
+  `deterministic_verdict` never flips; V5 the **regression gate** exactly as green;
+  V6 coverage; V7 the **zero-screentime** report; V8 the **pre-registration flag**;
+  V9 the **control**.
+- **Headline invariant: `judged ⊆ pre-registered`** — a check with no expectation to
+  read is `n/a`, never failed, so no verdict is issued where the pre-registration was
+  silent. **V9 is the control**: the harness, installed and unused, changes nothing
+  (byte-identical traces; no store grows) — the judge is **not a fixer** (P9/S9/M8/G9
+  on the measurement surface).
+- **No regression:** Day 20 is **additive** — a new dataset, a new judge, a new
+  harness, and a new gate; the only edit to existing code is the additive
+  `rows_registered_before` helper. Days 7–19's suites stay green (the gate re-runs
+  them all).
+- **Cost shape:** the entire evaluation court is **0 chats, 0 embeds** — the dataset is
+  YAML, the judge is membership/arithmetic, and the gate asserts; the only bill is the
+  optional, off-by-default model lane (1 chat per graded semantic cell).
+- `PENDING`: whether the *answers* are actually good — citation correctness in meaning,
+  answer relevance, groundedness beyond set membership — is **Day 21's** RAG benchmark;
+  whether the *agent* behaves well (steps, tool-selection, unnecessary calls, recovery,
+  cost, latency) is **Day 22's** agent benchmark. Re-verify with
+  `python tools/eval_harness.py --fixtures` and `python tools/regress_all.py`.
+
+---
+
 ---
 
 ## Known gaps (what blocks "everything green for real")
 
 1. **Git:** Days 2–17 are committed (HEAD `e1c796f`, the Day-17 rollup); **Days
-   18–19** are implemented and green but **uncommitted** — they land on top as
+   18–20** are implemented and green but **uncommitted** — they land on top as
    grouped `feat` / `test` / `docs` commits. The concept/eval docs run through
-   Day 19 (`docs/concepts/memory.md` · `memory-day18.md`,
-   `docs/concepts/multi-agent.md` · `architecture-day19.md`), and Days 21–27's
-   plan/notes docs sit untracked.
+   Day 20 (`docs/concepts/memory.md` · `memory-day18.md`,
+   `docs/concepts/multi-agent.md` · `architecture-day19.md`,
+   `docs/concepts/evaluation.md` · `eval-day20.md`), and Days 21–27's plan/notes
+   docs sit untracked.
 2. **Chat quota / rate limits:** live chat now works via OpenRouter free models
    (`nex-agi/nex-n2.5-pro:free`, daily free cap ~50 req); embeddings via
    Cloudflare, free tier. Full semantic sweeps stay budgeted, not assumed.
@@ -1186,6 +1259,25 @@ series already built. Concept + evaluation: `docs/concepts/multi-agent.md`,
     guard carries), owned by **Day 21**. Re-verify with
     `python tools/architecture_smoke.py`.
 
+16. **Day 20 semantics** — the MECH half is green (`tools/eval_harness.py --fixtures`;
+    V1–V9 with **a patched golden row refused by the hash before grading**, **byte-identical
+    verdict rows**, the judge-hunting **F/G/H + a confident out-of-corpus row each failing
+    their deterministic check**, **model-lane drift recorded** while `deterministic_verdict`
+    never flips, the **regression gate** (`python tools/regress_all.py`: doc nine 9/9 + code
+    six 6/6 + every day suite Days 7–19 + the golden rows, exactly as green), the **coverage
+    rule**, the **zero-screentime report**, the **pre-registration flag**, and the **V9
+    control**). Still `PENDING`: (a) whether the *answers* are actually **good** — citation
+    correctness in meaning, answer relevance, groundedness beyond set membership — is
+    **Day 21's** RAG benchmark on this judge; (b) **agent behavior** (steps, tool-selection,
+    unnecessary calls, recovery, cost, latency) is **Day 22's** agent benchmark; (c)
+    **observability** of the very pipeline being graded is **Day 23's** trace; (d)
+    **judge poisoning** (answers tuned to pass the grader) is **Day 25's** security seam;
+    (e) `conclusion ⊆ evidence` is **term-shaped** — a prose assertion that paraphrases
+    beyond its evidence without hitting a `must_not_assert` term is not caught (the same
+    honest limit Day 12's fabrication guard carries); (f) a **rotating held-out slice**
+    (the golden set is the fixed battleship) is a day-30 concern, *named not built*.
+    Re-verify with `python tools/eval_harness.py --fixtures`.
+
 ## How to re-verify, in one line
 
 ```bash
@@ -1211,6 +1303,10 @@ python tools/state_smoke.py             # day 17 S1–S9 (the store · provenanc
 python tools/memory_smoke.py            # day 18 M1–M9 (scored episodic recall · the distiller's mint gates · semantic expiry · forget re-grounding · privacy · the M8 off/empty-store control) + the Days 7–17 re-run
 python tools/architecture_smoke.py      # day 19 G1–G9 (the two topologies · the role router · the receipt contract · delegated ⊆ returned · containment · the union-context ledger · the memory reducer · the G9 control) + the Days 7–18 re-run
 python tools/architecture_smoke.py --fast   # day 19 fixtures only (skip the no-regression re-run)
+python tools/eval_harness.py --stub      # day 20 §9 golden-set table (deterministic verdicts, 0 chats; F/G/H rejected)
+python tools/eval_harness.py --fixtures  # day 20 §8 evaluation set V1–V9 (integrity · reproducibility · drift · the gate · V9 control)
+python tools/regress_all.py              # day 20/21 Rule-2 gate: doc nine + code six + every day suite (7–21, bench included) + the golden rows, exactly as green
+python tools/regress_all.py --fast       # day 20 gate: fixtures + golden rows only
 LLM_PROVIDERS=cloudflare: python tools/build_code_store.py --corpus corpus_code/saleor --out data/code_store.json --batch 100  # real build (resume; see gap 6)
 python tools/retrieval_day10.py --store data/code_store.json --doc-store data/store.json  # real corpora
 ```

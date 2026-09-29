@@ -1,4 +1,4 @@
-# ai-layer — Days 4–19: Gateway → Search → RAG → Code RAG → Tools → Loop → Data → Safe SQL → Planning → State → Memory → Multi-Agent
+# ai-layer — Days 4–20: Gateway → Search → RAG → Code RAG → Tools → Loop → Data → Safe SQL → Planning → State → Memory → Multi-Agent → Evaluation
 
 A reusable AI layer built in layers:
 
@@ -95,6 +95,14 @@ A reusable AI layer built in layers:
     by code) and **failure as a return value** (`failed(error:…)`/`failed(timeout)`)
     make the seam honest; the stub ties A on coverage and costs more, so the table
     forces the verdict **`justified architecture = SINGLE`**.
+15. **Day 20 — Evaluation Fundamentals**: *stop judging AI quality manually*. The
+    **golden dataset** (the five-field, hash-pinned, pre-registered row — with
+    `expected_answer` as `claims[] + must_not_assert[]`, oracle-derivable), the
+    **layered judge** (`ai_os/judge.py`: layer 1 deterministic, layer 2 semantic
+    *slot*, layer 3 LLM-as-judge off by default), the **harness** (a router that
+    never touches the answer path), and the **regression gate**
+    (`tools/regress_all.py`). The invariant is **`judged ⊆ pre-registered`** and the
+    control is **V9**: the harness installed and unused changes nothing.
 
 ```
 Application
@@ -141,6 +149,11 @@ raw HTTP via `urllib`.
 | `policy.yaml` | day 15: the reviewable allow/deny document — statement heads, `tables_allow`, PII `columns_deny`, the enforced `definitions`, and the resource caps (all config, not code) |
 | `ai_os/receipt.py` | day 19: the delegation contract — `Receipt` (`{task_id, principal, role, question_asked, evidence, conclusion, provenance, status}`), **`check_delegated_subset_returned`** (a fact attributed but absent is a handoff fabrication), `check_per_hop_grounding`, `receipt_block` |
 | `ai_os/orchestrator.py` | day 19: the delegation loop — `[delegate(role, question)]` as the tool list, the rule-table plan/`detect_surfaces`, bounded delegation (`MAX_DELEGATIONS`/`HANDOFF_TIMEOUT`), failure-as-a-return-value, the union-context ledger |
+| `ai_os/eval_dataset.py` | day 20: the golden-row parser/validator — the five fields, **oracle-derivability** (`claim_derivable`), the content hash + stale-hash refusal, and `rows_registered_before`; day 21: the **length-guarded** stem matcher (`checkout` never licenses `checkoutCreate`) |
+| `ai_os/golden.yaml` | day 20/21: the pre-registered, hash-pinned dataset — the doc nine + code six + the adversarial F/G/H, plus Day 21's `relevant_also` (precision's relevance oracle), `human_review` (I1) and `semantic_fail` (K1) and the I1/J1/K1 rows |
+| `ai_os/judge.py` | day 20: the layered grader — layer 1 deterministic (`MECH`, 0 chats), layer 2 the semantic *slot*, layer 3 LLM-as-judge **off by default** (explains, never decides); **`judged ⊆ pre-registered`** |
+| `tools/eval_harness.py` | day 20: the evaluation harness (a **router, not a grader**) + the **V1–V9** evaluation set |
+| `tools/regress_all.py` | day 20/21: Rule-2's regression gate — the retrieval families + every day suite (incl. the bench) + the golden rows, exactly as green |
 | `ai_os/agent.py` | day 11/12: `run_tool_answer` (one tool turn → grounded answer) + `run_agent` — the loop: transcript-as-state, three exits + `gave_up`, per-step observations; `cited ⊆ retrieved` over the accumulated transcript; `REASONING_PROMPT` is the reasoning-turn system prompt; day 16: an optional `plan` delegates to `executor.run_plan` (a one-step plan *is* the loop); day 17: an optional `state` (+ `session_id`) persists **conversation state** per session/principal — prior turns load as headers, never a hidden variable; day 18: an optional `memory_store` runs the **recall pre-step** (scored episodic recall, cited as episodes), loads the **preference data table** as cited data, and at **run-end** indexes the finished run as an authored `kind=episodic` record (the deliverable's "finished run → episodic record" arrow) — with no store, or an empty shelf, the transcript is unchanged (M8), and `MEMORY_ENABLED=0` forces the subsystem off |
 | `tools/mock_gateway.py` | scripted dual-provider stub `:8700`/`:8701` (chat, embeddings, **tool_calls** scenarios: `tc_d12_*`/`tc_d13_*`/`tc_d14_*`/`tc_d15_*`; day 16's `D16_PLAN_*` stored plans + `answer_d16_*`; day 18's distiller JSON — `D18_CONCEPT*` + `answer_d18_*`) |
 | `tools/tool_smoke.py` | day 11: T1–T7 offline suite (selection, validation matrix, refusal, cap, dialect parity, no-regression) |
@@ -226,6 +239,8 @@ python tools/plan_smoke.py              # day 16 P1–P9 (plan validation · sta
 python tools/state_smoke.py             # day 17 S1–S9 (the store · provenance · expiry/deletion · cross-process resume · the S9 control) + the Days 7–16 re-run
 python tools/memory_smoke.py            # day 18 M1–M9 (scored episodic recall · the distiller's mint gates · semantic expiry · the M8 off/empty-store control) + the Days 7–17 re-run
 python tools/architecture_smoke.py      # day 19 G1–G9 (the two topologies · the receipt contract · containment · the union-context ledger · the G9 control) + the Days 7–18 re-run
+python tools/eval_harness.py --fixtures # day 20 V1–V9 (integrity · reproducibility · drift · the gate · the V9 control)
+python tools/regress_all.py             # day 20/21 Rule-2 gate: doc nine + code six + every day suite (7–21) + the golden rows, exactly as green
 ```
 
 The stub serves both providers on `:8700` (OpenAI) and `:8701` (Anthropic)
@@ -453,3 +468,10 @@ with the provider config it belongs to.
   `docs/concepts/multi-agent.md`, `docs/evaluations/architecture-day19.md`, and
   `python tools/architecture_smoke.py` (G1–G9). The control is **G9**: machinery
   off ≡ Days 12–18.
+- Day 20 makes judgment re-runnable: `ai_os/eval_dataset.py` (the five-field,
+  hash-pinned golden row + oracle-derivability), `ai_os/golden.yaml`,
+  `ai_os/judge.py` (the layered grader), `tools/eval_harness.py` (a router, not a
+  grader), and `tools/regress_all.py` (Rule-2's gate). The invariant is
+  **`judged ⊆ pre-registered`**; the control is **V9**: the harness installed and
+  unused changes nothing. See `docs/concepts/evaluation.md`,
+  `docs/evaluations/eval-day20.md`, and `python tools/eval_harness.py --fixtures`.
