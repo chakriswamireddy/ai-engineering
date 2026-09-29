@@ -99,6 +99,11 @@ ERROR_TIMEOUT = "timeout"               # Day 13 — the wall clock (retry then 
 ERROR_TOOL = "tool_error"               # Day 13 — the tool raised / downstream 5xx
 ERROR_NO_DATA = "no_data"               # Day 13 — the resolver found nothing
 ERROR_INTERNAL = "internal"             # Day 13 — the harness itself is broken
+# Day 19 — a *role* gate. The tool exists in the system but not in this
+# specialist's tool group: an out-of-role call is a **policy** rejection (privileges
+# beat parsers, Day 15, applied between loops), so the loop stops rather than
+# self-correcting its way into another role's surface.
+ERROR_ROLE = "role_violation"
 
 # Rejections the model fixes with a *different* call. They are never retried
 # with the same args — "same wrong thing, louder" is Day 12's disease.
@@ -309,10 +314,17 @@ class ToolRegistry:
 
     The registry is the model's contract surface: an unknown tool name is a
     **rejection result**, never an exception and never a forged run.
+
+    Day 19 adds one more surface: a registry may be **scoped** to a role, in which
+    case a tool that exists elsewhere in the system is *denied* here with a typed
+    `role_violation` (a `policy` rejection). `scope()` is how a specialist is "the
+    existing loop with a tool-list slice" — not a new program, just a narrower
+    contract.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, denied: dict[str, str] | None = None) -> None:
         self._tools: dict[str, dict[str, Any]] = {}
+        self._denied: dict[str, str] = dict(denied or {})
 
     def register(self, name: str, schema: dict[str, Any],
                  fn: Callable[[dict[str, Any]], ToolResult]) -> None:
@@ -324,12 +336,41 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return list(self._tools)
 
+    def denied(self) -> dict[str, str]:
+        """The tools this registry holds but refuses (an out-of-role gate)."""
+        return dict(self._denied)
+
+    def scope(self, names: list[str] | tuple[str, ...], *,
+              reason: str = "out of role") -> "ToolRegistry":
+        """A role's view: keep `names`, deny every other registered tool.
+
+        The denied tools are still *known* — the denial names them — so an
+        out-of-role call is a **policy** rejection (`role_violation`), not an
+        `unknown_tool`: the difference between "you may not" and "there is no such
+        thing" is exactly the privilege boundary Day 15 drew.
+        """
+        keep = set(names)
+        scoped = ToolRegistry(denied={
+            n: f"{reason}: {n} is not in this role's tool group"
+            for n in self._tools if n not in keep})
+        for n, tool in self._tools.items():
+            if n in keep:
+                scoped._tools[n] = tool
+        return scoped
+
     def schemas(self) -> list[dict[str, Any]]:
         """What the gateway sends the model — names stable, descriptions loud."""
         return [{"type": "function", "function": t["schema"]}
                 for t in self._tools.values()]
 
     def validate_args(self, name: str, args_raw: Any) -> ToolResult:
+        if name in self._denied:
+            # Day 19 §7 — the role gate. A tool the system holds but this role does
+            # not is a *policy* refusal (privileges beat parsers, between loops):
+            # `policy` keeps it out of both ladder rungs and stops the loop.
+            return ToolResult.failure(
+                name, self._denied[name], error_kind=ERROR_ROLE,
+                rejection_class="policy")
         if name not in self._tools:
             return ToolResult.failure(
                 name, f"unknown tool {name!r} (known: {self.names()})",
@@ -347,6 +388,10 @@ class ToolRegistry:
         return (tool["schema"].get("parameters") or {}).get("properties") or {}
 
     def execute(self, name: str, args: dict[str, Any]) -> ToolResult:
+        if name in self._denied:
+            return ToolResult.failure(
+                name, self._denied[name], error_kind=ERROR_ROLE,
+                rejection_class="policy")
         tool = self._tools.get(name)
         if tool is None:
             return ToolResult.failure(
