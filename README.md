@@ -1,4 +1,4 @@
-# ai-layer — Days 4–18: Gateway → Search → RAG → Code RAG → Tools → Loop → Data → Safe SQL → Planning → State → Memory
+# ai-layer — Days 4–19: Gateway → Search → RAG → Code RAG → Tools → Loop → Data → Safe SQL → Planning → State → Memory → Multi-Agent
 
 A reusable AI layer built in layers:
 
@@ -85,6 +85,16 @@ A reusable AI layer built in layers:
     control is **M8**: memory off ≡ Days 12–17, and memory on over an empty store too.
     The recall path stays free (**0 chats, 0 embeds**); the distiller is the series'
     first billable shelf (**1 chat per batch**), metered, not assumed.
+14. **Day 19 — Multi-Agent Architecture**: *decide whether more than one loop is
+    worth it* rather than assume. Two topologies over Days 12–18: **A** (the single
+    loop + a transparent role-context router) is byte-for-byte the prior days with
+    routing off; **B** an orchestrator whose tools are `make_agent(role)`
+    specialists, sharing Day 18's store under a write policy (specialists write
+    episodes; the orchestrator writes **only** `kind=orchestration`). The receipt
+    contract (**`delegated ⊆ returned`** — a paraphrase/ghost delegation is rejected
+    by code) and **failure as a return value** (`failed(error:…)`/`failed(timeout)`)
+    make the seam honest; the stub ties A on coverage and costs more, so the table
+    forces the verdict **`justified architecture = SINGLE`**.
 
 ```
 Application
@@ -129,6 +139,8 @@ raw HTTP via `urllib`.
 | `ai_os/memory.py` | day 18: episodic memory — `episodicize` (the compact signature), `recall` (Day 8/9's scorer over the principal's episodes: lexicon + fusion + MMR/dedup + Day 7's τ + Day 6's top-k, **0 chats / 0 embeds**), `recall_block` (episodes **as** episodes — cite, never absorb), and the principal-keyed **preference data table** (`set_preference`/`read_preferences`) |
 | `ai_os/distill.py` | day 18: the distiller — one guarded chat over N episodes, the **mint-time gate** (`validate_concept`: sample size ≥ `MEMORY_MIN_SOURCES` · `authored ⊆ grounded` over the union of source evidence · no source contradiction · no principal names), `mint` (writes `kind=semantic` with provenance through the closed path), and the re-prompt verbs (`decay_concept` / `retire_concept` / `reprompt_action`) |
 | `policy.yaml` | day 15: the reviewable allow/deny document — statement heads, `tables_allow`, PII `columns_deny`, the enforced `definitions`, and the resource caps (all config, not code) |
+| `ai_os/receipt.py` | day 19: the delegation contract — `Receipt` (`{task_id, principal, role, question_asked, evidence, conclusion, provenance, status}`), **`check_delegated_subset_returned`** (a fact attributed but absent is a handoff fabrication), `check_per_hop_grounding`, `receipt_block` |
+| `ai_os/orchestrator.py` | day 19: the delegation loop — `[delegate(role, question)]` as the tool list, the rule-table plan/`detect_surfaces`, bounded delegation (`MAX_DELEGATIONS`/`HANDOFF_TIMEOUT`), failure-as-a-return-value, the union-context ledger |
 | `ai_os/agent.py` | day 11/12: `run_tool_answer` (one tool turn → grounded answer) + `run_agent` — the loop: transcript-as-state, three exits + `gave_up`, per-step observations; `cited ⊆ retrieved` over the accumulated transcript; `REASONING_PROMPT` is the reasoning-turn system prompt; day 16: an optional `plan` delegates to `executor.run_plan` (a one-step plan *is* the loop); day 17: an optional `state` (+ `session_id`) persists **conversation state** per session/principal — prior turns load as headers, never a hidden variable; day 18: an optional `memory_store` runs the **recall pre-step** (scored episodic recall, cited as episodes), loads the **preference data table** as cited data, and at **run-end** indexes the finished run as an authored `kind=episodic` record (the deliverable's "finished run → episodic record" arrow) — with no store, or an empty shelf, the transcript is unchanged (M8), and `MEMORY_ENABLED=0` forces the subsystem off |
 | `tools/mock_gateway.py` | scripted dual-provider stub `:8700`/`:8701` (chat, embeddings, **tool_calls** scenarios: `tc_d12_*`/`tc_d13_*`/`tc_d14_*`/`tc_d15_*`; day 16's `D16_PLAN_*` stored plans + `answer_d16_*`; day 18's distiller JSON — `D18_CONCEPT*` + `answer_d18_*`) |
 | `tools/tool_smoke.py` | day 11: T1–T7 offline suite (selection, validation matrix, refusal, cap, dialect parity, no-regression) |
@@ -213,6 +225,7 @@ python tools/sql_attack_smoke.py        # day 15 X1–X11 (attack set + control;
 python tools/plan_smoke.py              # day 16 P1–P9 (plan validation · state · checkpoints · ladder · policy wall; conclusion ⊆ evidence) + the Days 11–15 re-run
 python tools/state_smoke.py             # day 17 S1–S9 (the store · provenance · expiry/deletion · cross-process resume · the S9 control) + the Days 7–16 re-run
 python tools/memory_smoke.py            # day 18 M1–M9 (scored episodic recall · the distiller's mint gates · semantic expiry · the M8 off/empty-store control) + the Days 7–17 re-run
+python tools/architecture_smoke.py      # day 19 G1–G9 (the two topologies · the receipt contract · containment · the union-context ledger · the G9 control) + the Days 7–18 re-run
 ```
 
 The stub serves both providers on `:8700` (OpenAI) and `:8701` (Anthropic)
@@ -431,3 +444,12 @@ with the provider config it belongs to.
   `docs/evaluations/memory-day18.md`, and `python tools/memory_smoke.py` (M1–M9). One
   honest limit, named not hidden: **"you cannot un-distill"** — deletion ends *future*
   recall, not the past answers a concept was absorbed into.
+- Day 19 answers "are more agents actually useful?" with a table, not a mood:
+  `ai_os/receipt.py` (the delegation contract, **`delegated ⊆ returned`**),
+  `ai_os/orchestrator.py` (the delegation loop + bounded hops + the union-context
+  ledger), and the router/scoped-registry/`make_agent` seam in `ai_os/agent.py`.
+  Under the stub the two-surface split ties the single loop on coverage and costs
+  more, so the verdict is **`justified architecture = SINGLE`**. See
+  `docs/concepts/multi-agent.md`, `docs/evaluations/architecture-day19.md`, and
+  `python tools/architecture_smoke.py` (G1–G9). The control is **G9**: machinery
+  off ≡ Days 12–18.

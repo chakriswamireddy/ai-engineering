@@ -1,4 +1,4 @@
-# Progress — ai-layer (Days 2–18)
+# Progress — ai-layer (Days 2–19)
 
 > Live status of what is implemented, verified, and still open in this repo.
 > Kept up to date as days are worked; the canonical per-day detail lives in
@@ -36,6 +36,7 @@ Updated: 2026-09-29
 | 16 | Agent Planning | PARTIAL (all MECH green offline; P1–P9 with **`conclusion ⊆ evidence = ok` on every answered row** — the fabricated twin the only `FAIL`, and the point of the fixture — and **`over-planned? = no` on P9**; plan validation fail-closed (registered tools · schema args · acyclic · deps exist — an invalid plan runs **zero steps, zero bills**), execution state + **checkpoints** (resume at *k+1* without re-running a completed step; replay reproduces the evidence), the re-plan gate (divergence → replan), the bounded retry ladder (repair · retry · fallback · replan) with the **policy wall climbing no rung** (`rungs: []`), and the 6→7 gate; T1–T7 / A1–A8 / F1–F9 / Q1–Q8 / X1–X11 re-run unchanged; **real-model plan quality `PENDING` Day 21, durable state `PENDING` Day 17/18, parallel DAG branches named not built**) | `ai_os/planner.py` (new), `ai_os/executor.py` (new), `ai_os/state.py` (new), `ai_os/agent.py` (`run_agent(plan=…)`), `ai_os/trace.py` (plan columns + `PLAN_TERMINATIONS`), `tools/plan_smoke.py` (new), `tools/mock_gateway.py` (`D16_PLAN_*`/`answer_d16_*`), `docs/concepts/planning.md`, `docs/evaluations/planning-day16.md` |
 | 17 | Memory and State | PARTIAL (all MECH green offline; S1–S9 with **`recalled ⊆ authored = ok` on every row that recalls** + the **S9 control** (state off ≡ Days 12–16); the file-backed **store** (provenance-mandatory, **closed** to non-authored writes, expiry-acts-absent, first-class `forget` + compaction, the size cap), **resume across a process** (a new interpreter continues at *k+1*, the completed step not re-run — safe because the tools are read-only), byte-identical **serialization/replay**, and the **context-keyed boundary**; episodic recall + semantic distillation `PENDING` Day 18/21) | `ai_os/state.py` (the store), `ai_os/agent.py` (conversation state), `ai_os/executor.py` (task state + resume), `ai_os/trace.py` (state columns + `recalled_subset_authored`), `tools/state_smoke.py` (new), `docs/concepts/state-memory.md`, `docs/evaluations/state-day17.md` |
 | 18 | Persistent Memory | PARTIAL (all MECH green offline; M1–M9 with **`recalled ⊆ authored = ok` on every row that recalls** **and** **`authored ⊆ grounded = ok` on every row that mints** (M3's three rejection rows prove the minter *cannot* lie) + the **M8 control** (memory off ≡ Days 12–17, and memory on over an empty store ≡ too); **relevance-scored episodic recall** (Day 8/9's scorer over stored signatures — the *matching* investigation above the newest, 0 chats/0 embeds), the **distiller** (one guarded chat → `{claim, source_episodes, strength, ttl, created_by}`, minted only under **sample-size ≥ 2 · `authored ⊆ grounded` · no source contradiction · no principal names**), **semantic expiry** (a concept below its strength τ acts absent **before** its TTL; the clock is the backstop) with the **re-prompt loop** (re-distill · decay · retire), **`forget` re-grounding** every concept citing a deleted episode (re-ground or retire), the **preference data table** (`kind=preference`, never distilled, principal-keyed), and the **"only if useful" meter** (recall 0 chats vs a fresh investigation's ≥1); real-model distillation quality + the real "useful?" verdict `PENDING` Day 21) | `ai_os/memory.py` (new), `ai_os/distill.py` (new), `ai_os/state.py` (`strength`/`recall_threshold`/`touch` + `forget` re-grounding + the `distiller` author + the memory shelves), `ai_os/agent.py` (the recall pre-step + preferences), `ai_os/trace.py` (memory columns), `tools/mock_gateway.py` (`answer_d18_*`), `tools/memory_smoke.py` (new), `docs/concepts/memory.md`, `docs/evaluations/memory-day18.md` |
+| 19 | Multi-Agent Architecture | PARTIAL (all MECH green offline; G1–G9 with **`delegated ⊆ returned = ok` on every B row**, **per-hop leaks == 0**, and the **G9 control** (machinery off ≡ Days 12–18); **Topology A** = Days 12–18 + the **role-context router** (a rule table, 0 chats, overridable, neutral under `ROLE_CONTEXT_ROUTING=0`); **Topology B** = a **delegation loop** whose tools are `make_agent(role)` specialists (the existing loop with a **tool-list slice**; out-of-role = a `role_violation` **policy** stop) sharing **Day 18's store**; the **receipt contract** (only a `{task_id, evidence, conclusion, provenance}` record crosses the seam; a paraphrase/ghost delegation is **rejected by code** — the Chinese-whispers injection caught), **bounded delegation** (`MAX_DELEGATIONS` · `HANDOFF_TIMEOUT` · `DELEGATION_RETRY=1`, a *refused* hop never retried), **failure as a return value** (`failed(error:…)`/`failed(timeout)` receipts; other delegations survive; never fabricated), the **union-context cost ledger** (`specialist + orchestrator tokens`), and the **shared-store write policy** (specialists write episodes under their own principal+role; the orchestrator writes **only** `kind=orchestration`); under the stub the two-surface split **ties A on coverage and costs more**, so the table forces **`justified architecture = SINGLE`**; real-model delegation quality + context-isolation price `PENDING` Day 21/22) | `ai_os/receipt.py` (new), `ai_os/orchestrator.py` (new), `ai_os/agent.py` (`make_agent`/`RoleAgent`/`route_question`/`detect_surfaces` + `routed_to`/`role` + the validation-seam policy stop), `ai_os/tools.py` (`ToolRegistry.scope`/`denied` + `ERROR_ROLE`), `ai_os/memory.py` (`remember_episode(role=…)` + `write_orchestration`), `ai_os/state.py` (`ORCHESTRATION_KIND` + the `orchestrator` author), `ai_os/trace.py` (topology columns), `tools/mock_gateway.py` (`tc_d19_*`/`answer_d19_*`), `tools/architecture_smoke.py` (new), `docs/concepts/multi-agent.md`, `docs/evaluations/architecture-day19.md` |
 
 ---
 
@@ -907,15 +908,100 @@ Day 17's guards, with the day's two invariants. Concept + evaluation:
 
 ---
 
+## Day 19 — Multi-Agent Architecture `PARTIAL`
+
+Days 12–18 answered "can one loop use tools, survive failure, compute, defend itself,
+plan, and remember." Day 19 asks **whether more than one loop is worth it** — and the
+curriculum's objective is a commandment: *"Determine whether multiple agents are
+actually useful. Do not assume they are."* The deliverable is the **justified agent
+architecture** — a verdict line with the table that forces it, under two topologies the
+series already built. Concept + evaluation: `docs/concepts/multi-agent.md`,
+`docs/evaluations/architecture-day19.md`.
+
+- `ai_os/receipt.py` (new) — the **delegation contract**. `Receipt`
+  (`{task_id, principal, role, question_asked, evidence, conclusion, provenance
+  {run_id, step, source: "specialist:{role}"}, status: returned|refused|failed}`) — the
+  `kind=episodic` record of Day 17, promoted to the unit of handoff. The headline
+  invariant is one function: **`check_delegated_subset_returned(answer, receipts)`** —
+  every id the orchestrator's answer names must appear in a **returned** receipt's
+  evidence; a fact attributed but absent is a **handoff fabrication**. Plus
+  `check_per_hop_grounding` (each specialist's own `cited ⊆ retrieved`) and
+  `receipt_block` (receipts served **as** receipts to cite). The config knobs
+  (`MAX_DELEGATIONS`/`HANDOFF_TIMEOUT`/`DELEGATION_RETRY`) live here.
+- `ai_os/orchestrator.py` (new) — the **delegation loop**: a loop whose tool list is
+  `[delegate(role, question)]`. `orchestration_plan`/`detect_surfaces` compute the
+  delegation DAG by rule table (Day 16's "the plan is data", made deterministic and
+  free). `delegate` executes one specialist as a **tool call** — bounded, walled by
+  `HANDOFF_TIMEOUT`, a **failed** hop retried once, a **refused** hop never retried;
+  crashes become `failed(error:…)` receipts, timeouts `failed(timeout)` — and returns
+  `(receipt, run)`. `run` dispatches the plan, aggregates **by citation** (one chat over
+  `receipt_block`), and computes `delegated_subset_returned`, per-hop grounding, and the
+  **union-context** ledger (`specialist_tokens + orchestrator_tokens`). Policy:
+  `AGENT_TOPOLOGY`, `SPECIALIST_ROLES`.
+- `ai_os/agent.py` (extended) — `ROLES`/`ROLE_TOOLS`, **`make_agent(role)`** +
+  `RoleAgent` (the Day 12 loop bound to a **scoped registry** — a tool-list slice), and
+  the **role-context router** (`route_question`: a transparent, overridable rule table;
+  `ROLE_CONTEXT_ROUTING` switches it off). `run_agent` gains `routed_to`/`role` (recorded
+  fields; routing changes no answer) and now honors a **policy** rejection at the
+  validation seam, so the role gate (`role_violation`) **stops** the loop rather than
+  self-correcting across the privilege boundary.
+- `ai_os/tools.py` (extended) — `ToolRegistry.scope(names)`/`denied()`: a role's view
+  keeps its tools and **denies the rest** with a typed `ERROR_ROLE`
+  (`role_violation`, `rejection_class: "policy"`) — privileges beat parsers, between
+  loops.
+- `ai_os/memory.py` + `ai_os/state.py` (extended) — the **shared-store write policy**:
+  `remember_episode(..., role=…)` (a specialist writes an episode under its own
+  principal+role) and `write_orchestration` (`kind=orchestration`, `source:
+  "orchestrator"` — the orchestrator writes **only** orchestration records, never
+  specialist-episodes). `ORCHESTRATION_KIND` + `orchestrator` in `AUTHORED_SOURCES`
+  (additive; `recalled ⊆ authored` untouched).
+- `ai_os/trace.py` (extended) — the topology columns (`topology`, `routed_to`,
+  `delegations[]`, `delegated_subset_returned`, `per_hop_leaks`,
+  `context_union_tokens`, `handoffs`) and `DELEGATION_TERMINATIONS`.
+- `tools/mock_gateway.py` — Day 19 fixtures: `tc_d19_escape_docs`/`tc_d19_escape_sql`
+  (the out-of-role probes) and `answer_d19_{code,docs,combined,leak,refused,policy,
+  partial,data}` (the orchestrator's aggregation turns — grounded, the Chinese-whispers
+  leak, and the honest gap-naming).
+- `tools/architecture_smoke.py` (new) — **ALL DAY 19 (MECH) CHECKS PASSED** (40 fixture
+  checks + the 12-suite re-run): G1 two-surface (the split **ties A on coverage and
+  costs more** — 110 vs 250 tok), G2 monolith (same answer/evidence, A cheaper → A-win),
+  G3 the receipt contract (the Chinese-whispers injection **rejected**; a received-less
+  attribution rejected; the check is not vacuous), G4 containment (a data loop emitting
+  `search_saleor_docs` **policy-stopped**; the unscoped-registry control executes it),
+  G5 the union-context ledger, G6 the memory reducer (shared/private/none),
+  G7 per-hop grounding (**leaks == 0**), G8 failure containment (crash → `failed` +
+  other delegations survive; timeout → `failed(timeout)`; never fabricated), G9 the
+  **control** (machinery off ≡ Days 12–18).
+- **Headline:** **`delegated ⊆ returned = ok` on every B row** and **per-hop leaks == 0**,
+  with **G9** the counterweight: machinery off ≡ Days 12–18. The table forced the
+  verdict: **`justified architecture = SINGLE`** — the two-surface split's context-
+  isolation win did **not** reproduce under a stub (A covered both surfaces in one
+  context at lower cost), so the split's remaining claims are `PENDING` on a real model.
+- **No regression:** the seam is **additive** — Topology A is byte-for-byte Days 12–18
+  with routing off. Days 7–18's suites stay green (the harness re-runs them all); the
+  only edits to existing code are the recorded `routed_to`/`role` fields, the
+  validation-seam policy stop, `ToolRegistry.scope`, and the two memory/state author
+  additions.
+- **Cost shape:** Topology A adds **0 chats** (a rule-table router); B's *mechanics* add
+  **0 chats**; B's *operation* bills the **union** of both contexts per delegation — the
+  series' first **architecture** ledger, at zero new spend for the deliberative half.
+- `PENDING`: whether a **real** model's orchestrator delegates better than the single
+  loop on real Saleor questions, whether context isolation pays at a real budget, and
+  whether a shared store beats private ones — **Day 21/22's** benchmarks on Day 19's
+  harness. Parallel specialists, agent-to-agent state hand-off, and multi-agent
+  observability (Day 24's distributed trace) are *named, not built*. Re-verify with
+  `python tools/architecture_smoke.py`.
+
 ---
 
 ## Known gaps (what blocks "everything green for real")
 
-1. **Git:** Days 2–17 are committed (HEAD `e1c796f`, the Day-17 rollup); **Day 18**
-   is implemented and green but **uncommitted** — it lands on top as grouped
-   `feat` / `test` / `docs` commits. The concept/eval docs run through Day 18
-   (`docs/concepts/memory.md` · `memory-day18.md`), and Days 21–27's plan/notes
-   docs sit untracked.
+1. **Git:** Days 2–17 are committed (HEAD `e1c796f`, the Day-17 rollup); **Days
+   18–19** are implemented and green but **uncommitted** — they land on top as
+   grouped `feat` / `test` / `docs` commits. The concept/eval docs run through
+   Day 19 (`docs/concepts/memory.md` · `memory-day18.md`,
+   `docs/concepts/multi-agent.md` · `architecture-day19.md`), and Days 21–27's
+   plan/notes docs sit untracked.
 2. **Chat quota / rate limits:** live chat now works via OpenRouter free models
    (`nex-agi/nex-n2.5-pro:free`, daily free cap ~50 req); embeddings via
    Cloudflare, free tier. Full semantic sweeps stay budgeted, not assumed.
@@ -1079,6 +1165,27 @@ Day 17's guards, with the day's two invariants. Concept + evaluation:
     deletion ends *future* recall, never the past answers a concept was absorbed into.
     Re-verify with `python tools/memory_smoke.py`.
 
+15. **Day 19 semantics** — the MECH half is green (`tools/architecture_smoke.py`;
+    G1–G9 with **`delegated ⊆ returned = ok` on every B row**, per-hop leaks == 0, and
+    the **G9 control** (`machinery off ≡ Days 12–18`); the role-context router, the
+    scoped-role gate, the receipt contract with its Chinese-whispers rejection, bounded
+    delegation, failure-as-a-return-value, the union-context ledger, and the shared-store
+    write policy). The stub drives which tool each specialist calls, so **the verdict it
+    can honestly reach is `SINGLE`**: the two-surface split ties A on coverage and costs
+    more (110 vs 250 tok), and A walks both surfaces in one context. Still `PENDING`:
+    (a) whether a *real* model's orchestrator **delegates better than the single loop** —
+    Day 21/22's benchmark on this harness; (b) whether **context isolation** pays at a
+    real context budget/token price (the G1 win did not reproduce under a stub) — Day
+    21/22; (c) whether a **shared store** beats private per-role stores on real answers —
+    Day 21 (Day 18's distiller/recall own it); (d) **parallel specialists** — named, not
+    built (the orchestrator dispatches a linear plan; gated on G1's measured row); (e)
+    **agent-to-agent state hand-off** — named, not built (receipts are deliberately
+    stateless); (f) **multi-agent observability** — one trace through three loops is
+    **Day 24's** distributed trace; (g) **`delegated ⊆ returned` is id-shaped** — a prose
+    paraphrase naming no id is not caught (the same honest limit Day 12's fabrication
+    guard carries), owned by **Day 21**. Re-verify with
+    `python tools/architecture_smoke.py`.
+
 ## How to re-verify, in one line
 
 ```bash
@@ -1102,6 +1209,8 @@ python tools/sql_attack_smoke.py        # day 15 X1–X11 (attack set + control)
 python tools/plan_smoke.py              # day 16 P1–P9 (plan validation · state · checkpoints · ladder · policy wall) + the Days 11–15 re-run
 python tools/state_smoke.py             # day 17 S1–S9 (the store · provenance · expiry/deletion · cross-process resume · serialize/replay · the S9 control) + the Days 7–16 re-run
 python tools/memory_smoke.py            # day 18 M1–M9 (scored episodic recall · the distiller's mint gates · semantic expiry · forget re-grounding · privacy · the M8 off/empty-store control) + the Days 7–17 re-run
+python tools/architecture_smoke.py      # day 19 G1–G9 (the two topologies · the role router · the receipt contract · delegated ⊆ returned · containment · the union-context ledger · the memory reducer · the G9 control) + the Days 7–18 re-run
+python tools/architecture_smoke.py --fast   # day 19 fixtures only (skip the no-regression re-run)
 LLM_PROVIDERS=cloudflare: python tools/build_code_store.py --corpus corpus_code/saleor --out data/code_store.json --batch 100  # real build (resume; see gap 6)
 python tools/retrieval_day10.py --store data/code_store.json --doc-store data/store.json  # real corpora
 ```
