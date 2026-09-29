@@ -1,0 +1,388 @@
+# Day 20 §5 — the golden dataset (the five-field, hash-pinned, pre-registered set).
+#
+# This file is the *commitment*: expected evidence, expected answer, expected
+# tools and failure category are written HERE, before any run, and the harness
+# refuses to grade under a stale `dataset_hash` (V1/V8). Patching a row after a
+# run came up short is exactly the curve-fit pre-registration exists to catch.
+#
+# Five fields per row (the curriculum's order):
+#   question          — the natural-language input, verbatim (from
+#                       questions.yaml / code_questions.yaml — cross-checked)
+#   expected_evidence — doc_ids / module#Symbols the corpus must surface
+#   expected_answer    — {claims: [...minimal facts], must_not_assert: [...]}
+#                       NOT a model-voice paragraph; oracle-derivable offline
+#   expected_tools     — tools from the Day 11 registry the answer needs
+#                       ([] ⇒ a refusal row: no tool should produce an answer)
+#   failure_category   — the expected outcome shape: null (answered), "refusal"
+#                       (out-of-corpus), or a Day 13 failure_kind
+#
+# `predicted`/`fix` ride along from Day 7/10 so a failing row still names its
+# owner. `must_not` is the wrong sense that must not be retrieved (Family C).
+#
+# `kind`:
+#   agent          — a row the harness presents to the production loop
+#   judge_hunting  — a row built to defeat the *judge* (Rule 3 at the judge
+#                    level); graded against the injected `probe`, not a run
+#
+# `probe` (judge_hunting only) is the hostile answer/evidence the judge must
+# reject. It is part of the pre-registration: the failure is deliberate.
+#
+# Regenerate the hash after any intended edit:
+#   python ai_os/eval_dataset.py --pin ai_os/golden.yaml
+
+dataset_version: 1
+registered_at: "2026-09-28"
+dataset_hash: "94d343ad20c94dabaad03e9ec89036fe58c486040d8d39dde4bc0ae23377a1f4"
+
+rows:
+  # ------------------------------------------------- the doc nine (A–E), verbatim
+  - id: A1
+    kind: agent
+    source: doc
+    family: "A — obvious (control)"
+    question: "What is a checkout in Saleor?"
+    expected_evidence: ["quickstart/api#create-a-checkout"]
+    expected_answer:
+      claims:
+        - "a checkout is created with checkoutCreate"
+        - "a checkout accepts cart lines, an email, and a shipping method"
+      must_not_assert: []
+    expected_tools: ["search_saleor_docs"]
+    failure_category: null
+    predicted: "none (control)"
+    fix: null
+    must_not: []
+    must_refuse: false
+
+  - id: B1
+    kind: agent
+    source: doc
+    family: "B — multi-document (the seam)"
+    question: "How does a checkout become an order, and what changes after?"
+    expected_evidence:
+      - "quickstart/api#create-a-checkout"
+      - "developer/checkout/lifecycle#completing-checkout"
+      - "developer/order/overview#lifecycle"
+    expected_answer:
+      claims:
+        - "checkoutComplete turns a checkout into an order"
+        - "the order flows through fulfillment and shipping"
+      must_not_assert: []
+    expected_tools: ["search_saleor_docs"]
+    failure_category: null
+    predicted: "missing retrieval (partial) — one query lands in one region"
+    fix: "multi-query decomposition (Day 8)"
+    must_not: []
+    must_refuse: false
+
+  - id: B2
+    kind: agent
+    source: doc
+    family: "B — multi-document (the seam)"
+    question: "What must be set before checkoutComplete succeeds, and what does it return?"
+    expected_evidence:
+      - "developer/checkout/api-guide#completing-checkout"
+      - "developer/checkout/lifecycle#completing-checkout"
+    expected_answer:
+      claims:
+        - "checkoutComplete returns the created order"
+      must_not_assert: []
+    expected_tools: ["search_saleor_docs"]
+    failure_category: null
+    predicted: "excessive context + partial retrieval"
+    fix: "rerank + context ordering (Day 9)"
+    must_not: []
+    must_refuse: false
+
+  - id: C1
+    kind: agent
+    source: doc
+    family: "C — ambiguous terminology"
+    question: "How do apps work in Saleor?"
+    expected_evidence: ["developer/extending/apps/overview#apps-overview"]
+    expected_answer:
+      claims:
+        - "apps extend Saleor and install via manifest"
+        - "apps expose webhooks and run sync endpoints"
+      must_not_assert: []
+    expected_tools: ["search_saleor_docs"]
+    failure_category: null
+    predicted: "irrelevant retrieval — one vector averaged across the senses of 'app'"
+    fix: "query rewriting / metadata filter (Day 8)"
+    must_not:
+      - "developer/app-store/overview#saleor-app-store"
+      - "developer/app-store/overview#extensions"
+    must_refuse: false
+
+  - id: C2
+    kind: agent
+    source: doc
+    family: "C — ambiguous terminology"
+    question: "What is the difference between an attribute and a field?"
+    expected_evidence:
+      - "developer/attributes/overview#attributes-and-types-overview"
+      - "developer/attributes/api#input-types"
+    expected_answer:
+      claims:
+        - "attributes are product metadata: size, color, material"
+        - "a field belongs to the GraphQL schema"
+      must_not_assert: []
+    expected_tools: ["search_saleor_docs"]
+    failure_category: null
+    predicted: "wrong entity (rung 4) — GraphQL field docs outrank product attribute docs"
+    fix: "query rewriting (Day 8)"
+    must_not: []
+    must_refuse: false
+
+  - id: D1
+    kind: agent
+    source: doc
+    family: "D — similar documents"
+    question: "How do I complete a checkout?"
+    expected_evidence: ["developer/checkout/api-guide#completing-checkout"]
+    expected_answer:
+      claims:
+        - "call checkoutComplete on the checkout"
+        - "the mutation returns the created order"
+      must_not_assert: []
+    expected_tools: ["search_saleor_docs"]
+    failure_category: null
+    predicted: "duplicated context — 4 of 5 slots are near-dupes of one meaning"
+    fix: "rerank + diversity/MMR (Day 9)"
+    must_not: []
+    must_refuse: false
+
+  - id: D2
+    kind: agent
+    source: doc
+    family: "D — similar documents"
+    question: "How do I create a checkout in Saleor?"
+    expected_evidence:
+      - "quickstart/api#create-a-checkout"
+      - "developer/checkout/api-guide#creating-a-checkout-session"
+    expected_answer:
+      claims:
+        - "a checkout session starts with checkoutCreate"
+        - "choose lines and set email and delivery method"
+      must_not_assert: []
+    expected_tools: ["search_saleor_docs"]
+    failure_category: null
+    predicted: "duplicated context — the same fact served twice"
+    fix: "context dedup (Day 9)"
+    must_not: []
+    must_refuse: false
+
+  - id: E1
+    kind: agent
+    source: doc
+    family: "E — out of corpus"
+    question: "How much does Saleor Cloud cost?"
+    expected_evidence: []
+    expected_answer:
+      claims: []
+      must_not_assert:
+        - "Saleor Cloud costs a specific price per month"
+    expected_tools: []
+    failure_category: "refusal"
+    predicted: "hallucination — K neighbours are returned anyway; no gate"
+    fix: "similarity gate (shippable today)"
+    must_not: []
+    must_refuse: true
+
+  - id: E2
+    kind: agent
+    source: doc
+    family: "E — out of corpus (near-miss)"
+    question: "How do I integrate Saleor with Shopify?"
+    expected_evidence: []
+    expected_answer:
+      claims: []
+      must_not_assert:
+        - "the Shopify webhook handler is configured in Saleor"
+    expected_tools: []
+    failure_category: "refusal"
+    predicted: "hallucination via near-miss — adjacent docs score plausibly"
+    fix: "gate + threshold calibration"
+    must_not: []
+    must_refuse: true
+
+  # --------------------------------------------- the code fixtures (CA1–CE1)
+  - id: CA1
+    kind: agent
+    source: code
+    family: "A — obvious (the split-brain double-hit)"
+    question: "Where is checkout completed?"
+    expected_evidence:
+      - "saleor/checkout/complete_checkout.py#complete_checkout"
+      - "saleor/graphql/checkout/mutations/checkout_complete.py#CheckoutComplete"
+    expected_answer:
+      claims:
+        - "complete_checkout validates, charges the payment, and creates the order"
+        - "complete_checkout is the domain service behind the CheckoutComplete mutation"
+      must_not_assert: []
+    expected_tools: ["search_saleor_code"]
+    failure_category: null
+    predicted: "single-hit — the API mutation and the domain service are one concept"
+    fix: "the double-hit is *correct*: a cross-layer pair is a feature"
+    must_not: []
+    must_refuse: false
+
+  - id: CB1
+    kind: agent
+    source: code
+    family: "B — cross-module flow (the dependency seam)"
+    question: "What happens between checkout completion and order creation?"
+    expected_evidence:
+      - "saleor/checkout/complete_checkout.py#create_order_from_checkout"
+    expected_answer:
+      claims:
+        - "create_order_from_checkout creates an Order from a completed Checkout"
+      must_not_assert: []
+    expected_tools: ["search_saleor_code"]
+    failure_category: null
+    predicted: "the service symbol is retrieved but its imports are not walked"
+    fix: "imports are stored on the chunk; walking the graph is Day 12/16"
+    must_not: []
+    must_refuse: false
+
+  - id: CB2
+    kind: agent
+    source: code
+    family: "B — cross-module flow"
+    question: "Which module fires the webhook when a payment succeeds?"
+    expected_evidence:
+      - "saleor/payment/gateway.py#process_payment"
+      - "saleor/webhook/event_types.py#WebhookEventAsyncType"
+    expected_answer:
+      claims:
+        - "process_payment fires the success webhook when the payment succeeds"
+        - "WebhookEventAsyncType is the set of async webhook event types"
+      must_not_assert: []
+    expected_tools: ["search_saleor_code"]
+    failure_category: null
+    predicted: "the payment half is found; the event-type constant is missed"
+    fix: "multi-query decomposition + module filter (Day 8, retargeted)"
+    must_not: []
+    must_refuse: false
+
+  - id: CC1
+    kind: agent
+    source: code
+    family: "C — name collision"
+    question: "What can the identifier 'checkout' refer to in the codebase?"
+    expected_evidence:
+      - "saleor/checkout/models.py#Checkout"
+      - "saleor/graphql/checkout/types.py#Checkout"
+    expected_answer:
+      claims:
+        - "Checkout is the Django model"
+        - "Checkout is the GraphQL API type"
+      must_not_assert: []
+    expected_tools: ["search_saleor_code"]
+    failure_category: null
+    predicted: "one sense wins — a Django model, a GraphQL type and a module share one identifier"
+    fix: "assert on module#Symbol, never bare names; the module_prefix filter separates the senses"
+    must_not:
+      - "saleor/checkout/tests/test_checkout_complete.py#test_complete_checkout_when_checkout_doesnt_exists"
+    must_refuse: false
+
+  - id: CD1
+    kind: agent
+    source: code
+    family: "D — near-duplicate symbols"
+    question: "Show the test that exercises checkout completion."
+    expected_evidence:
+      - "saleor/checkout/tests/test_checkout_complete.py#test_complete_checkout_when_checkout_doesnt_exists"
+    expected_answer:
+      claims:
+        - "test that completing a missing checkout does not create an order"
+      must_not_assert: []
+    expected_tools: ["search_saleor_code"]
+    failure_category: null
+    predicted: "a family of mock/factory twins crowds the slot"
+    fix: "MMR + dedup cull the twins (Day 9, unchanged)"
+    must_not: []
+    must_refuse: false
+
+  - id: CE1
+    kind: agent
+    source: code
+    family: "E — out of corpus"
+    question: "Where is the Shopify webhook handler?"
+    expected_evidence: []
+    expected_answer:
+      claims: []
+      must_not_assert:
+        - "the Shopify webhook handler is defined in a Saleor module"
+    expected_tools: []
+    failure_category: "refusal"
+    predicted: "hallucination — a plausible-but-nonexistent symbol is forged"
+    fix: "the fused-score gate refuses; never a forged identifier"
+    must_not: []
+    must_refuse: true
+
+  # --------------------------------- the judge-hunting rows (F/G/H — Rule 3 at the judge)
+  - id: F
+    kind: judge_hunting
+    source: judge-hunting
+    family: "judge-hunting — fluent but wrong"
+    question: "What is a checkout in Saleor?"
+    expected_evidence: ["quickstart/api#create-a-checkout"]
+    expected_answer:
+      claims:
+        - "a checkout is created with checkoutCreate"
+      must_not_assert:
+        - "a checkout is completed with checkoutCreate"
+    expected_tools: []
+    failure_category: null
+    predicted: "fluency bias — a confident, well-structured wrong answer passes a model judge"
+    fix: "the deterministic `conclusion ⊆ evidence` check rejects it (V3a)"
+    must_not: []
+    must_refuse: false
+    probe:
+      answer: "A checkout in Saleor is completed with checkoutCreate, which finalizes the cart and returns an order (quickstart/api#create-a-checkout)."
+      citations: ["quickstart/api#create-a-checkout"]
+      evidence: ["quickstart/api#create-a-checkout"]
+
+  - id: G
+    kind: judge_hunting
+    source: judge-hunting
+    family: "judge-hunting — hallucination under confidence"
+    question: "What is a checkout in Saleor?"
+    expected_evidence: ["quickstart/api#create-a-checkout"]
+    expected_answer:
+      claims:
+        - "a checkout is created with checkoutCreate"
+      must_not_assert: []
+    expected_tools: []
+    failure_category: null
+    predicted: "judge fabrication — a fabricated citation a fluent answer hides"
+    fix: "the deterministic `cited ⊆ retrieved` check rejects it (V3b)"
+    must_not: []
+    must_refuse: false
+    probe:
+      answer: "A checkout is created with checkoutCreate (quickstart/api#create-a-checkout) and validated by the ghost service (developer/ghost/page#missing)."
+      citations: ["quickstart/api#create-a-checkout", "developer/ghost/page#missing"]
+      evidence: ["quickstart/api#create-a-checkout"]
+
+  - id: H
+    kind: judge_hunting
+    source: judge-hunting
+    family: "judge-hunting — citation-present, answer-unsupported"
+    question: "What is a checkout in Saleor?"
+    expected_evidence: ["quickstart/api#create-a-checkout"]
+    expected_answer:
+      claims:
+        - "a checkout is created with checkoutCreate"
+      must_not_assert:
+        - "checkout creation requires a Saleor Cloud paid plan"
+    expected_tools: []
+    failure_category: null
+    predicted: "an answer that cites correctly but asserts beyond its evidence"
+    fix: "the deterministic `must_not_assert` check rejects it (V3c)"
+    must_not: []
+    must_refuse: false
+    probe:
+      answer: "A checkout is created with checkoutCreate and requires a Saleor Cloud paid plan (quickstart/api#create-a-checkout)."
+      citations: ["quickstart/api#create-a-checkout"]
+      evidence: ["quickstart/api#create-a-checkout"]
