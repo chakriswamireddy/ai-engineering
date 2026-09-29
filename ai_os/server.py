@@ -17,9 +17,10 @@ import json
 from typing import Any
 
 from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from ai_os import observability as obs
 from ai_os.config import build_gateway_from_env
 from ai_os.contract import (
     ProviderError, RateLimitError, InvalidKeyError, BadRequestError, ProviderTimeout,
@@ -89,12 +90,22 @@ def health() -> dict[str, Any]:
 def chat_endpoint(req: ChatRequest) -> dict[str, Any]:
     if gateway is None:
         return {"error": _build_error}
+    # Day 23 §7 — the route mints the request root; the gateway's attempt spans
+    # attach to it. `trace_id` is the one additive field on the response.
+    trace = obs.start_trace("chat", attributes={
+        "route": "/chat", "messages": len(req.messages),
+        "input_chars": sum(len(m.get("content", "")) for m in req.messages)})
     try:
         completion = gateway.chat(
             req.messages, temperature=req.temperature, max_tokens=req.max_tokens)
     except ProviderError as e:
+        obs.finish_trace(trace, status=obs.status_for_error(e),
+                         error=obs.error_fact(e))
         return _error_response(e)
-    return {
+    obs.add_final_answer_event(trace, ans=completion.text,
+                               citations=0, refusal=False)
+    obs.finish_trace(trace)
+    out = {
         "message": completion.text,
         "model": completion.model,
         "finish_reason": completion.finish_reason,
@@ -104,6 +115,9 @@ def chat_endpoint(req: ChatRequest) -> dict[str, Any]:
         "provider": gateway.last_provider,
         "attempts": gateway.last_attempts,
     }
+    if getattr(trace, "recording", False):
+        out["trace_id"] = trace.trace_id
+    return out
 
 
 @app.post("/chat/stream")
@@ -113,18 +127,44 @@ async def chat_stream_endpoint(req: ChatRequest) -> StreamingResponse:
             iter([f"data: {json.dumps({'error': _build_error})}\n\n"]),
             media_type="text/event-stream")
 
-    def events():
-        try:
-            for item in gateway.stream(
-                    req.messages, temperature=req.temperature, max_tokens=req.max_tokens):
-                data = {k: v for k, v in item.items() if v not in (None, {})}
-                data["provider"] = gateway.last_provider or ""
-                yield f"data: {json.dumps(data)}\n\n"
-            yield "data: [DONE]\n\n"
-        except ProviderError as e:
-            yield f"data: {json.dumps(_error_response(e))}\n\n"
+    # Day 23 §8 — the trace id rides in a response *header*, so the SSE chunk
+    # bytes are unchanged and TTFT is untouched; the stream's spans (including
+    # `ttft_ms`) still land in the trace.
+    trace = obs.start_trace("chat", attributes={
+        "route": "/chat/stream", "messages": len(req.messages)})
+    headers = {"X-Trace-Id": trace.trace_id} if getattr(trace, "recording", False) else {}
 
-    return StreamingResponse(events(), media_type="text/event-stream")
+    def events():
+        with obs.use_trace(trace):
+            try:
+                for item in gateway.stream(
+                        req.messages, temperature=req.temperature,
+                        max_tokens=req.max_tokens):
+                    data = {k: v for k, v in item.items() if v not in (None, {})}
+                    data["provider"] = gateway.last_provider or ""
+                    yield f"data: {json.dumps(data)}\n\n"
+                yield "data: [DONE]\n\n"
+            except ProviderError as e:
+                yield f"data: {json.dumps(_error_response(e))}\n\n"
+            finally:
+                obs.finish_trace(trace)
+
+    return StreamingResponse(events(), media_type="text/event-stream",
+                             headers=headers)
+
+
+@app.get("/traces/{trace_id}")
+def trace_endpoint(trace_id: str):
+    """Day 23 §7 — the sanitized trace for one request. 404 on an unknown id."""
+    trace = obs.default_store().get(trace_id)
+    if trace is None:
+        return JSONResponse({"error": f"unknown trace {trace_id}"}, status_code=404)
+    return trace.as_dict()
+
+
+@app.get("/traces")
+def traces_index() -> dict[str, Any]:
+    return {"count": len(obs.default_store()), "ids": obs.default_store().ids()}
 
 
 @app.get("/ledger")
