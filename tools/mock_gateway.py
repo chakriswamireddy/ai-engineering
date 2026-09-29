@@ -159,6 +159,43 @@ D16_PLAN_BAD = json.dumps({
     ]
 })
 
+# Day 18 — the *distiller's* scripted replies. A model asked to distill N episodes
+# must reply JSON of this shape; the offline suite feeds these to
+# `ai_os/distill.py`, whose mint-time gates (sample size · `authored ⊆ grounded` ·
+# no principal names) are what decide whether the candidate is written. The valid
+# concept is supported by the M2 episodes' own evidence; the three rejected twins
+# are the failure shapes M3/M6 exist to refuse.
+D18_CONCEPT = json.dumps({
+    "claim": "checkout failure caused by declined payment",
+    "source_episodes": ["e1", "e2"],
+    "claims": {"checkout_failure_cause": "payment"},
+})
+# M3 — over-claims: "shipping" and "error" appear in no source's evidence.
+D18_CONCEPT_OVERCLAIM = json.dumps({
+    "claim": "checkout failure caused by declined payment or shipping error",
+    "source_episodes": ["e1", "e2"],
+    "claims": {"checkout_failure_cause": "payment"},
+})
+# M3 — a lesson from a single receipt: cites one episode.
+D18_CONCEPT_ONESOURCE = json.dumps({
+    "claim": "checkout failure caused by declined payment",
+    "source_episodes": ["e1"],
+    "claims": {"checkout_failure_cause": "payment"},
+})
+# M3 — self-contradicting: the concept asserts "shipping" while its sources say
+# "payment" (the semantic card of Day 13's contradiction).
+D18_CONCEPT_CONTRADICT = json.dumps({
+    "claim": "checkout failure caused by declined payment",
+    "source_episodes": ["e1", "e2"],
+    "claims": {"checkout_failure_cause": "shipping"},
+})
+# M6 — a privacy failure: the concept names an individual.
+D18_CONCEPT_PRINCIPAL = json.dumps({
+    "claim": "customer ada always fails checkout",
+    "source_episodes": ["e1", "e2"],
+    "claims": {"checkout_failure_cause": "payment"},
+})
+
 # Day 11 — scripted tool-call scenarios. The stub grows a voice: a script entry
 # that names a tool scenario makes the model *ask* instead of type, and the
 # next entry serves the answer turn (a `tool` role message cannot get one
@@ -399,6 +436,14 @@ ANSWER_SCENARIOS: dict[str, str] = {
         "documentation query refused (the corpus does not cover it) and the order "
         "and payment steps returned no matching rows."
     ),
+    # Day 18 — the distiller's JSON replies (a valid concept + the rejected twins
+    # M3/M6 exist to catch). Served as plain answer text; `ai_os/distill.py` parses
+    # and gates them, so the fixture and the mint check assert on one source.
+    "answer_d18_concept": D18_CONCEPT,
+    "answer_d18_overclaim": D18_CONCEPT_OVERCLAIM,
+    "answer_d18_onesource": D18_CONCEPT_ONESOURCE,
+    "answer_d18_contradict": D18_CONCEPT_CONTRADICT,
+    "answer_d18_principal": D18_CONCEPT_PRINCIPAL,
 }
 
 # Day 6 — scripted embeddings. A tiny vocabulary → vector table lets the
