@@ -53,6 +53,14 @@ from typing import Any
 
 from ai_os.contract import ToolCall
 from ai_os.data import asserted_subset_returned
+from ai_os.memory import (
+    episodicize,
+    memory_enabled_from_env,
+    preference_block,
+    recall,
+    recall_block,
+    remember_episode,
+)
 from ai_os.rag import NOT_COVERED
 from ai_os.sql_safety import POLICY as POLICY_CLASS
 from ai_os.state import (
@@ -81,6 +89,7 @@ from ai_os.trace import (
     grounding_over_transcript,
     observed_failures,
     policy_violations,
+    recall_mode,
     rejection_classes,
     step_trace,
 )
@@ -515,6 +524,7 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
               state=None, principal: str | None = None,
               session_id: str | None = None, task_id: str | None = None,
               run_id: str | None = None,
+              memory_store=None,
               ) -> dict[str, Any]:
     """Reason → choose → execute → observe → reason again → answer.
 
@@ -623,8 +633,28 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
     # transcript below is byte-for-byte Day 12.
     prior_turns = (load_conversation(state, principal, session_id)
                    if (store_on and session_id) else [])
+
+    # Day 18 §4 — the optional **recall pre-step**. With a memory store, the loop
+    # consults the principal's own past: `recall()` scores the finished
+    # investigations against this question and serves the *matching* ones **as
+    # episodes** (citable records, never asserted facts); preferences load as a
+    # cited data table. With no store — or an empty shelf — nothing is injected, so
+    # the transcript is Days 12–17 unchanged (the M8 control). Recall is 0 chats /
+    # 0 embeds; it only *adds* to the starter set.
+    mem_on = (memory_store is not None
+              and getattr(memory_store, "enabled", False)
+              and memory_enabled_from_env())
+    mem_result: dict[str, Any] | None = None
+    mem_block: str | None = None
+    pref_rows: list[dict[str, Any]] = []
+    if mem_on:
+        mem_result = recall(q, principal or "default", memory_store)
+        mem_block = recall_block(mem_result)
+        _pref_text, pref_rows = preference_block(memory_store, principal or "default")
+
     transcript: list[dict[str, Any]] = (
         [{"role": "system", "content": REASONING_PROMPT}]
+        + ([{"role": "system", "content": mem_block}] if mem_block else [])
         + prior_turns
         + [{"role": "user", "content": q}])
     steps: list[dict[str, Any]] = []
@@ -909,6 +939,31 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
     result["session_id"] = session_id
     result["run_id"] = run_id
     result["conversation_turns"] = len(prior_turns)
+    # Day 18 §4 — the memory contract on the run object: whether memory was on, the
+    # recall verdict (matching / below-τ / none), the scores of what was served, and
+    # the preference data table loaded (cited data, never a lesson). With memory off
+    # or an empty shelf these read `off`/`none`/`[]` and no transcript byte moved.
+    result["memory_on_off"] = ("on" if mem_on else "off")
+    result["recall_mode"] = recall_mode(mem_result) if mem_result else "none"
+    result["recall_scores"] = list((mem_result or {}).get("scores") or [])
+    served = list((mem_result or {}).get("recalled") or [])
+    result["recalled"] = served
+    result["recalled_subset_authored"] = (
+        all(e.get("provenance") for e in served) if mem_on else None)
+    result["decayed_memories"] = list((mem_result or {}).get("decayed") or [])
+    result["preferences"] = pref_rows
+    # Day 18 §4 — the episodic index: a finished run becomes a compact
+    # `kind=episodic` record (the deliverable's "finished run → episodic record"),
+    # authored by this run, so a *future* question can recall it — scored, cited as
+    # an episode. With memory off nothing is written, so the OFF switch stays real
+    # (M8). The record never invents: it compacts the run's own output.
+    if mem_on:
+        remember_episode(memory_store, principal or "default",
+                         episodicize(result, task_id=task_id or run_id),
+                         run_id=run_id)
+        result["episodic_indexed"] = True
+    else:
+        result["episodic_indexed"] = False
     return result
 
 

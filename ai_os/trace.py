@@ -835,3 +835,80 @@ def state_columns(*, enabled: bool = True, principal: str | None = None,
     }
     out.update(extra or {})
     return out
+
+
+# ======================================================== Day 18 — the memory
+# §9's memory table columns. Memory is Day 17's store *given a purpose* — so the
+# columns are the day's own verdicts (which shelf, scored?, grounded?, decayed by
+# relevance or retired by the clock?) plus the two invariants: `recalled ⊆ authored`
+# (Day 17, untouched) and `authored ⊆ grounded` (the day's headline, read on every
+# row that mints), with `memory_on_off` as the M8 counterweight.
+
+MEMORY_ON = "on"
+MEMORY_OFF = "off"
+
+
+def recall_mode(result: dict[str, Any]) -> str:
+    """`matching` · `below-τ` · `none` — the recall row's verdict, by code.
+
+    `matching` = at least one episode/concept cleared τ and was served; `below-τ` =
+    the shelf held candidates but none matched; `none` = nothing to serve (memory
+    off, an empty shelf, or every candidate decayed).
+    """
+    if result.get("memory_on_off") == MEMORY_OFF:
+        return "none"
+    if result.get("recalled"):
+        return "matching"
+    if result.get("above_tau") or result.get("available") or result.get("decayed"):
+        return "below-τ"
+    return "none"
+
+
+def concept_subset_grounded(validation: dict[str, Any]) -> bool:
+    """`authored ⊆ grounded` — the distilled claim is satisfiable or not minted.
+
+    Read from a `validate_concept` verdict (distill.py): `True` only when no claim
+    term was unsupported, no source contradicted the claim, and the sample-size /
+    privacy gates passed. A rejected candidate reads `False` — which is the *point*
+    (the minter cannot lie), so the row that reads `ok` is the row that mints.
+    """
+    return bool(validation.get("ok")) or not validation
+
+
+def memory_columns(*, enabled: bool = True, principal: str | None = None,
+                   kind: str | None = None, recalled: str | None = None,
+                   recalled_count: int = 0, score: float | None = None,
+                   strength: float | None = None,
+                   source_episodes: Sequence[str] = (), minted: bool = False,
+                   recalled_subset_authored_ok: bool = True,
+                   authored_subset_grounded_ok: bool = True,
+                   expired: bool = False, expired_by: str | None = None,
+                   deleted: bool = False, principal_ok: bool = True,
+                   extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The §9 memory row: what was recalled/minted, from which sources, how long.
+
+    `recalled` is the string verdict (`matching`/`below-τ`/`none`); `minted` is the
+    distiller's; `expired_by` distinguishes the reason a record left service
+    (`"relevance"` = below its strength τ, `"clock"` = past `expires_at`) — the M4
+    ordering, made visible. `recalled_subset_authored` and `authored_subset_grounded`
+    are the day's two invariants, and `memory_on_off` is the M8 control.
+    """
+    out: dict[str, Any] = {
+        "memory_on_off": MEMORY_ON if enabled else MEMORY_OFF,
+        "memory_kind": kind,
+        "principal": principal,
+        "recalled": recalled,
+        "recalled_count": int(recalled_count),
+        "score": score,
+        "strength": strength,
+        "source_episodes": list(source_episodes),
+        "minted": bool(minted),
+        "recalled_subset_authored": bool(recalled_subset_authored_ok),
+        "authored_subset_grounded": bool(authored_subset_grounded_ok),
+        "expired": bool(expired),
+        "expired_by": expired_by,
+        "deleted": bool(deleted),
+        "principal_ok": bool(principal_ok),
+    }
+    out.update(extra or {})
+    return out
