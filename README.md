@@ -1,4 +1,4 @@
-# ai-layer — Days 4–20: Gateway → Search → RAG → Code RAG → Tools → Loop → Data → Safe SQL → Planning → State → Memory → Multi-Agent → Evaluation
+# ai-layer — Days 4–21: Gateway → Search → RAG → Code RAG → Tools → Loop → Data → Safe SQL → Planning → State → Memory → Multi-Agent → Evaluation → RAG Benchmark
 
 A reusable AI layer built in layers:
 
@@ -103,6 +103,16 @@ A reusable AI layer built in layers:
     never touches the answer path), and the **regression gate**
     (`tools/regress_all.py`). The invariant is **`judged ⊆ pre-registered`** and the
     control is **V9**: the harness installed and unused changes nothing.
+16. **Day 21 — RAG Benchmark**: *measure retrieval*, don't report it. The metric
+    core `ai_os/rag_bench.py` makes **precision@K** writable (over a pre-registered
+    `relevant_also` set — the golden set is the relevance oracle), inherits
+    **recall@K/MRR** verbatim, and reports **retrieval relevance** as Day 9's free
+    `rel()`; `ai_os/semantic_judge.py` fills Day 20's parked cells as
+    **claim-coverage over the run's own evidence** (citation support · groundedness ·
+    answer relevance). `tools/bench_rag.py` runs the **R-report** on the stub / real
+    doc store / code store, calibrates **τ** on real scores (R8), and hosts the
+    **R1–R9** fixture set with the **R9 control** (the bench is not a fixer). All
+    `MECH`, **0 chats**.
 
 ```
 Application
@@ -152,7 +162,10 @@ raw HTTP via `urllib`.
 | `ai_os/eval_dataset.py` | day 20: the golden-row parser/validator — the five fields, **oracle-derivability** (`claim_derivable`), the content hash + stale-hash refusal, and `rows_registered_before`; day 21: the **length-guarded** stem matcher (`checkout` never licenses `checkoutCreate`) |
 | `ai_os/golden.yaml` | day 20/21: the pre-registered, hash-pinned dataset — the doc nine + code six + the adversarial F/G/H, plus Day 21's `relevant_also` (precision's relevance oracle), `human_review` (I1) and `semantic_fail` (K1) and the I1/J1/K1 rows |
 | `ai_os/judge.py` | day 20: the layered grader — layer 1 deterministic (`MECH`, 0 chats), layer 2 the semantic *slot*, layer 3 LLM-as-judge **off by default** (explains, never decides); **`judged ⊆ pre-registered`** |
+| `ai_os/rag_bench.py` | day 21: the metric core — `precision_at_k` over `expected ∪ relevant_also` (honest `n/a` when undefined), `retrieval_relevance` (mean free `rel()`), `retrieve_bench` (recall@K/MRR via `trace.expected_stats`), `tau_sweep`, `control_agrees` (R9) |
+| `ai_os/semantic_judge.py` | day 21: layer 2 of `judge.py` — citation support · groundedness · answer relevance as **claim-coverage over the run's own evidence**; the deterministic subnet + the flagged per-claim lane (`EVAL_JUDGE=model`, off) |
 | `tools/eval_harness.py` | day 20: the evaluation harness (a **router, not a grader**) + the **V1–V9** evaluation set |
+| `tools/bench_rag.py` | day 21: the RAG benchmark runner — the R-report, `--stub`/`--real [--source doc\|code]`, `--k`, `--tau-sweep`, `--baseline`, and the **R1–R9** fixtures |
 | `tools/regress_all.py` | day 20/21: Rule-2's regression gate — the retrieval families + every day suite (incl. the bench) + the golden rows, exactly as green |
 | `ai_os/agent.py` | day 11/12: `run_tool_answer` (one tool turn → grounded answer) + `run_agent` — the loop: transcript-as-state, three exits + `gave_up`, per-step observations; `cited ⊆ retrieved` over the accumulated transcript; `REASONING_PROMPT` is the reasoning-turn system prompt; day 16: an optional `plan` delegates to `executor.run_plan` (a one-step plan *is* the loop); day 17: an optional `state` (+ `session_id`) persists **conversation state** per session/principal — prior turns load as headers, never a hidden variable; day 18: an optional `memory_store` runs the **recall pre-step** (scored episodic recall, cited as episodes), loads the **preference data table** as cited data, and at **run-end** indexes the finished run as an authored `kind=episodic` record (the deliverable's "finished run → episodic record" arrow) — with no store, or an empty shelf, the transcript is unchanged (M8), and `MEMORY_ENABLED=0` forces the subsystem off |
 | `tools/mock_gateway.py` | scripted dual-provider stub `:8700`/`:8701` (chat, embeddings, **tool_calls** scenarios: `tc_d12_*`/`tc_d13_*`/`tc_d14_*`/`tc_d15_*`; day 16's `D16_PLAN_*` stored plans + `answer_d16_*`; day 18's distiller JSON — `D18_CONCEPT*` + `answer_d18_*`) |
@@ -240,6 +253,8 @@ python tools/state_smoke.py             # day 17 S1–S9 (the store · provenanc
 python tools/memory_smoke.py            # day 18 M1–M9 (scored episodic recall · the distiller's mint gates · semantic expiry · the M8 off/empty-store control) + the Days 7–17 re-run
 python tools/architecture_smoke.py      # day 19 G1–G9 (the two topologies · the receipt contract · containment · the union-context ledger · the G9 control) + the Days 7–18 re-run
 python tools/eval_harness.py --fixtures # day 20 V1–V9 (integrity · reproducibility · drift · the gate · the V9 control)
+python tools/bench_rag.py --fixtures    # day 21 R1–R9 (recall@K · precision@K · MRR · relevance · the semantic subnet · τ · the R9 control), 0 chats
+python tools/bench_rag.py --stub        # day 21 §9 R-report (stub: D1 precision 0.444; K1 fails support; I1 pending-human)
 python tools/regress_all.py             # day 20/21 Rule-2 gate: doc nine + code six + every day suite (7–21) + the golden rows, exactly as green
 ```
 
@@ -475,3 +490,15 @@ with the provider config it belongs to.
   **`judged ⊆ pre-registered`**; the control is **V9**: the harness installed and
   unused changes nothing. See `docs/concepts/evaluation.md`,
   `docs/evaluations/eval-day20.md`, and `python tools/eval_harness.py --fixtures`.
+- Day 21 measures retrieval: `ai_os/rag_bench.py` (the metric core — precision@K
+  over a pre-registered `relevant_also`, plus recall@K/MRR and the free `rel()`
+  relevance), `ai_os/semantic_judge.py` (Day 20's parked cells as claim-coverage
+  over the run's own evidence), and `tools/bench_rag.py` (the R-report + the
+  **R1–R9** fixtures + the τ calibration). On the real doc store the bench
+  **indicts its own pipeline** — 4 of 7 answerable rows surface none of their
+  expected docs at k=9 — and the τ sweep gives a hairline separation (**+0.011**,
+  τ=0.794, 0 leaks), so the fitted gate ships but the durable refusal verdict
+  stays the semantic tier. All `MECH`, **0 chats**. See
+  `docs/concepts/rag-benchmark.md`, `docs/evaluations/bench-day21.md`, and
+  `python tools/bench_rag.py --fixtures`. Real answer *quality* is the real-key
+  handoff; agent behaviour is **Day 22's** benchmark.
