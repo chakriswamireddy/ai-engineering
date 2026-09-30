@@ -414,6 +414,17 @@ AGENT_TERMINATIONS: dict[str, str] = {
     # way past a denial has become a fuzzer for its own defenses.
     "policy": "Day 15 — the safe SQL layer refused a *policy* violation "
               "(forbidden request); the run stopped rather than self-correct",
+    # Day 27 — the eighth exit, and the one that is *resolvable*. It exists
+    # separately from `policy` because a run that stops for approval and a run that
+    # stops for a forbidden request must not share a terminal: the first is
+    # withheld pending a person who can still say yes, the second was refused and
+    # nothing a person does changes that. Sharing the terminal would make
+    # `TERMINATION_NOTE["policy"]` — "the request was refused as a policy
+    # violation" — a lie told on the day the system is asking for trust.
+    "awaiting_approval": "Day 27 — a consequential action was refused pending human "
+                         "approval; the layer opened request `approval_request_id` "
+                         "and the run stopped rather than proceed or self-correct "
+                         "(the request is durable and is decided out of band)",
 }
 
 
@@ -589,10 +600,74 @@ def permission_columns(result) -> dict[str, Any]:
     return out
 
 
+def approval_from_result(result) -> dict[str, Any]:
+    """Promote the Day 27 approval metadata from a `ToolResult` — **metadata only**.
+
+    Empty for every call that produced no request, so a legitimate call row is
+    byte-for-byte Days 11–26 (the H9 control). The digest, the tool name, the state,
+    the reversibility, the signal *keys* and the scrutiny verdict are promoted; the
+    record's argument values and its `proposal` text never are — the third
+    consecutive day on which the requirement is identical, and restated for that
+    reason: **a safety feature that expands what gets recorded is a regression
+    wearing a feature's clothes**, and the approval record is the most sensitive new
+    artifact in the repository, because it is the only place where a model's intent
+    and a person's name coexist.
+    """
+    info = getattr(result, "approval", None)
+    if not isinstance(info, dict):
+        return {}
+    out: dict[str, Any] = {}
+    if info.get("request_id"):
+        out["approval_request"] = info["request_id"]
+    if info.get("state"):
+        out["approval_state"] = info["state"]
+    if info.get("digest"):
+        out["approval_digest"] = info["digest"]
+    if info.get("reversibility"):
+        out["approval_reversibility"] = info["reversibility"]
+    if info.get("signals"):
+        out["approval_signals"] = list(info["signals"])
+    if info.get("code") and info.get("code") != "approval_required":
+        out["approval_code"] = info["code"]
+    return out
+
+
+def approval_columns(*, requested: bool = False, state: str | None = None,
+                     decision: str | None = None, digest: str | None = None,
+                     reversibility: str | None = None,
+                     signals_present: Sequence[str] = (), ttl_s: float | None = None,
+                     applied: bool = False, compensated: bool = False,
+                     extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The Day 27 §9 approval row: one row per fixture, every cell a real record's.
+
+    In the shape of `plan_columns` / `state_columns` / `memory_columns` /
+    `topology_columns`, and metadata-safe by construction: **the digest, the state,
+    the reversibility and the signal *keys* are promoted; the record's argument
+    values and its `proposal` text are never promoted.** `signals_present` is the
+    signal keys only — a signal *value* in the report would be the aggregate the day
+    refuses, arriving through the reporting layer.
+
+    `ttl_s` is the decision window (`APPROVAL_TTL_S`), not the store's retention:
+    the two clocks are different, and a report that conflated them would misstate
+    what an expiry means.
+    """
+    out: dict[str, Any] = {
+        "approval_requested": bool(requested),
+        "approval_state": state,
+        "approval_decision": decision,
+        "approval_digest": digest,
+        "approval_reversibility": reversibility,
+        "approval_signals": sorted(str(s) for s in (signals_present or ())),
+        "approval_ttl_s": ttl_s,
+        "approval_applied": bool(applied),
+        "approval_compensated": bool(compensated),
+    }
+    out.update(extra or {})
+    return out
+
+
 def policy_violations(steps: list[dict[str, Any]]) -> int:
     """How many calls the safety layer refused as a **policy** rejection.
-
-    The counter that *stops* a run: a policy rejection is a forbidden request,
     not a mistake, so it must not invite another attempt. Distinct from Day 12's
     `rejections` (arg schema) and Day 13's tool failures.
     """
