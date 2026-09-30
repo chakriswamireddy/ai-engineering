@@ -560,6 +560,35 @@ def data_columns(result) -> dict[str, Any]:
     return out
 
 
+def permission_columns(result) -> dict[str, Any]:
+    """Promote the Day 26 permission metadata from a `ToolResult` — **metadata only**.
+
+    Empty for an ungoverned result, so a pre-Day-26 call row is byte-for-byte
+    unchanged (the C9 control). `permission` is the decision string, and
+    `permission_code` the named verdict (`no_grant`/`unknown_tool`/
+    `missing_decision`/`result_violation`/`allowed`); `result_redacted` lists the
+    columns the result contract dropped. The decision travels on the value, so the
+    trace reads it off the value rather than reconstructing it — and it is a
+    security feature that *expands* what gets recorded, so the Day 23/24 rule
+    holds: the fields are names and codes, never a value.
+    """
+    out: dict[str, Any] = {}
+    perm = getattr(result, "permission", None)
+    if isinstance(perm, dict):
+        if perm.get("decision"):
+            out["permission"] = perm["decision"]
+        if perm.get("code"):
+            out["permission_code"] = perm["code"]
+        if perm.get("effect"):
+            out["permission_effect"] = perm["effect"]
+        if perm.get("data"):
+            out["permission_data"] = perm["data"]
+    redacted = list(getattr(result, "redacted", None) or [])
+    if redacted:
+        out["result_redacted"] = redacted
+    return out
+
+
 def policy_violations(steps: list[dict[str, Any]]) -> int:
     """How many calls the safety layer refused as a **policy** rejection.
 

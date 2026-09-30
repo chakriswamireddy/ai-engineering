@@ -218,7 +218,7 @@ def _execute_step_call(call, vr, step: Step, *, registry: ToolRegistry,
     if vr.ok:
         result, elapsed_ms = execute_bounded(
             registry, call.name, vr.args or {}, tool_timeout_s=tool_timeout_s,
-            clock=clock)
+            clock=clock, decision=vr.decision)
     else:
         result = vr
 
@@ -239,7 +239,8 @@ def _execute_step_call(call, vr, step: Step, *, registry: ToolRegistry,
         retries += 1
         rung = RUNG_RETRY
         result, more = execute_bounded(registry, call.name, vr.args or {},
-                                       tool_timeout_s=tool_timeout_s, clock=clock)
+                                       tool_timeout_s=tool_timeout_s, clock=clock,
+                                       decision=vr.decision)
         elapsed_ms += more
         if result.error_kind in TOOL_ERROR_KINDS:
             failures += 1
@@ -261,7 +262,8 @@ def _execute_step_call(call, vr, step: Step, *, registry: ToolRegistry,
                 vr = fvr
                 result, more = execute_bounded(
                     registry, call.name, fvr.args or {},
-                    tool_timeout_s=tool_timeout_s, clock=clock)
+                    tool_timeout_s=tool_timeout_s, clock=clock,
+                    decision=fvr.decision)
                 elapsed_ms += more
             else:
                 result = fvr
@@ -279,7 +281,7 @@ def _execute_step_call(call, vr, step: Step, *, registry: ToolRegistry,
             if fvr.ok:
                 fres, more = execute_bounded(registry, sibling, fvr.args or {},
                                              tool_timeout_s=tool_timeout_s,
-                                             clock=clock)
+                                             clock=clock, decision=fvr.decision)
                 elapsed_ms += more
                 if fres.error_kind in TOOL_ERROR_KINDS:
                     failures += 1

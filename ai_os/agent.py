@@ -91,6 +91,7 @@ from ai_os.trace import (
     grounding_over_transcript,
     injection_columns,
     observed_failures,
+    permission_columns,
     policy_violations,
     recall_mode,
     rejection_classes,
@@ -225,13 +226,21 @@ TERMINATION_NOTE: dict[str, str] = {
         "observations already in this transcript and say plainly that the tool "
         "failed and what is therefore missing. Do NOT invent evidence."
     ),
-    # Day 15 — the policy wall. The note explicitly forbids the rephrase-the-
-    # forbidden-request move, because that is exactly the attack a helpful loop
-    # would otherwise assist.
+    # Day 15 / Day 26 — the policy wall. The note explicitly forbids the
+    # rephrase-the-forbidden-request move, because that is exactly the attack a
+    # helpful loop would otherwise assist. Day 26 generalises it from "the safe SQL
+    # layer refused" to the policy *class*, because a permission denial, a denied
+    # result column, or an out-of-role call does not come from SQL — and a note
+    # that said it did would lie on every non-SQL refusal, which is worse than no
+    # note at all. Naming the class is not disclosure: the model must know it may
+    # not proceed, and the operator must know which layer refused.
     "policy": (
-        "The run stopped because the safe SQL layer refused a *policy* violation "
-        "(a write, a denied/sensitive table or column, an ambiguous definition, "
-        "or a query over the resource cap). This is not a mistake to fix by "
+        "The run stopped because a policy check refused this call. The refusal "
+        "class is one of: `permission_denied` (the tool is not granted to this "
+        "caller, a write was attempted, or a result broke its contract), "
+        "`sql_policy` (a write, a denied/sensitive table or column, an ambiguous "
+        "definition, or an over-cost query), or `role_violation` (the tool is "
+        "outside this specialist's role). This is not a mistake to fix by "
         "rephrasing: say plainly that the request was refused and why (naming the "
         "class, not schema details), and do NOT attempt a workaround. Answer only "
         "from the observations already in this transcript. Do NOT invent evidence."
@@ -343,9 +352,25 @@ def _tool_message(call, result: ToolResult,
 
 # ============================================================== Day 13 guards
 
+def _registry_governed(registry: Any) -> bool:
+    """Is this registry governed by the Day 26 permission layer?
+
+    A preference, not a guess: `ToolRegistry` answers directly, and the test
+    proxies (`CountingRegistry`) forward the question to the registry they wrap.
+    An object that does not answer is treated as **ungoverned**, so a foreign or
+    stub registry keeps the Days 11–25 call shape.
+    """
+    fn = getattr(registry, "permissions_on", None)
+    try:
+        return bool(fn()) if callable(fn) else False
+    except Exception:                                  # noqa: BLE001
+        return False
+
+
 def execute_bounded(registry: ToolRegistry, name: str, args: dict[str, Any], *,
                     tool_timeout_s: float | None,
-                    clock=time.monotonic) -> tuple[ToolResult, float]:
+                    clock=time.monotonic,
+                    decision: Any = None) -> tuple[ToolResult, float]:
     """§3 — the wall-clock budget around *one* tool call, not around the step.
 
     The orchestrator knows *a step* hung; the boundary knows *which call* hung
@@ -353,10 +378,18 @@ def execute_bounded(registry: ToolRegistry, name: str, args: dict[str, Any], *,
     **observation** (`{ok: false, error_kind: "timeout"}`) exactly as a refusal
     is — nothing unwinds, nothing crashes, and the transcript stays the memory.
     The clock is injectable so the suite is deterministic (no real sleeping).
+
+    Day 26 — `decision` is the permission verdict `validate_args` produced,
+    carried into `registry.execute`. On a governed registry the decision is what
+    lets the call run at all: `execute(decision=None)` denies, so a call site that
+    forgot to validate is *safe by omission* rather than silently ungoverned.
     """
     t0 = clock()
     try:
-        result = registry.execute(name, args)
+        if _registry_governed(registry):
+            result = registry.execute(name, args, decision=decision)
+        else:
+            result = registry.execute(name, args)
     except Exception as exc:                       # an executor bug, not the model's
         return ToolResult.tool_error(
             name, error_kind=ERROR_TOOL,
@@ -450,6 +483,7 @@ def _call_row(call, vr: ToolResult, result: ToolResult,
     if clamped:
         row["obs_clamped"] = True
     row.update(data_columns(result))          # Day 14 §8 — gen_sql/validation/…
+    row.update(permission_columns(result))    # Day 26 §7 — decision/code/redacted
     return row
 
 
@@ -671,6 +705,11 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
         tr.add_event("request", route="agent", request_sha256=obs.sha256_text(q),
                      request_chars=len(q))
 
+    # Day 26 §8 — attach the run/trace ids the audit entry records. Only a
+    # governed registry audits, so an ungoverned run pays nothing.
+    if _registry_governed(registry):
+        registry.set_context(run_id=run_id, trace_id=getattr(tr, "trace_id", None))
+
     # ============================================== Day 25 §6/§7 — the firewall
     # L2 detection reports; L1 authority decides. `guard_request` scans the *user
     # turn* (the one channel a user holds) and returns whether it reaches a
@@ -870,7 +909,8 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
                 # substituting a sibling tool for it) is the loop assisting a bypass.
                 result, elapsed_ms = execute_bounded(
                     registry, call.name, vr.args or {},
-                    tool_timeout_s=timeout_cap, clock=clock)
+                    tool_timeout_s=timeout_cap, clock=clock,
+                    decision=vr.decision)
                 retries = failures = timeouts = 0
                 if result.rejection_class == POLICY_CLASS:
                     policy_hits += 1
@@ -887,7 +927,8 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
                     retries += 1
                     result, more = execute_bounded(
                         registry, call.name, vr.args or {},
-                        tool_timeout_s=timeout_cap, clock=clock)
+                        tool_timeout_s=timeout_cap, clock=clock,
+                        decision=vr.decision)
                     elapsed_ms += more
                     if result.error_kind in TOOL_ERROR_KINDS:
                         failures += 1
@@ -907,7 +948,8 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
                         if fb_vr.ok:
                             fb_result, fb_elapsed = execute_bounded(
                                 registry, sibling, fb_vr.args or {},
-                                tool_timeout_s=timeout_cap, clock=clock)
+                                tool_timeout_s=timeout_cap, clock=clock,
+                                decision=fb_vr.decision)
                             elapsed_ms += fb_elapsed
                             fallbacks_used += 1
                             if fb_result.error_kind in TOOL_ERROR_KINDS:
@@ -1092,6 +1134,20 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
         "routed_to": routed_to,
         "role": role,
     }
+
+    # Day 26 §7 — the permission contract, additive and **empty on an ungoverned
+    # run**: the granted slice (the prompt surface), whether any denied call hit
+    # the `default` fallback, and the columns a result contract dropped. These are
+    # the only differences a governed run shows on legitimate traffic, and a
+    # projection that excludes them makes C9's on ≡ off check exact.
+    if _registry_governed(registry):
+        result["granted_tools"] = registry.granted_tools()
+        result["unknown_principal_fallback"] = any(
+            call.get("permission_code") == "unknown_principal"
+            for step in steps for call in step.get("calls") or [])
+        result["result_redacted"] = sorted(
+            {col for step in steps for call in step.get("calls") or []
+             for col in (call.get("result_redacted") or [])})
 
     # Day 25 §6 — the injection contract, additive and *empty on a clean run*.
     # With no signals and no block, nothing is added, so a legitimate run result is

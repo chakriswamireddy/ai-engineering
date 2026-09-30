@@ -289,6 +289,41 @@ def attacks_endpoint(trace_id: str | None = None):
     }
 
 
+@app.get("/audit")
+def audit_endpoint(principal: str | None = None, tool: str | None = None,
+                   decision: str | None = None) -> dict[str, Any]:
+    """Day 26 §8 — the decision log, read-only.
+
+    `GET /audit?principal=…&tool=…&decision=deny` returns the recorded decisions
+    (allows included), filtered by the three fields that matter. There is nothing
+    to leak because no value is ever stored — the entry carries the principal, the
+    tool, the declared effect/data class, the decision and its code, an args hash
+    + shape, a result shape, and a hash chain. Note the honest limit beside the
+    surface: `server.py` had no agent route and no identity before today, so this
+    is the first thing in the repo that is meaningfully per-caller — and it is
+    per-caller only because someone put a string in a request. That is a Day 29
+    fact wearing today's clothes.
+    """
+    from ai_os import audit as audit_mod
+    log = audit_mod.default_audit_log()
+    rows = log.entries(principal=principal, tool=tool, decision=decision)
+    return {"count": len(rows), "total": len(log), "entries": rows}
+
+
+@app.get("/audit/verify")
+def audit_verify_endpoint() -> dict[str, Any]:
+    """Day 26 §8 — `{entries, chain_ok, first_broken_seq}`.
+
+    `entries` and `chain_ok` are reported **separately** on purpose: a chain is
+    tamper-evident for edits, reorders, and interior deletions (it breaks and
+    names the first bad `seq`) and structurally blind to truncation of its own
+    tail — nothing inside the process can notice a file that simply ends. The
+    external anchor that closes that gap is Day 29's.
+    """
+    from ai_os import audit as audit_mod
+    return audit_mod.default_audit_log().verify()
+
+
 def _ingest_enabled() -> bool:
     return os.getenv("TRACE_INGEST", "0").strip().lower() in {
         "1", "true", "yes", "on"}

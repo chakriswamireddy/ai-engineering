@@ -1,0 +1,104 @@
+# Day 26 §3/§6 — who may call what, and what may come back.
+#
+# The grant file. The layer that decides (ai_os/permissions.py) reads it, and the
+# choke point that refuses (ai_os/tools.py's ToolRegistry) enforces it. Nothing
+# here is a heuristic the executor embeds: the `default` set is exactly today's
+# seven registered tools, the argument caps are pinned to measured legitimate
+# maxima, and the read-only claim is a *reviewable* fact — there is no `write`
+# effect anywhere in this file.
+#
+#   * allow-lists, always: a tool has no authority until a grant names it, so a
+#     tool added tomorrow arrives DENIED until a human edits this file.
+#   * declaration + policy + privilege: the tool says what it is (`effect`/`data`),
+#     this file says what is permitted, the `saleor_read_only` role says what is
+#     possible. Only the last is a fact about the world.
+#   * deny by default: an unknown principal gets `default` (the fallback is
+#     audited); a missing grant is a denial; a malformed file is a load error,
+#     never a partial load.
+#   * exactly one check per argument: `sql` is semantic (SafeSql.inspect + a byte
+#     cap), `id`/`table`/`query`/`module` are shapes. Never both, never neither.
+#   * the result contract: `columns` is the declared set a tool may return
+#     ("*" = whatever its query declares, still ∩ `columns_deny`); `max_rows` is
+#     the cap; `evidence` is the retrieval contract; `redact` names columns the
+#     result check drops (and records) before the value reaches the model.
+#
+# The `email` decision is deliberately OPEN (PENDING, Day 4 owner: the team that
+# owns account_user): the strict default redacts it; denying the tool or granting
+# the column per principal are the other two mechanisms this file could express.
+
+version: 1
+
+# The principal map. `default` is both the anonymous set and the fallback for a
+# caller whose name appears in no entry — so an unknown caller is LESS privileged
+# than a known one, never more. Its union is still only the seven tools of
+# `build_default_registry`; tightening is a one-line, human, reviewable change.
+principals:
+  default:   [search_saleor_docs, search_saleor_code, get_product, get_order,
+              get_customer, run_saleor_sql, describe_saleor_schema]
+  analyst:   [search_saleor_docs, search_saleor_code, run_saleor_sql,
+              describe_saleor_schema]
+  support:   [search_saleor_docs, search_saleor_code, get_order, get_product,
+              get_customer]
+
+# Per-tool declarations. `effect: read` everywhere — the file's maximum authority
+# is a read, and a `write` may only be added with `confirm: human` (which no tool
+# in this repository implements yet; the C3 fixture proves the refusal).
+tools:
+  search_saleor_docs:
+    effect: read
+    data: public
+    args:
+      query: {maxLength: 512}                 # measured: longest legitimate doc query
+      k: {minimum: 1, maximum: 10}
+      max_chars: {minimum: 1, maximum: 4000}  # the other end the schema never had
+    result: {evidence: true, max_rows: 10}    # evidence records, not columns
+
+  search_saleor_code:
+    effect: read
+    data: public
+    args:
+      query: {maxLength: 512}
+      kind: {enum: [function, class, mutation, test, module]}
+      module: {maxLength: 200}
+      k: {minimum: 1, maximum: 10}
+    result: {evidence: true, max_rows: 10}
+
+  run_saleor_sql:
+    effect: read
+    data: internal
+    args:
+      sql: {maxLength: 8000, semantic: true}  # a *query*: SafeSql owns it, plus a byte cap
+    result: {columns: "*", max_rows: 100}     # the store's page is the cap
+
+  describe_saleor_schema:
+    effect: read
+    data: internal
+    args:
+      table: {enum: [order_order, order_orderline, product_product,
+                     product_productvariant,
+                     product_productvariantchannellisting, account_user,
+                     channel_channel]}        # == SCHEMA_CARD == tables_allow (load-checked)
+    result: {columns: "*", max_rows: 1}
+
+  get_product:
+    effect: read
+    data: public
+    args:
+      id: {pattern: "^[A-Za-z0-9_-]{1,64}$"}
+    result: {columns: [id, name, slug, product_type, currency, price, variants],
+             max_rows: 1}
+
+  get_order:
+    effect: read
+    data: internal
+    args:
+      id: {pattern: "^[A-Za-z0-9_-]{1,64}$"}
+    result: {columns: [id, number, status, currency, total, lines], max_rows: 1}
+
+  get_customer:
+    effect: read
+    data: pii                                # PII without being a secret: the deny
+    args:                                    # list has no vocabulary for it, so the
+      id: {pattern: "^[A-Za-z0-9_-]{1,64}$"} # result contract does
+    result: {columns: [id, email, orders, currency], max_rows: 1,
+             redact: [email]}                # the value leaves; the shape stays

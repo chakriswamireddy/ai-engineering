@@ -36,9 +36,11 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
+from ai_os import audit as audit_mod
 from ai_os import observability as obs
+from ai_os import permissions as perms_mod
 from ai_os.data import (
     DIALECT_NOTE,
     GLOSSARY,
@@ -106,6 +108,22 @@ ERROR_INTERNAL = "internal"             # Day 13 — the harness itself is broke
 # beat parsers, Day 15, applied between loops), so the loop stops rather than
 # self-correcting its way into another role's surface.
 ERROR_ROLE = "role_violation"
+# Day 26 — the *permission* gate. A tool that is registered but not granted to the
+# principal, an unknown caller, a missing decision, or a result that broke its
+# contract is a **policy** rejection on the same `{ok: false}` surface — so Day 12's
+# STOP rule, Day 13's guard ring, the fallback ladder's policy exclusion, and the
+# trace all handle it with code that already exists and **no new control plane**.
+# It must never arrive as `repairable`: a denial that hands the model the retry the
+# denial exists to prevent is a bypass with better manners.
+ERROR_PERMISSION = "permission_denied"
+
+# Day 26 §7 — the canonical tool names, in registration order. The permission
+# loader validates that every grant names a registered tool against exactly this
+# set, so a grant for a tool nobody registered is a load error (never a partial
+# load), and `default` = these seven is a fact the C9 control can assert.
+DEFAULT_TOOL_NAMES: tuple[str, ...] = (
+    "search_saleor_docs", "search_saleor_code", "get_product", "get_order",
+    "get_customer", "run_saleor_sql", "describe_saleor_schema")
 
 # Rejections the model fixes with a *different* call. They are never retried
 # with the same args — "same wrong thing, louder" is Day 12's disease.
@@ -168,6 +186,20 @@ class ToolResult:
     retryable: bool = False
     fallback_from: str | None = None
     rejection_class: str | None = None
+    # Day 26 §7 — the permission decision, carried *on the value* rather than
+    # beside it. `permission` is the serialized four-key view
+    # (`{"decision","code","effect","data"}`) the trace promotes; `decision` is the
+    # full `Decision` object `execute` receives, so the decision cannot be
+    # separated from the result a future call site holds. Neither is serialized
+    # into the model-facing `as_dict()`/`as_message()`: the decision is metadata
+    # about the call, not part of the observation, and adding it to the wire would
+    # move a legitimate run's bytes (C9).
+    permission: dict[str, Any] | None = None
+    decision: Any = None
+    # Day 26 §7 — the columns the result contract dropped (and *recorded*): a
+    # redaction that is not in the record and not in the audit entry is Day 24's
+    # missing span arriving through the back door.
+    redacted: list[str] = field(default_factory=list)
 
     @classmethod
     def success(cls, name: str, *, args: dict | None = None,
@@ -353,58 +385,182 @@ def validate_args(schema: dict[str, Any], args_raw: Any) -> tuple[bool, Any]:
 # ------------------------------------------------------------------- registry
 
 class ToolRegistry:
-    """name → `{schema, fn}`; `schemas()` feeds the gateway, `execute()` dispatches.
+    """name → `{schema, fn, grant}`; the **one choke point** every call passes.
 
-    The registry is the model's contract surface: an unknown tool name is a
-    **rejection result**, never an exception and never a forged run.
+    `schemas()` feeds the gateway, `validate_args` produces the decision, and
+    `execute` dispatches — and, when the registry is **governed**
+    (`permissions=` set), it is the *only* code that may say no. There are exactly
+    five ways this system reaches a tool — the loop, `run_tool_answer`, Day 16's
+    `executor.run_plan`, the fallback ladder's sibling substitution, and Day 19's
+    `RoleAgent.run` — and all five go through `validate_args` + `execute`, so the
+    check belongs here and a hypothetical sixth path is governed by omission.
 
-    Day 19 adds one more surface: a registry may be **scoped** to a role, in which
-    case a tool that exists elsewhere in the system is *denied* here with a typed
-    `role_violation` (a `policy` rejection). `scope()` is how a specialist is "the
-    existing loop with a tool-list slice" — not a new program, just a narrower
-    contract.
+    Three Day 26 rules live in this class and nowhere else:
+
+    * **registration is a grant.** `register()` without a grant raises: a new tool
+      cannot arrive with authority nobody declared. `build_default_registry`
+      supplies each tool's declaration from `permissions.yaml`.
+    * **the decision travels on the value.** `validate_args` attaches the
+      `Decision` (and its four-key `permission` view) to the `ToolResult`, and
+      `execute(name, args, decision=None)` **denies when it is handed no
+      decision** — the clause that converts "every caller remembered" into "every
+      caller is safe by default".
+    * **the result is checked before it is serialized.** `check_result` runs *after*
+      the tool returns and *before* the value becomes a `tool` message; a violation
+      keeps the shape (`columns`/`query_kind`/`executed`/`redacted`), drops every
+      value, and routes as a `policy` failure. A redaction drops the named columns
+      and records them.
+
+    Day 19's role surface survives: a registry may be **scoped** to a role, in
+    which case a tool that exists elsewhere is *denied* here with a typed
+    `role_violation`. `scope()` is now a **derived view** of the grant file — a
+    role's tool list is the tools its principal is granted, filtered by the role's
+    declared interest — so `ROLE_TOOLS` and the grants can no longer disagree.
+
+    With `permissions=None` the registry is **ungoverned**: no permission check, no
+    result contract, no audit — Days 11–25 exactly as they were. That is the C9
+    off-switch, and it is why the pre-Day-26 fixtures that call `execute()`
+    directly (a tokenless `search_saleor_code` probe) still pass.
     """
 
-    def __init__(self, *, denied: dict[str, str] | None = None) -> None:
+    def __init__(self, *, denied: dict[str, str] | None = None,
+                 permissions: "perms_mod.PermissionSet | None" = None,
+                 principal: str | None = None,
+                 audit: "audit_mod.AuditLog | audit_mod.NullAuditLog | None" = None
+                 ) -> None:
         self._tools: dict[str, dict[str, Any]] = {}
+        self._grants: dict[str, Any] = {}
         self._denied: dict[str, str] = dict(denied or {})
+        self._permissions = permissions
+        self._principal = (principal if principal is not None
+                           else (perms_mod.principal_from_env()
+                                 if permissions is not None else None))
+        self._audit = audit if audit is not None else audit_mod.NullAuditLog()
+        # Day 26 — provenance for the audit entry. The loop sets these on the
+        # registry it owns; unset, the entry records `None` and the decision is
+        # still a pure function of (principal, tool, args, perms).
+        self.run_id: str | None = None
+        self.trace_id: str | None = None
 
+    # ------------------------------------------------------------------ setup
     def register(self, name: str, schema: dict[str, Any],
-                 fn: Callable[[dict[str, Any]], ToolResult]) -> None:
+                 fn: Callable[[dict[str, Any]], ToolResult], *,
+                 grant: Any = None) -> None:
         if schema.get("name") != name:
             raise ValueError(f"schema name {schema.get('name')!r} != {name!r} "
                              "— a renamed tool is a broken tool_calls")
+        if grant is None and self._permissions is not None:
+            # §3 — "no grant, no tool". A tool with no declared effect/data class
+            # is a tool whose authority is whatever its author happened to write
+            # down; the refusal here is what makes that impossible. It is enforced
+            # on a **governed** registry — one that carries a permission model. An
+            # ungoverned harness registry has no authority model to violate, and
+            # the seven system tools declare their grants either way.
+            raise ValueError(
+                f"tool {name!r} registered without a grant — every tool must "
+                "declare effect and data class (add a grant in permissions.yaml)")
         self._tools[name] = {"schema": schema, "fn": fn}
+        if grant is not None:
+            self._grants[name] = grant
 
     def names(self) -> list[str]:
         return list(self._tools)
+
+    def granted_tools(self) -> list[str]:
+        """The principal's granted slice, in registration order (the prompt surface)."""
+        if self._permissions is None:
+            return self.names()
+        return [n for n in self.names()
+                if n in set(self._permissions.granted_tools(self._principal))]
+
+    def permissions_on(self) -> bool:
+        return self._permissions is not None
+
+    def grant(self, name: str) -> Any:
+        return self._grants.get(name)
 
     def denied(self) -> dict[str, str]:
         """The tools this registry holds but refuses (an out-of-role gate)."""
         return dict(self._denied)
 
+    def set_context(self, *, run_id: str | None = None,
+                    trace_id: str | None = None) -> None:
+        """Attach the run/trace ids the audit entry records (optional)."""
+        if run_id is not None:
+            self.run_id = run_id
+        if trace_id is not None:
+            self.trace_id = trace_id
+
     def scope(self, names: list[str] | tuple[str, ...], *,
               reason: str = "out of role") -> "ToolRegistry":
-        """A role's view: keep `names`, deny every other registered tool.
+        """A role's view: the tools it is granted, filtered by `names`.
 
         The denied tools are still *known* — the denial names them — so an
         out-of-role call is a **policy** rejection (`role_violation`), not an
         `unknown_tool`: the difference between "you may not" and "there is no such
-        thing" is exactly the privilege boundary Day 15 drew.
+        thing" is exactly the privilege boundary Day 15 drew. When governed, the
+        view is intersected with the principal's grants, so a **wrong**
+        `ROLE_TOOLS` entry cannot reach a tool the principal was never granted.
         """
-        keep = set(names)
-        scoped = ToolRegistry(denied={
-            n: f"{reason}: {n} is not in this role's tool group"
-            for n in self._tools if n not in keep})
+        keep = set(names) & set(self._tools)
+        if self._permissions is not None:
+            keep &= set(self._permissions.tools_for(self._principal))
+        scoped = ToolRegistry(
+            denied={n: f"{reason}: {n} is not in this role's tool group"
+                    for n in self._tools if n not in keep},
+            permissions=self._permissions, principal=self._principal,
+            audit=self._audit)
         for n, tool in self._tools.items():
             if n in keep:
                 scoped._tools[n] = tool
+                if n in self._grants:
+                    scoped._grants[n] = self._grants[n]
         return scoped
 
     def schemas(self) -> list[dict[str, Any]]:
-        """What the gateway sends the model — names stable, descriptions loud."""
+        """What the gateway sends the model — names stable, descriptions loud.
+
+        §§3/4 — least privilege at the *contract surface*: when governed, an
+        ungranted tool is not merely refused when called, it is **never named in
+        the prompt**, so the model cannot spend turns discovering it exists.
+        """
+        granted = set(self.granted_tools())
         return [{"type": "function", "function": t["schema"]}
-                for t in self._tools.values()]
+                for n, t in self._tools.items() if n in granted]
+
+    # ------------------------------------------------------------- validation
+    def _effective_schema(self, name: str) -> dict[str, Any]:
+        """The schema a call is validated against — the *grant's* argument rules
+        merged over the model-facing schema, so one function (`validate_args`)
+        enforces both and an argument is validated once, by one vocabulary."""
+        schema = self._tools[name]["schema"]
+        grant = self._grants.get(name)
+        if grant is None or not getattr(grant, "args", None):
+            return schema
+        params = dict(schema.get("parameters") or {})
+        props = dict(params.get("properties") or {})
+        merged: dict[str, Any] = {}
+        for key, spec in props.items():
+            rule = grant.args.get(key)
+            if rule is None:
+                merged[key] = spec
+                continue
+            s = dict(spec)
+            if rule.maxLength is not None:
+                s["maxLength"] = rule.maxLength
+            if rule.pattern is not None:
+                s["pattern"] = rule.pattern
+            if rule.enum is not None:
+                s["enum"] = list(rule.enum)
+            if rule.minimum is not None:
+                s["minimum"] = rule.minimum
+            if rule.maximum is not None:
+                s["maximum"] = rule.maximum
+            merged[key] = s
+        params["properties"] = merged
+        merged_schema = dict(schema)
+        merged_schema["parameters"] = params
+        return merged_schema
 
     def validate_args(self, name: str, args_raw: Any) -> ToolResult:
         if name in self._denied:
@@ -418,10 +574,33 @@ class ToolRegistry:
             return ToolResult.failure(
                 name, f"unknown tool {name!r} (known: {self.names()})",
                 error_kind=ERROR_UNKNOWN_TOOL)
-        ok, result = validate_args(self._tools[name]["schema"], args_raw)
+        decision = None
+        if self._permissions is not None:
+            decision = perms_mod.check_call(self._principal, name, args_raw,
+                                            perms=self._permissions)
+            if not decision.allow:
+                # §5 — a permission denial is a **policy** refusal, never a
+                # `repairable` one: the model must not be handed the retry the
+                # denial exists to prevent. It is audited at the point it happens.
+                res = ToolResult.failure(name, decision.reason,
+                                         error_kind=ERROR_PERMISSION,
+                                         rejection_class="policy")
+                res.permission = decision.meta()
+                res.decision = decision
+                self._record_audit(name, decision, args_raw, None)
+                return res
+        ok, result = validate_args(self._effective_schema(name), args_raw)
         if not ok:
-            return ToolResult.failure(name, result, error_kind=ERROR_INVALID_ARGS)
-        return ToolResult.success(name, args=result)
+            res = ToolResult.failure(name, result, error_kind=ERROR_INVALID_ARGS)
+            if decision is not None:
+                res.permission = decision.meta()
+                res.decision = decision
+            return res
+        res = ToolResult.success(name, args=result)
+        if decision is not None:
+            res.permission = decision.meta()
+            res.decision = decision
+        return res
 
     def properties(self, name: str) -> dict[str, Any]:
         """The tool's declared argument properties (Day 13's sibling-arg filter)."""
@@ -430,7 +609,9 @@ class ToolRegistry:
             return {}
         return (tool["schema"].get("parameters") or {}).get("properties") or {}
 
-    def execute(self, name: str, args: dict[str, Any]) -> ToolResult:
+    # -------------------------------------------------------------- execution
+    def execute(self, name: str, args: dict[str, Any],
+                decision: Any = None) -> ToolResult:
         if name in self._denied:
             return ToolResult.failure(
                 name, self._denied[name], error_kind=ERROR_ROLE,
@@ -440,6 +621,10 @@ class ToolRegistry:
             return ToolResult.failure(
                 name, f"unknown tool {name!r} (known: {self.names()})",
                 error_kind=ERROR_UNKNOWN_TOOL)
+        if self._permissions is not None:
+            gate = self._execution_gate(name, decision, args)
+            if gate is not None:
+                return gate
         try:
             result = tool["fn"](args or {})
         except Exception as exc:                     # never crash the turn
@@ -455,14 +640,185 @@ class ToolRegistry:
                 message="tool returned a malformed result", args=args)
         if result.args is None:
             result.args = dict(args or {})
+        if self._permissions is not None:
+            result = self._apply_result_contract(name, result, decision, args)
         return result
+
+    def _execution_gate(self, name: str, decision: Any,
+                        args: Any) -> ToolResult | None:
+        """`execute` refuses to run without a decision (§5, decision 1).
+
+        A check in `validate_args` alone is a check every caller must remember to
+        route through; a check that refuses to run without one is a check where a
+        *future* call site is safe by omission. `decision=None` here is an
+        internal-invariant violation: `policy`, and loud.
+        """
+        if decision is None:
+            dec = self._reject_decision(
+                name, perms_mod.CODE_MISSING_DECISION,
+                "execute() received no permission decision — the caller did not "
+                "route this call through validate_args")
+            res = ToolResult.failure(name, dec.reason, args=dict(args or {}),
+                                     error_kind=ERROR_PERMISSION,
+                                     rejection_class="policy")
+            res.permission = dec.meta()
+            res.decision = dec
+            self._record_audit(name, dec, args, None)
+            return res
+        allow = (decision.get("decision") == "allow" if isinstance(decision, dict)
+                 else bool(getattr(decision, "allow", False)))
+        if not allow:
+            code = (decision.get("code") if isinstance(decision, dict)
+                    else getattr(decision, "code", perms_mod.CODE_NO_GRANT))
+            dec = self._reject_decision(name, code or perms_mod.CODE_NO_GRANT,
+                                        f"denied at execution: {code}")
+            res = ToolResult.failure(name, dec.reason, args=dict(args or {}),
+                                     error_kind=ERROR_PERMISSION,
+                                     rejection_class="policy")
+            res.permission = dec.meta()
+            res.decision = dec
+            self._record_audit(name, dec, args, None)
+            return res
+        return None
+
+    def _reject_decision(self, name: str, code: str,
+                         reason: str) -> "perms_mod.Decision":
+        grant = self._grants.get(name)
+        known = self._permissions.is_known(self._principal) if self._permissions else True
+        return perms_mod.Decision(
+            False, code, reason, grant,
+            effect=getattr(grant, "effect", None), data=getattr(grant, "data", None),
+            unknown_principal_fallback=not known)
+
+    def _apply_result_contract(self, name: str, result: ToolResult, decision: Any,
+                               args: Any) -> ToolResult:
+        """§5 decision 5 — the output half of the policy, and no partial rows.
+
+        Runs *after* the tool returns and *before* the value is serialized, so the
+        value that becomes a `tool` message is the value that was checked. A
+        violation becomes a `policy` failure carrying the shape and **no values**;
+        a redaction drops the named columns and records them in the result and the
+        audit entry's `result_shape`.
+        """
+        if not result.ok:
+            # A refused/errored tool still executed under an allow decision; the
+            # *permission* fact is recorded, the failure is Day 13's.
+            result.permission = (result.permission
+                                 or (decision.meta() if hasattr(decision, "meta")
+                                     else None))
+            result.decision = result.decision or decision
+            self._record_audit(name, decision, args, result)
+            return result
+        verdict = perms_mod.check_result(name, result, perms=self._permissions,
+                                         decision=decision if hasattr(decision, "meta")
+                                         else None)
+        if not verdict.allow:
+            shape = _shape_only(result)
+            fail = ToolResult.failure(name, verdict.reason, args=result.args,
+                                      error_kind=ERROR_PERMISSION,
+                                      rejection_class="policy")
+            if shape is not None:
+                fail.data = shape
+            fail.permission = verdict.meta()
+            fail.decision = decision
+            self._record_audit(name, verdict, args, fail)
+            return fail
+        if verdict.redacted:
+            _apply_redaction(result, verdict.redacted)
+            result.redacted = list(verdict.redacted)
+        result.permission = (result.permission
+                             or (decision.meta() if hasattr(decision, "meta") else None))
+        result.decision = result.decision or decision
+        self._record_audit(name, decision if hasattr(decision, "meta") else verdict, args, result)
+        return result
+
+    # ------------------------------------------------------------------- audit
+    def _record_audit(self, name: str, decision: Any, args: Any,
+               result: ToolResult | None) -> None:
+        if self._audit is None:
+            return
+        decision_meta = decision if hasattr(decision, "meta") else None
+        self._audit.append({
+            "run_id": self.run_id,
+            "trace_id": self.trace_id,
+            "principal": self._principal,
+            "tool": name,
+            "effect": getattr(decision, "effect", None),
+            "data": getattr(decision, "data", None),
+            "decision": ("allow" if getattr(decision, "allow", False) else "deny"),
+            "code": getattr(decision, "code", None),
+            "args_hash": audit_mod.args_hash(args),
+            "args_shape": audit_mod.args_shape(args),
+            "result_shape": _result_shape(result),
+            "latency_ms": 0,
+            "redacted": list(getattr(result, "redacted", []) or []),
+        })
 
     def run(self, name: str, args_raw: Any) -> ToolResult:
         """Validate then execute — the only path the answer loop uses."""
         vr = self.validate_args(name, args_raw)
         if not vr.ok:
             return vr
-        return self.execute(name, vr.args or {})
+        return self.execute(name, vr.args or {}, decision=vr.decision)
+
+
+# ------------------------------------------------------------ Day 26 result shapes
+
+def _shape_only(result: ToolResult) -> dict[str, Any] | None:
+    """Keep the shape, drop every value — the no-partial-rows contract.
+
+    `columns` (which columns *arrived*), `query_kind`, `executed`, and `redacted`
+    survive so the trace can answer the forensic question the model may not be
+    told; `rows` is empty and `row_count` is 0, because a partial answer is how a
+    leak becomes untraceable and the two missing columns would be nobody's
+    decision.
+    """
+    data = getattr(result, "data", None)
+    if not isinstance(data, dict) or "columns" not in data:
+        return None
+    return {"columns": perms_mod._columns_of(data),
+            "query_kind": data.get("query_kind"),
+            "executed": bool(data.get("executed")),
+            "redacted": list(getattr(result, "redacted", []) or []),
+            "rows": [], "row_count": 0}
+
+
+def _apply_redaction(result: ToolResult, columns: "Iterable[str]") -> None:
+    """Drop the named columns from a data record — values and header together."""
+    data = getattr(result, "data", None)
+    if not isinstance(data, dict):
+        return
+    drop = set(columns)
+    cols = data.get("columns")
+    if isinstance(cols, list):
+        keep_idx = [i for i, c in enumerate(cols) if c not in drop]
+        data["columns"] = [cols[i] for i in keep_idx]
+        if isinstance(data.get("rows"), list):
+            data["rows"] = [[row[i] for i in keep_idx if i < len(row)]
+                            for row in data["rows"]]
+    elif isinstance(cols, dict):
+        for c in list(cols):
+            if c in drop:
+                cols.pop(c)
+    data["redacted"] = sorted(drop)
+
+
+def _result_shape(result: ToolResult | None) -> dict[str, Any] | None:
+    """The result *shape* an audit entry may carry — never a value."""
+    if result is None:
+        return None
+    data = getattr(result, "data", None)
+    if isinstance(data, dict) and "columns" in data:
+        return {"row_count": int(data.get("row_count") or 0),
+                "columns": perms_mod._columns_of(data),
+                "truncated": bool(data.get("truncated")),
+                "redacted": list(data.get("redacted") or [])}
+    evidence = list(getattr(result, "evidence", None) or [])
+    if evidence:
+        return {"evidence": len(evidence), "truncated": bool(result.truncated)}
+    if not result.ok:
+        return {"error_kind": result.error_kind}
+    return None
 
 
 # ------------------------------------------------------------------ evidence
@@ -746,8 +1102,12 @@ def build_default_registry(*, doc: Retriever | None = None,
                            k: int | None = None,
                            doc_budget: int = DEFAULT_DOC_BUDGET,
                            code_budget: int = DEFAULT_CODE_BUDGET,
+                           permissions: "perms_mod.PermissionSet | None" = None,
+                           principal: str | None = None,
+                           audit: "audit_mod.AuditLog | audit_mod.NullAuditLog | None"
+                           = None,
                            ) -> ToolRegistry:
-    """The seven tools, registered with their schemas — Day 30's scenario set.
+    """The seven tools, registered with their schemas **and grants** — Day 30's set.
 
     τ is a property of the *corpus*, not of the registry: `doc_tau`/`code_tau`
     (both falling back to `tau`) let each gate keep the calibration its own
@@ -757,13 +1117,31 @@ def build_default_registry(*, doc: Retriever | None = None,
     `data` is the §3/§5 seam: the offline seeded stub by default, the real
     read-only Postgres store when `SALEOR_READONLY_DB_URL` is set. Passing it in
     is how a suite pins a small row limit for the truncation fixture.
+
+    Day 26 §7 — every `register` call now carries a `grant` and therefore can no
+    longer be called without one: a tool arrives with a **declared** effect and
+    data class or it does not arrive. `permissions` is the *governance* switch:
+    when it is `None` the registry is ungoverned (Days 11–25 exactly — the C9
+    off-switch and how the pre-Day-26 fixtures stay green); when a
+    `PermissionSet` is passed, `schemas()` returns only the principal's granted
+    slice and `execute()` denies without a decision. The grant *declarations* are
+    always read (from `permissions` or the shipped `permissions.yaml`), so the
+    registration-time requirement holds either way.
     """
     base_tau = tool_tau() if tau is None else tau
     doc_gate = base_tau if doc_tau is None else doc_tau
     code_gate = base_tau if code_tau is None else code_tau
     k_default = tool_top_k() if k is None else k
     agent = data if data is not None else DataAgent(make_data_store())
-    reg = ToolRegistry()
+    decls = permissions if permissions is not None else perms_mod.default_permission_set()
+    reg = ToolRegistry(permissions=permissions, principal=principal, audit=audit)
+
+    def _grant(name: str) -> Any:
+        g = decls.grant(name)
+        if g is None:
+            raise ValueError(f"permissions file declares no grant for {name!r} — a "
+                             "tool cannot be registered without a declaration")
+        return g
 
     def search_docs(args: dict[str, Any]) -> ToolResult:
         budget = args.get("max_chars", doc_budget)
@@ -782,27 +1160,57 @@ def build_default_registry(*, doc: Retriever | None = None,
                                  max_chars=code_budget,
                                  filter=filter_spec or None)
 
-    reg.register("search_saleor_docs", search_docs_schema(), search_docs)
-    reg.register("search_saleor_code", search_code_schema(), search_code)
+    reg.register("search_saleor_docs", search_docs_schema(), search_docs,
+                 grant=_grant("search_saleor_docs"))
+    reg.register("search_saleor_code", search_code_schema(), search_code,
+                 grant=_grant("search_saleor_code"))
     reg.register("get_product",
                  _record_schema("get_product",
                                 "Look up a product by its id and return the "
                                 "product record (name, type, price, variants). "
                                 "A fixed, parameterized query — no SQL generated."),
-                 _resolver_tool("get_product", agent, "get_product"))
+                 _resolver_tool("get_product", agent, "get_product"),
+                 grant=_grant("get_product"))
     reg.register("get_order",
                  _record_schema("get_order",
                                 "Look up an order by its id and return the order "
                                 "record (number, status, total, lines). A fixed, "
                                 "parameterized query — no SQL generated."),
-                 _resolver_tool("get_order", agent, "get_order"))
+                 _resolver_tool("get_order", agent, "get_order"),
+                 grant=_grant("get_order"))
     reg.register("get_customer",
                  _record_schema("get_customer",
                                 "Look up a customer by their id and return the "
                                 "customer record (email, order count). A fixed, "
                                 "parameterized query — no SQL generated."),
-                 _resolver_tool("get_customer", agent, "get_customer"))
-    reg.register("run_saleor_sql", run_sql_schema(), _sql_tool("run_saleor_sql", agent))
+                 _resolver_tool("get_customer", agent, "get_customer"),
+                 grant=_grant("get_customer"))
+    reg.register("run_saleor_sql", run_sql_schema(), _sql_tool("run_saleor_sql", agent),
+                 grant=_grant("run_saleor_sql"))
     reg.register("describe_saleor_schema", describe_schema_schema(),
-                 _schema_tool("describe_saleor_schema"))
+                 _schema_tool("describe_saleor_schema"),
+                 grant=_grant("describe_saleor_schema"))
     return reg
+
+
+def build_governed_registry(*, permissions: "perms_mod.PermissionSet | None" = None,
+                            principal: str | None = None,
+                            audit: "audit_mod.AuditLog | audit_mod.NullAuditLog | None"
+                            = None,
+                            **kw: Any) -> ToolRegistry:
+    """The governed entry point: the same seven tools behind the permission layer.
+
+    With `PERMISSIONS=none` (or a permissions file that will not load) it falls
+    back to the **ungoverned** registry, which is exactly the C9 off-switch: the
+    layer is passive, so turning it off restores Days 11–25 byte-for-byte. When
+    governed, `permissions.yaml` supplies both the grant declarations and the
+    `default` set (today's seven tools), so a legitimate request is unchanged.
+    """
+    if permissions is None:
+        if not perms_mod.enabled():
+            return build_default_registry(**kw)
+        permissions = perms_mod.default_permission_set()
+    return build_default_registry(permissions=permissions,
+                                 principal=(principal
+                                            or perms_mod.principal_from_env()),
+                                 audit=audit, **kw)
