@@ -164,8 +164,38 @@ A reusable AI layer built in layers:
     from the executor's objects, so a forged `repairable` downgrade is inert by data
     flow. **Label, don't launder**: an injected sentence inside a cited document stays
     cited and bounded. The court **hashes the evidence** (a moved row is
-    `unresolvable`, never `passed`). The control is **I9**: firewall on ≡ off on
-    legitimate traffic, **0 chats / 0 embeds / 0 extra SQL**.
+     `unresolvable`, never `passed`). The control is **I9**: firewall on ≡ off on
+     legitimate traffic, **0 chats / 0 embeds / 0 extra SQL**.
+21. **Day 26 — Agent Security**: *build permission boundaries*. The finding is not
+    that permissions are hard but that **the boundaries this repo already had were
+    real, scattered, and each attached to a different reason** — a boundary whose
+    existence depends on the author remembering to attach it is a boundary a new
+    tool, a new call site, or a new agent can walk straight through. The day builds
+    the one thing that makes the rest coherent: a single **decision procedure** in
+    the tool surface, checked on both the way in and the way out. `ai_os/permissions.py`
+    is a library of decisions — `Grant` (`tool` · `effect` (`read`/`write`/`none`) ·
+    `data` (`public`/`internal`/`pii`) · `args` · `result` · `confirm`), a fail-closed
+    loader naming the offending key, and the resolution order **grant → `default` →
+    deny `no_grant`** (an unknown principal resolves to the strict `default` set, and
+    the fallback is audited). `ai_os/tools.py`'s `ToolRegistry` is the **choke point**:
+    `register()` refuses a tool with no grant, `schemas()` returns only the principal's
+    granted slice (least privilege at the contract surface — an ungranted tool is never
+    named in the prompt), `validate_args` carries the `Decision` **on the `ToolResult`**,
+    and `execute(decision=None)` **denies** — so all five paths (the loop,
+    `run_tool_answer`, `executor.run_plan`, the fallback ladder, `RoleAgent.run`) inherit
+    the boundary as unchanged code and a future sixth is safe by omission.
+    `maxLength`/`pattern` join the hand-rolled validator (reject, never truncate), and
+    `check_result` gives the policy's half that had no subject a subject — declared
+    columns · `columns ∩ columns_deny = ∅` · the row cap · the retrieval contract — with
+    a violation keeping the **shape** and dropping every **value** (**no partial rows**).
+    `ai_os/audit.py` is the record: append-only, hash-chained, metadata-safe (no SQL
+    text, no row values, no `email`), **allows included** — tamper-evident for
+    edits/reorders/interior deletions and explicitly blind to tail truncation. The
+    recorded finding: `columns_deny` is enforced on **statements**, while `get_customer`
+    returns an `email` the deny list never names. The control is **C9**: layer on ≡ off
+    on legitimate traffic, **0 chats / 0 embeds / 0 SQL / 0 rows**, and the audit log is
+    empty when off. It is **authorization, not authentication** — the `principal` is
+    still a string the caller supplies (Day 29).
 
 ```
 Application
@@ -248,6 +278,11 @@ raw HTTP via `urllib`.
 | `ai_os/injection.py` | day 25: the L2 detection layer — `TaintSource`, `InjectionSignal`, `TaintedSpan`, the bounded offline `scan(text, source, path)`, `implies_privileged_action()`, and the scan/signal caps |
 | `tools/injection_corpus.py` | day 25: the attack corpus **as data** (22 rows over 10 families + a pinned 14-row legitimate set) with per-row expected signals, enforcement outcome, and forbidden effect; `corpus_hash()` |
 | `tools/injection_smoke.py` | day 25: **I1–I9** offline suite (the corpus through the real seams with a *complying* and a *realistic* hostile stub; the I9 control) |
+| `ai_os/permissions.py` | day 26: the permission model — `Grant` (`tool` · `effect` · `data` · `args` · `result` · `confirm`), `ArgRule`/`ResultRule`, `Principal`, `PermissionSet.from_dict`/`load`/`for_principal`, `Decision`, and the two *pure* checks `check_call(principal, tool, args)` / `check_result(name, result)`; a fail-closed loader naming the offending key, and the resolution order **grant → `default` → deny** |
+| `ai_os/audit.py` | day 26: the append-only, hash-chained, metadata-safe decision log — `AuditEntry`, `AuditLog.append`/`entries`/`verify`, `NullAuditLog`; canonical JSON (`sort_keys`, fixed separators, **no floats**), `sha256(canonical(entry − hash))` chained on `prev_hash`, `chain_ok` reported separately from `entries` |
+| `permissions.yaml` | day 26: the grant file — `principals` (`default` = the two search tools + the four record tools + SQL, `analyst`, `support`) and per-tool `effect`/`data`/`args`/`result`/`confirm`; **no `write` effect exists**; the `email` decision is open (the strict default redacts it) |
+| `tools/permission_smoke.py` | day 26: **C1–C9** offline suite through the real seams (deny-by-default · the choke point · the result contract · no-partial-rows · the audit chain + its three tamper cases · the five no-bypass paths · the C9 control) + the grant-hit rates; 0 chats / 0 embeds / 0 SQL / 0 rows |
+| `test_day26.py` | day 26: the deterministic unit suite under the C-fixtures (the fail-closed loader · the decision procedure · `maxLength`/`pattern`/`maximum` reject-not-truncate · `check_result` · the audit chain with all three tamper cases · `PERMISSIONS=none`) |
 
 ## Run it for real
 
@@ -326,7 +361,9 @@ python tools/trace_smoke.py             # day 23 O1–O9 (one request's causal t
 python tools/distributed_smoke.py       # day 24 D1–D9 (wire format · continuation · injection · assembly · gaps · logs · metrics · money/latency · the D9 control); two processes, one trace id, 0 chats
 python test_day24.py                    # day 24 unit suite (traceparent grammar · baggage · assembler · collector · metrics · log spine)
 python tools/injection_smoke.py         # day 25 I1–I9 (the attack corpus through the real seams: enforcing on every row, 0 chats/0 embeds/0 SQL; the I9 control)
-python tools/regress_all.py             # day 20/21 Rule-2 gate: doc nine + code six + every day suite (7–25, the D- and I-fixtures included) + the golden rows, exactly as green
+.venv/bin/python tools/permission_smoke.py   # day 26 C1–C9 (deny-by-default · the choke point · the result contract · no-partial-rows · the audit chain + its three tamper cases · the five no-bypass paths · the C9 control), 0 chats / 0 embeds / 0 SQL / 0 rows
+.venv/bin/python test_day26.py               # day 26 unit suite (the fail-closed loader · the decision procedure · the argument bounds · check_result · the audit chain + all three tamper cases · PERMISSIONS=none)
+python tools/regress_all.py             # day 20/21 Rule-2 gate: doc nine + code six + every day suite (7–26, the C/D/I fixtures included) + the golden rows, exactly as green
 ```
 
 The stub serves both providers on `:8700` (OpenAI) and `:8701` (Anthropic)
