@@ -1,0 +1,34 @@
+# capacity.yaml — Day 28's addition. A bound is a TUPLE, and all five parts are
+# required: a limit missing `on` or `consequence` is a number, not a bound.
+#   * `on` is a key the system can attribute. Today that key is `principal`,
+#     which is authorization without authentication (Day 26) — recorded, not fixed.
+#   * `consequence` is a code. A limiter that returns a slow answer is a queue
+#     nobody drew.
+#   * `burst` is separate from `rate` on purpose: a cheap bursty caller and an
+#     expensive slow one need the same shape and different numbers.
+
+bounds:
+  requests_per_minute:
+    "on": principal          # a key the system can attribute — today: a header
+    unit: requests
+    rate: 20.0             # sustained refill
+    burst: 5               # bucket depth, separate from rate on purpose
+    consequence: rate_limited        # → 429 with retry_after
+  spend_per_hour_usd:
+    "on": principal
+    unit: usd              # the ledger's own unit, not a request count
+    rate: 0.50
+    burst: 0.25
+    consequence: budget_exhausted
+  approval_queue_depth:
+    "on": principal
+    unit: pending_records
+    rate: 0                # not a rate at all — a depth, declared as such
+    burst: 3
+    consequence: queue_depth_exceeded
+  in_flight_runs:
+    "on": process
+    unit: concurrent_runs
+    rate: 0
+    burst: 1               # the truth about this system today
+    consequence: server_busy
