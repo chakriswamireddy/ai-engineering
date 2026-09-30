@@ -38,6 +38,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
+from ai_os import approval as approval_mod
 from ai_os import audit as audit_mod
 from ai_os import observability as obs
 from ai_os import permissions as perms_mod
@@ -116,6 +117,17 @@ ERROR_ROLE = "role_violation"
 # It must never arrive as `repairable`: a denial that hands the model the retry the
 # denial exists to prevent is a bypass with better manners.
 ERROR_PERMISSION = "permission_denied"
+# Day 27 §7 — the *approval* gate. A tool whose grant declares `confirm: human` is
+# not forbidden and not broken: it is **withheld pending a person**, so it arrives on
+# the same `{ok: false}` surface as a denial with `error_kind=approval_required` and
+# — deliberately — `rejection_class=POLICY_CLASS`. Reusing the policy class buys
+# three things for free: Day 12's rule-5 STOP fires (no retry), the sibling
+# substitution is skipped (it is gated on the same field), and `step_policy` already
+# owns a terminal. The one thing that must *not* be reused is the terminal itself —
+# `TERMINATION_NOTE["policy"]` says the request "was refused as a policy violation",
+# and here nothing was forbidden; something was withheld. That is why the loop gains
+# an `awaiting_approval` termination that is checked *before* the policy one.
+ERROR_APPROVAL_REQUIRED = approval_mod.ERROR_APPROVAL_REQUIRED
 
 # Day 26 §7 — the canonical tool names, in registration order. The permission
 # loader validates that every grant names a registered tool against exactly this
@@ -200,6 +212,13 @@ class ToolResult:
     # redaction that is not in the record and not in the audit entry is Day 24's
     # missing span arriving through the back door.
     redacted: list[str] = field(default_factory=list)
+    # Day 27 §7 — the approval request this call produced, carried on the value for
+    # the same reason the decision is: a caller cannot separate the result from the
+    # fact that a person was asked. `{"request_id", "state", "digest", "code",
+    # "signals", "reversibility", "expires_at"}` — metadata only, never the record's
+    # argument values, and never serialized into the model-facing message beyond the
+    # refusal's own plain statement that nothing was applied.
+    approval: dict[str, Any] | None = None
 
     @classmethod
     def success(cls, name: str, *, args: dict | None = None,
@@ -426,7 +445,8 @@ class ToolRegistry:
     def __init__(self, *, denied: dict[str, str] | None = None,
                  permissions: "perms_mod.PermissionSet | None" = None,
                  principal: str | None = None,
-                 audit: "audit_mod.AuditLog | audit_mod.NullAuditLog | None" = None
+                 audit: "audit_mod.AuditLog | audit_mod.NullAuditLog | None" = None,
+                 approval_store: "approval_mod.ApprovalStore | None" = None
                  ) -> None:
         self._tools: dict[str, dict[str, Any]] = {}
         self._grants: dict[str, Any] = {}
@@ -436,6 +456,13 @@ class ToolRegistry:
                            else (perms_mod.principal_from_env()
                                  if permissions is not None else None))
         self._audit = audit if audit is not None else audit_mod.NullAuditLog()
+        # Day 27 §7 — the approval desk. `None` is **the H9 off-switch**: with no
+        # store the gate does not exist, `confirm: human` is a declaration nothing
+        # acts on, and the layer is provably passive. Note the consequence of putting
+        # it here rather than in the loop: the gate is a property of the *grant*, so
+        # `executor.run_plan`, `run_tool_answer` and `RoleAgent.run` inherit it as
+        # unchanged code — exactly as Day 26's check did.
+        self._approvals = approval_store
         # Day 26 — provenance for the audit entry. The loop sets these on the
         # registry it owns; unset, the entry records `None` and the decision is
         # still a pure function of (principal, tool, args, perms).
@@ -476,6 +503,13 @@ class ToolRegistry:
     def permissions_on(self) -> bool:
         return self._permissions is not None
 
+    def approvals_on(self) -> bool:
+        """Is the Day 27 approval gate attached? (the H9 control's question)"""
+        return self._approvals is not None
+
+    def approval_store(self) -> "approval_mod.ApprovalStore | None":
+        return self._approvals
+
     def grant(self, name: str) -> Any:
         return self._grants.get(name)
 
@@ -509,7 +543,7 @@ class ToolRegistry:
             denied={n: f"{reason}: {n} is not in this role's tool group"
                     for n in self._tools if n not in keep},
             permissions=self._permissions, principal=self._principal,
-            audit=self._audit)
+            audit=self._audit, approval_store=self._approvals)
         for n, tool in self._tools.items():
             if n in keep:
                 scoped._tools[n] = tool
@@ -625,6 +659,15 @@ class ToolRegistry:
             gate = self._execution_gate(name, decision, args)
             if gate is not None:
                 return gate
+        # Day 27 §7 — the approval gate, at the **same seam** Day 26 attached the
+        # result contract: after grant resolution and before the tool's `fn` runs. No
+        # new path is opened, so the choke point stays the choke point, and the model
+        # is told nothing it can act on: no row was read, no turn was spent, and the
+        # request exists because a *grant* says so.
+        if self._approvals is not None:
+            gated = self._approval_gate(name, args)
+            if gated is not None:
+                return gated
         try:
             result = tool["fn"](args or {})
         except Exception as exc:                     # never crash the turn
@@ -689,6 +732,92 @@ class ToolRegistry:
             False, code, reason, grant,
             effect=getattr(grant, "effect", None), data=getattr(grant, "data", None),
             unknown_principal_fallback=not known)
+
+    # ------------------------------------------------------ Day 27 §7 — the gate
+    def _approval_gate(self, name: str, args: Any) -> ToolResult | None:
+        """`confirm: human` ⇒ the **layer** opens the request and the call stops.
+
+        Returns `None` for every ungated tool, which is what keeps the gate
+        invisible on legitimate traffic (H9's zero-record control). For a gated
+        tool it returns a `policy`-class failure carrying `error_kind=
+        approval_required` and the request's metadata — and it has already written
+        exactly one durable record.
+
+        The body of that record is composed by **this** function from the grant and
+        the validated arguments: the digest, the canonical subject, the targets and
+        the signals are all computed here, and the model contributes not one field.
+        That is the structural half of the confused-deputy defence at the approval
+        desk — if the request body were a model-written paragraph, the model would
+        hold the pen on the one document a person is supposed to review.
+
+        Two floors, not one: a **grant**-declared `confirm: human` on a tool the
+        principal is actually granted, and the store's own refusal to accept the
+        request twice per run (`APPROVAL_MAX_PER_RUN`). A refusal from the desk (the
+        run already opened its request) still returns `approval_required` — the call
+        is withheld either way — and the message says plainly that no new request
+        was opened, because a run that believed otherwise would wait on a request
+        id that does not exist.
+        """
+        grant = self._grants.get(name)
+        if grant is None or getattr(grant, "confirm", None) != perms_mod.CONFIRM_HUMAN:
+            return None
+        signals = approval_mod.build_signals(
+            declared_data=getattr(grant, "data", None),
+            prior_approvals=self._approvals.prior_approvals(name,
+                                                            approval_mod.action_targets(args)),
+        )
+        try:
+            record = self._approvals.submit(
+                tool=name, args=args, effect=getattr(grant, "effect", None),
+                data=getattr(grant, "data", None),
+                reversibility=getattr(grant, "reversibility", "") or
+                perms_mod.REVERSIBILITY_IRREVERSIBLE,
+                requested_by=self._principal, approver_role=getattr(grant, "approver_role", None),
+                signals=signals, run_id=self.run_id)
+        except approval_mod.ApprovalRefusal as refusal:
+            dec = perms_mod.Decision(
+                False, refusal.code,
+                f"withheld: the run already opened its request ({refusal.code})", grant,
+                effect=getattr(grant, "effect", None),
+                data=getattr(grant, "data", None),
+                arg_keys=tuple(sorted((args or {}).keys())) if isinstance(args, dict) else ())
+            res = ToolResult.failure(
+                name,
+                f"the requested action requires human approval and this run already "
+                f"opened its request ({refusal.code}); nothing was applied and no new "
+                "request was opened",
+                args=dict(args or {}), error_kind=ERROR_APPROVAL_REQUIRED,
+                rejection_class="policy")
+            res.permission = dec.meta()
+            res.approval = {"request_id": None, "state": None, "digest": None,
+                            "code": refusal.code, "reversibility": None,
+                            "signals": [], "scrutiny": approval_mod.SCRUTINY_ELEVATED,
+                            "expires_at": None}
+            self._record_audit(name, dec, args, res)
+            return res
+        dec = perms_mod.Decision(
+            False, ERROR_APPROVAL_REQUIRED,
+            f"granted, withheld pending human approval (request {record.request_id})",
+            grant, effect=getattr(grant, "effect", None),
+            data=getattr(grant, "data", None),
+            arg_keys=tuple(sorted((args or {}).keys())) if isinstance(args, dict) else ())
+        res = ToolResult.failure(
+            name,
+            f"the requested action requires human approval (tool {name!r} is "
+            f"irreversible by declaration: {record.reversibility}). Request "
+            f"{record.request_id} was opened by the permission layer and is pending; "
+            f"nothing was applied. Digest {record.digest}.",
+            args=dict(args or {}), error_kind=ERROR_APPROVAL_REQUIRED,
+            rejection_class="policy")
+        res.permission = dec.meta()
+        res.approval = {"request_id": record.request_id, "state": record.state,
+                        "digest": record.digest, "code": ERROR_APPROVAL_REQUIRED,
+                        "reversibility": record.reversibility,
+                        "signals": record.signal_keys(),
+                        "scrutiny": record.scrutiny(),
+                        "expires_at": record.expires_at}
+        self._record_audit(name, dec, args, res)
+        return res
 
     def _apply_result_contract(self, name: str, result: ToolResult, decision: Any,
                                args: Any) -> ToolResult:
@@ -1106,6 +1235,7 @@ def build_default_registry(*, doc: Retriever | None = None,
                            principal: str | None = None,
                            audit: "audit_mod.AuditLog | audit_mod.NullAuditLog | None"
                            = None,
+                           approval_store: "approval_mod.ApprovalStore | None" = None,
                            ) -> ToolRegistry:
     """The seven tools, registered with their schemas **and grants** — Day 30's set.
 
@@ -1134,7 +1264,8 @@ def build_default_registry(*, doc: Retriever | None = None,
     k_default = tool_top_k() if k is None else k
     agent = data if data is not None else DataAgent(make_data_store())
     decls = permissions if permissions is not None else perms_mod.default_permission_set()
-    reg = ToolRegistry(permissions=permissions, principal=principal, audit=audit)
+    reg = ToolRegistry(permissions=permissions, principal=principal, audit=audit,
+                       approval_store=approval_store)
 
     def _grant(name: str) -> Any:
         g = decls.grant(name)
@@ -1197,6 +1328,7 @@ def build_governed_registry(*, permissions: "perms_mod.PermissionSet | None" = N
                             principal: str | None = None,
                             audit: "audit_mod.AuditLog | audit_mod.NullAuditLog | None"
                             = None,
+                            approval_store: "approval_mod.ApprovalStore | None" = None,
                             **kw: Any) -> ToolRegistry:
     """The governed entry point: the same seven tools behind the permission layer.
 
@@ -1205,12 +1337,16 @@ def build_governed_registry(*, permissions: "perms_mod.PermissionSet | None" = N
     layer is passive, so turning it off restores Days 11–25 byte-for-byte. When
     governed, `permissions.yaml` supplies both the grant declarations and the
     `default` set (today's seven tools), so a legitimate request is unchanged.
+
+    Day 27 passes `approval_store` straight through, so the gate has exactly one
+    off-switch (`None`) and the H9 control is "the same registry without a desk"
+    rather than a second code path.
     """
     if permissions is None:
         if not perms_mod.enabled():
-            return build_default_registry(**kw)
+            return build_default_registry(approval_store=approval_store, **kw)
         permissions = perms_mod.default_permission_set()
     return build_default_registry(permissions=permissions,
                                  principal=(principal
                                             or perms_mod.principal_from_env()),
-                                 audit=audit, **kw)
+                                 audit=audit, approval_store=approval_store, **kw)
