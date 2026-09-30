@@ -296,7 +296,24 @@ AUTHORED_SOURCES = frozenset(
      # (routing, delegations, verdicts), never of a specialist's episodes. Adding it
      # here does not loosen `recalled ⊆ authored`: it admits a writer whose writes
      # are a different `kind`, and the write policy (§7) forbids it the episodic shelf.
-     "orchestrator"})
+     "orchestrator",
+     # Day 27 — the approval desk. The same argument Day 19 carried, one shelf over:
+     # admitting an author does not loosen the grounding rules for any other shelf,
+     # and the write policy below forbids it every shelf it did not ground — in fact
+     # the *inverse* rule is the sharper one, because `approval` is the only kind a
+     # **closed set of one author** may write. A record that says a person decided
+     # something is the one record in this repository whose author may not be the
+     # component that wanted the action, so `source` for `kind=approval` is checked
+     # to be exactly `"approver"` (see `_check_provenance`).
+     "approver"})
+
+# Day 27 §8 — the approval shelf. `APPROVAL_KIND` records are the one kind whose
+# author is *fixed*: only the approval desk writes them, so an `agent`- or
+# `orchestrator`-authored approval is refused by the existing provenance check
+# rather than by a comment. The key shape mirrors the other shelves'
+# (`/approval/{request_id}`) so a reader can tell the shelf from the key.
+APPROVAL_KIND = "approval"
+APPROVAL_AUTHOR_SOURCE = "approver"
 
 # The three shelves' kinds (the lifetime axis, §2's table).
 TASK_KIND = "task"
@@ -355,6 +372,16 @@ def preference_key(name: str) -> str:
 def orchestration_key(name: str) -> str:
     """The orchestrator's record key (routing/delegation/verdict — never an episode)."""
     return f"/orchestration/{name}"
+
+
+def approval_key(request_id: str) -> str:
+    """The approval record's key (`/approval/{request_id}`), Day 27 §8.
+
+    One request, one key, one durable record — the address an incident review can
+    be pointed at, and the shape `write_approval` writes without a second naming
+    convention.
+    """
+    return f"/approval/{request_id}"
 
 
 EPISODE_KEY_PREFIX = "/episodic/"
@@ -542,7 +569,8 @@ class StateStore:
         return len(self.records)
 
     # ------------------------------------------------------------- write path
-    def _check_provenance(self, created_by: Any) -> dict[str, Any]:
+    def _check_provenance(self, created_by: Any, kind: str | None = None
+                          ) -> dict[str, Any]:
         if not isinstance(created_by, dict):
             raise ProvenanceError(
                 "a state write requires created_by {run_id, step, source}")
@@ -554,6 +582,27 @@ class StateStore:
             raise ProvenanceError(
                 f"source {source!r} is not an authored source "
                 f"(allowed: {sorted(AUTHORED_SOURCES)}) — the store is closed")
+        # Day 27 §8 — the one *kind-specific* policy in the store, and it is
+        # fail-closed in **both** directions: an `approval` record may be written by
+        # exactly one author, and the approval desk may write exactly one kind. The
+        # reason is not tidiness — it is that this is the only record in the
+        # repository where a model's intent and a person's decision coexist, so
+        # `created_by={"source": "agent"}` (or "orchestrator", or "executor") is
+        # refused here rather than trusted to convention, and the desk's author
+        # string cannot be borrowed to mint a task, episode or concept either. A
+        # provenance policy that lives in a frozenset is only a comment until a
+        # fixture proves the refusal; the H-set and the unit suite do exactly that.
+        authored_approval = source == APPROVAL_AUTHOR_SOURCE
+        if (str(kind) == APPROVAL_KIND) != authored_approval:
+            if authored_approval:
+                raise ProvenanceError(
+                    f"source {APPROVAL_AUTHOR_SOURCE!r} may only author "
+                    f"kind={APPROVAL_KIND!r} records, not {kind!r} — the approval "
+                    "desk's author is not a general licence")
+            raise ProvenanceError(
+                f"kind={APPROVAL_KIND!r} may only be authored by "
+                f"{APPROVAL_AUTHOR_SOURCE!r}, not {source!r} — the approval shelf is "
+                "closed to every author that could have wanted the action")
         return {"run_id": run_id, "step": created_by.get("step"), "source": source}
 
     def put(self, principal: str, kind: str, key: str, payload: Any, *,
@@ -569,7 +618,7 @@ class StateStore:
         """
         if not self.enabled:
             return None
-        prov = self._check_provenance(created_by)
+        prov = self._check_provenance(created_by, kind)
         now = self.clock()
         if ttl == "inherit":
             ttl = self.default_ttl
@@ -932,3 +981,45 @@ def load_conversation(store: StateStore, principal: str,
         return [t for t in (rec.payload.get("turns") or [])
                 if isinstance(t, dict) and t.get("role") in ("user", "assistant")]
     return []
+
+
+# ====================================================== Day 27 — the approval shelf
+
+def write_approval(store: StateStore, principal: str, request_id: str,
+                   payload: dict[str, Any], *, run_id: str | None,
+                   ttl: float | None | str = "inherit") -> StateRecord | None:
+    """Day 27 §5 — persist one approval record. Mirrors `write_orchestration`.
+
+    Four lines of glue and one string in a frozenset, which is the whole of Day 27's
+    persistence: durability, the TTL, the size cap, the derived index, compaction and
+    the fail-closed author check are **inherited** from Day 17 rather than rebuilt.
+    The refused alternative was a second JSON file with its own expiry pass, its own
+    cap and its own provenance model — three small systems that drift.
+
+    Two clocks, deliberately different, and this is where they are told apart: the
+    store's TTL is the **retention of the artifact**, while the record's own
+    `expires_at` is the **decision window** (`APPROVAL_TTL_S`). The write therefore
+    inherits the store's TTL — a record that vanished at the decision window could
+    not report `approval_expired`, and the refusal needs the record to still exist.
+
+    `principal` is the shelf owner (`requested_by`): the question the shelf answers
+    is "what is this principal waiting on". The **author** is always
+    `"approver"` — the approval desk, not the caller — which is what the store's
+    kind-specific policy checks.
+    """
+    return store.put(principal, APPROVAL_KIND, approval_key(request_id), payload,
+                     created_by={"run_id": run_id or "approval",
+                                 "step": str((payload or {}).get("state")
+                                             or "unknown"),
+                                 "source": APPROVAL_AUTHOR_SOURCE},
+                     ttl=ttl)
+
+
+def list_approvals(store: StateStore, principal: str) -> list[StateRecord]:
+    """The principal's own approval shelf, live records only (`StateStore`'s rules).
+
+    The approval desk reads the raw `records` mapping instead, because an *expired*
+    request is a coded decision it must still be able to name; this helper is the
+    ordinary, expiry-respecting read for callers that just want the queue.
+    """
+    return store.list_for(principal, APPROVAL_KIND)
