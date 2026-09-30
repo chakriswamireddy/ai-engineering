@@ -190,9 +190,13 @@ def ledger_endpoint() -> dict[str, Any]:
 
 
 def _rag_store(corpus: str = "docs") -> RagStore | None:
+    """Day 28 — identity-keyed cache. 262,182,307 bytes, 11,061 chunks,
+    one parse per request → zero parses per request after first load.
+    Key: sha256(file) + embedding_model + dimension."""
     path = code_store_path_from_env() if corpus == "code" else store_path_from_env()
     try:
-        return RagStore.load(path)
+        from ai_os.rag import load_store_cached
+        return load_store_cached(path)
     except (FileNotFoundError, StoreVersionError, json.JSONDecodeError):
         return None
 

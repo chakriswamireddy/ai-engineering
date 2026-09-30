@@ -1,6 +1,6 @@
 """Day 6 §4–§6 — the RAG pipeline: persisted store, retrieval, context, chat.
-
 ```
+
 question ──▶ embed query ──▶ retrieve top-k ──▶ build context ──▶ chat(context + question) ──▶ answer
                             (store)            (budget floor)
 ```
@@ -14,8 +14,10 @@ stops retrieval from overflowing the window.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -353,6 +355,7 @@ def _run_rag_traced(gateway, store, q: str, *, k, budget_chars, max_tokens,
             "usage": completion.usage.as_dict(),
             "attempts": gateway.last_attempts,
             "latency_ms": gateway.last_latency_ms,
+            "fallback_depth": gateway.last_fallback_depth,
             "cost_usd": round(gateway.ledger.cost(completion.model,
                                                  completion.usage), 8),
         },
@@ -390,3 +393,94 @@ def retrieve_remote(*_args: Any, **_kwargs: Any) -> list[tuple[float, Chunk]]:
     raise NotImplementedError(
         "remote vector store is PENDING: RagStore is a local file today; a "
         "network vector DB would emit a client span here (Day 24 names the seam)")
+
+
+# ---------------------------------------------------------------------------
+# Day 28 — identity-keyed store cache.
+# ---------------------------------------------------------------------------
+
+# Module-level cache slots: one for docs, one for code. A third is refused
+# with a named error rather than silently evicting, because an LRU here would
+# make "which store answered this" a question about timing.
+_DOC_STORE_SLOT: tuple[RagStore, str, float, int, str] | None = None
+_CODE_STORE_SLOT: tuple[RagStore, str, float, int, str] | None = None
+
+
+def _store_identity(path: str, embedding_model: str, dimension: int) -> str:
+    """Compute the store's identity: sha256(file) + embedding_model + dimension."""
+    with open(path, "rb") as fh:
+        content = fh.read()
+    file_hash = hashlib.sha256(content).hexdigest()
+    return f"{file_hash}|{embedding_model}|{dimension}"
+
+
+def _load_store_cached_slot(
+    path: str,
+    slot: tuple[RagStore, str, float, int, str] | None,
+    *,
+    clock,
+) -> tuple[RagStore, tuple[RagStore, str, float, int, str]]:
+    """Load or return cached store, keyed on (mtime, size, sha256, embedding_model, dimension)."""
+    import stat
+    st = os.stat(path)
+    mtime = st.st_mtime
+    size = st.st_size
+
+    # Load the store header first to get embedding_model and dimension
+    with open(path, encoding="utf-8") as fh:
+        import json as _json
+        payload = _json.load(fh)
+    embedding_model = payload.get("embedding_model", "")
+    dimension = int(payload.get("dimension", 0))
+    identity = _store_identity(path, embedding_model, dimension)
+
+    if slot is not None:
+        cached_store, cached_identity, cached_mtime, cached_size, _ = slot
+        if cached_mtime == mtime and cached_size == size and cached_identity == identity:
+            return cached_store, slot
+
+    # Parse the full store — this is the one-time cost per identity change
+    store = RagStore.load(path)
+    new_slot = (store, identity, mtime, size, path)
+    return store, new_slot
+
+
+def load_store_cached(path: str, *, clock=time.time) -> RagStore:
+    """Load a RagStore with identity-keyed caching.
+
+    Key: (mtime, size, sha256(file), embedding_model, dimension).
+    The store itself is NOT modified — no field, no new constructor argument,
+    no serialization change — so Days 6/10/21 fixtures and data/*.json on disk
+    stay byte-compatible and the 262,182,307-byte file does not need rebuilding.
+
+    The cache holds ONE docs store and ONE code store, matching the two corpora
+    the repository actually has; a third is refused with a named error rather
+    than silently evicting, because an LRU here would make "which store answered
+    this question" a question about timing.
+
+    STORE_CACHE=0 restores per-request parsing (the N9 off-switch).
+    """
+    import os as _os
+    if _os.getenv("STORE_CACHE", "1").strip().lower() in {"0", "off", "false", "no", "none"}:
+        return RagStore.load(path)
+
+    global _DOC_STORE_SLOT, _CODE_STORE_SLOT
+
+    # Determine which slot to use based on path
+    is_code = "code" in path
+    slot = _CODE_STORE_SLOT if is_code else _DOC_STORE_SLOT
+
+    store, new_slot = _load_store_cached_slot(path, slot, clock=clock)
+
+    if is_code:
+        if _CODE_STORE_SLOT is not None and _CODE_STORE_SLOT[4] != path:
+            raise RuntimeError("code store cache: a second code store path was requested; "
+                               "only one code store is supported")
+        _CODE_STORE_SLOT = new_slot
+    else:
+        if _DOC_STORE_SLOT is not None and _DOC_STORE_SLOT[4] != path:
+            raise RuntimeError("doc store cache: a second doc store path was requested; "
+                               "only one doc store is supported")
+        _DOC_STORE_SLOT = new_slot
+
+    return store
