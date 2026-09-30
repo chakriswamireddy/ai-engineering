@@ -75,6 +75,7 @@ SUITES: list[tuple[str, str, list[str]]] = [
     ("O1–O9 trace fixtures", "tools/trace_smoke.py", []),
     ("D1–D9 distributed trace", "tools/distributed_smoke.py", []),
     ("I1–I9 injection firewall", "tools/injection_smoke.py", []),
+    ("C1–C9 permission boundary", "tools/permission_smoke.py", []),
 ]
 
 # The family replay (Day 8/9 retriever over the fixtures.py question sets) and
