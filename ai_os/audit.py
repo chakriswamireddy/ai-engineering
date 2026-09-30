@@ -55,11 +55,46 @@ DEFAULT_AUDIT_PATH = Path(__file__).resolve().parent.parent / "data" / "audit.js
 # The permitted key set. A dict with a key outside this set is refused by
 # `AuditLog.append`, so a future caller cannot smuggle a value in by adding a
 # field — the record shape is a contract, not a suggestion.
+#
+# Day 27 adds exactly one **permitted** field and one **forbidden** one, and both
+# are stated as rules rather than habits:
+#
+#   * `digest` (and its companion `reversibility`) is permitted because an incident
+#     review must be able to prove *which* action was approved **without reading the
+#     record's values** — the digest is a hash of the action, so it answers "was the
+#     thing that ran the thing that was approved?" and discloses nothing.
+#   * `proposal` is forbidden, because it is the only model-authored text anywhere
+#     in the approval pipeline, and Day 25's prohibition on laundering untrusted
+#     text into a trusted artifact applies to an audit chain most directly of all.
 PERMITTED_KEYS = frozenset({
     "seq", "ts", "run_id", "trace_id", "principal", "tool", "effect", "data",
     "decision", "code", "args_hash", "args_shape", "result_shape", "latency_ms",
-    "redacted", "prev_hash", "hash",
+    "redacted", "prev_hash", "hash", "digest", "reversibility",
 })
+
+# Refused **by name**, so the refusal says which rule was broken rather than
+# "forbidden key". A model-writable rationale reachable from the chain would turn
+# a steering attempt into a trusted record across one day's diff.
+FORBIDDEN_KEYS = frozenset({"proposal"})
+
+# ============================================================ Day 27 — the events
+# The six approval event codes, defined once — here, because they are the chain's
+# vocabulary (`approval.py` aliases them under the names the design uses). One
+# chain, one timeline: a request in a JSON file and a decision in a different JSON
+# file, correlated by an id, is two systems to join during an incident, and the
+# whole reason Day 26 built the chain is that a security decision nobody can read is
+# a rumour. Each event carries `principal` (the *acting* principal), `tool`,
+# `effect`, `reversibility`, `digest`, `code` — and never an argument value, a row
+# value, an `email`, or the `proposal`.
+EVENT_APPROVAL_REQUESTED = "approval_requested"
+EVENT_APPROVAL_APPROVED = "approval_approved"
+EVENT_APPROVAL_REJECTED = "approval_rejected"
+EVENT_APPROVAL_EXPIRED = "approval_expired"
+EVENT_APPROVAL_APPLIED = "approval_applied"
+EVENT_APPROVAL_COMPENSATED = "approval_compensated"
+APPROVAL_EVENTS: tuple[str, ...] = (
+    EVENT_APPROVAL_REQUESTED, EVENT_APPROVAL_APPROVED, EVENT_APPROVAL_REJECTED,
+    EVENT_APPROVAL_EXPIRED, EVENT_APPROVAL_APPLIED, EVENT_APPROVAL_COMPENSATED)
 
 
 def audit_path_from_env() -> Path:
@@ -130,7 +165,12 @@ def args_shape(args: Any) -> dict[str, Any]:
 @dataclass
 class AuditEntry:
     """One decision, recorded. Allows included — a log of only denials answers
-    "what failed" and never "what is this principal doing"."""
+    "what failed" and never "what is this principal doing".
+
+    Day 27 adds `digest`/`reversibility` (both hashed into the body): the approval
+    events are decisions *about a digest*, and a chain that omitted it could not
+    answer the only question an incident review actually asks of an approval.
+    """
 
     seq: int
     ts: int
@@ -147,6 +187,8 @@ class AuditEntry:
     run_id: str | None = None
     trace_id: str | None = None
     redacted: list[str] = field(default_factory=list)
+    digest: str | None = None
+    reversibility: str | None = None
     prev_hash: str = ""
     hash: str = ""
 
@@ -160,6 +202,7 @@ class AuditEntry:
             "args_hash": self.args_hash, "args_shape": dict(self.args_shape),
             "result_shape": self.result_shape, "latency_ms": int(self.latency_ms),
             "redacted": list(self.redacted), "prev_hash": self.prev_hash,
+            "digest": self.digest, "reversibility": self.reversibility,
         }
         return out
 
@@ -214,6 +257,13 @@ class AuditLog:
         stamp = int(fields.pop("ts", None) or int(self.clock()))
         latency = fields.get("latency_ms")
         fields["latency_ms"] = 0 if latency is None else int(round(float(latency)))
+        forbidden = [k for k in fields if k in FORBIDDEN_KEYS]
+        if forbidden:
+            raise ValueError(
+                f"audit entry carries forbidden key(s) {forbidden} — a field the "
+                "model can author is not a permitted entry field, and laundering "
+                "untrusted text into a trusted artifact is the one thing the chain "
+                "must never do")
         unknown = [k for k in fields if k not in PERMITTED_KEYS]
         if unknown:
             raise ValueError(f"audit entry carries forbidden key(s) {unknown} "
@@ -230,6 +280,7 @@ class AuditLog:
             result_shape=fields.get("result_shape"),
             latency_ms=int(fields.get("latency_ms") or 0),
             redacted=list(fields.get("redacted") or []),
+            digest=fields.get("digest"), reversibility=fields.get("reversibility"),
             prev_hash=self._last_hash)
         record = entry.as_dict()
         record["hash"] = entry_hash(entry.body())
