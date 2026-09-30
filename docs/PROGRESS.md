@@ -1,4 +1,4 @@
-# Progress — ai-layer (Days 2–23)
+# Progress — ai-layer (Days 2–24)
 
 > Live status of what is implemented, verified, and still open in this repo.
 > Kept up to date as days are worked; the canonical per-day detail lives in
@@ -41,6 +41,7 @@ Updated: 2026-09-29
 | 21 | RAG Evaluation | PARTIAL (all MECH green offline; **R1–R9** with the recall@K/MRR passthrough + the new **precision@K** over a pre-registered `relevant_also` (the honest `n/a` where relevance is undefined) + the free `rel()` relevance column + the semantic subnet (**citation support · groundedness · claim-coverage**, a `must_not` hit always a fail) + the τ calibration on the **real store** (answerable 0.794–0.853 vs E 0.775/0.783 → **+0.011, τ=0.794, 0 leaks**) + the **I1 `pending-human`** boundary + the **R9 control** (bench off ≡ production); the real doc-store R-report **reproduces Day 9's leak** — 4 of 7 answerable rows surface none — and the code corpus's real calibration is `PENDING` Day 10's store) | `ai_os/rag_bench.py` (new), `ai_os/semantic_judge.py` (new), `ai_os/golden.yaml` (`relevant_also`/`human_review`/`semantic_fail`), `tools/bench_rag.py` (new; the router + R1–R9), `ai_os/eval_dataset.py` (the length-guarded stem matcher), `tools/regress_all.py` (the R1–R9 row), `ai_os/questions.yaml`/`code_questions.yaml` (τ recorded), `docs/concepts/rag-benchmark.md`, `docs/evaluations/bench-day21.md` |
 | 22 | Agent Evaluation | PARTIAL (all MECH green offline; **AB1–AB9** with the six trace columns printed (task success · TSR@1 · args · steps · cost · latency) + the two newly defined (unnecessary calls via the pre-registered `necessary_calls` envelope, U1/U2/U3 + the owned `undecided`; failure recovery = progress-after-failure with the `fabricated` gate + `gave_up` the honest zero), the **AB9 control** (bench off ≡ production), the `--baseline` pin, and Days 7–21 re-run unchanged — the gate is now 18 rows; the real-model column is the day's real-key handoff) | `ai_os/agent_bench.py` (new), `tools/bench_agent.py` (new), `ai_os/golden.yaml` (`necessary_calls`/`expected_steps`/`expected_termination`), `ai_os/eval_dataset.py` (the envelope's parse/validate/hash), `data/agent-baseline.json` (new), `tools/regress_all.py` (the AB1–AB9 row), `docs/concepts/agent-benchmark.md`, `docs/evaluations/bench-day22.md` |
 | 23 | AI Observability | PARTIAL (all MECH green offline; **O1–O9** + the **O9 control** — tracing off ≡ on except the additive id; one root request → a nested, clocked, ledger-reconciled span tree; gateway attempt lineage (retry → sibling attempts, fallback names each provider); RAG `request → embed → retrieval → documents → chat → answer`; agent `step → tool-call → validation → result` with parallel/deferred semantics; explicit prompt refs (name · version · exact-content hash); money read from linked ledger rows with `price_status=unknown` flagged; typed error closure; bounded oldest-first lookup with secret redaction; Day 23's rows added to the gate (**19 rows**); **`PENDING`: operational-usefulness/attribute balance (design judgment), raw-payload fidelity, and durable storage/export + cross-process propagation (Day 24)**) | `ai_os/observability.py` (new), `ai_os/gateway.py` (attempt spans), `ai_os/ledger.py` (trace/span/prompt provenance + `price_status`), `ai_os/rag.py` (request/retrieval/document/generation/answer + `RAG_PROMPT_REF`), `ai_os/agent.py` (steps/tools/final + reasoning/termination prompt refs), `ai_os/server.py` (`trace_id` + `GET /traces/{id}`), `tools/trace_smoke.py` (new; O1–O9 + O8b stream), `tools/regress_all.py` (the O row), `docs/concepts/observability.md`, `docs/evaluations/trace-day23.md` |
+| 24 | Distributed AI Observability | PARTIAL (all MECH green offline; **D1–D9** + the **D9 control** — one identity that survives the wire: W3C trace-context `extract`/`inject` with a validated continuation (or a fresh root with a **recorded reason**), the second axis `span_kind` (`server`/`client`/`internal`) with `remote` + `remote_endpoint`, span ids made wire-shaped (32/16 hex, **globally unique across processes continuing one trace**), the idempotent **order-free loss-aware** `TraceAssembler` (duplicates counted, late recorded, `missing` materialized from a **declared topology**; `complete`/`gap_count`/`components_seen`; end-to-end = the root/critical path, **never Σ hops**), the bounded **fail-open** `Collector` (+ a loopback-only `/ingest/span`, **off**), **structured logs** (fixed JSON spine, ids from the same context var, **pre-serialization redaction**, bounded ring, `GET /logs`), **bounded metrics** (counters + fixed-bucket histograms incremented at **span close**, a label **allow-list**, `GET /metrics`), the genuinely-crossing **`ai_os/worker.py`** (extract → continue with a remote parent → do one job → report back), and `GET /traces/{id}` serving assembled and local traces through one schema; **Days 7–23 re-run unchanged** (the gate is now **20 rows, 0 moved**), and O9/D9 keep tracing **passive and fail-open**; **`PENDING`: a production collector / log shipping / metrics backend / scrape alerting, real sampling + retention policy, the internals of Postgres / Saleor / the providers, client-side spans, and ingest authentication (Day 26)**) | `ai_os/observability.py` (**`TraceContext`**/`SpanReport`/`Topology`/`TraceAssembler`/`Collector` + span/trace hooks, `schema_version` → 2), `ai_os/structured_logging.py` (new), `ai_os/metrics.py` (new), `ai_os/worker.py` (new), `ai_os/server.py` (inbound continue-or-mint + `/metrics` `/logs` `/ingest/span`), `ai_os/gateway.py` (client attempts + inject + structured logger), `ai_os/data.py` (`client` postgres spans), `ai_os/rag.py` (internal store span + `retrieve_remote` seam), `ai_os/tools.py` (schema internal span), `ai_os/providers/{openai,anthropic,cloudflare}.py` (outbound header injection), `tools/mock_gateway.py` (header capture), `tools/distributed_smoke.py` (new; D1–D9), `test_day24.py` (new), `tools/regress_all.py` (the D row), `docs/concepts/distributed-tracing.md`, `docs/evaluations/trace-day24.md` |
 
 ---
 
@@ -1213,6 +1214,92 @@ metric that needed the golden set to exist first. Concept + evaluation:
 
 ---
 
+## Day 24 — Distributed AI Observability `PARTIAL`
+
+> "Understand cross-component execution." The deliverable is the **end-to-end
+> request trace**: one assembled, honest record of a request that crossed
+> component boundaries — the chain **User → AI API → Agent → RAG → Vector DB →
+> Saleor API → PostgreSQL → Response**, with **correlation IDs, distributed
+> traces, structured logging, and metrics**. Day 23 made one in-process request
+> explainable; Day 24 makes the explanation survive the wire — and admit where it
+> went dark.
+
+- **The one idea:** *a distributed trace is not the union of everyone's logs — it
+  is one identity that crosses every boundary, an honest measurement of each hop
+  we own, and an explicit, named gap for every hop we do not.*
+- **The wire contract (`observability.py`):** `TraceContext` (W3C
+  `version-trace_id-parent_id-flags`, strict validation, `new_root`/`child`,
+  `sampled`), `extract`/`inject` for headers and carriers, and bounded,
+  allow-listed, non-secret **baggage** (`tenant`/`surface`/`request_kind`, capped).
+  `parse` returns `(context, reason)`; every non-continuation is explained
+  (`no_header`/`malformed`/`all_zero`/`version_unsupported`). Ids were made
+  wire-shaped: `new_trace_id()` is 32 hex and every span id 16 hex — and span ids
+  are **random, not a per-trace sequence**, because two processes continuing one
+  trace would otherwise collide at `…0001` (the exact bug the assembler would then
+  have to call a "duplicate").
+- **Two axes, one grammar:** Day 23's `kind` names the operation family; Day 24's
+  **`span_kind`** names the control edge (`server`/`client`/`internal`, +
+  `producer`/`consumer`), with a `remote` flag and a credential-free
+  `remote_endpoint`. `schema_version` bumped 1 → 2. No second trace type.
+- **Assembly (`SpanReport` + `TraceAssembler`):** idempotent on `span_id`,
+  **order-free**, **loss-aware** — duplicates counted (never double-counted
+  durations), late arrivals recorded, and `missing` children materialized from a
+  **declared topology** (a hand-written per-component expectation, so a gap gets a
+  name). Exposes `complete`/`span_count`/`gap_count`/`components_seen`; the
+  end-to-end number is the root/critical path, **never the sum of hops**.
+- **The collector is local and fail-open:** a bounded, thread-safe, oldest-first
+  `Collector` with an in-process submit path and a loopback-only HTTP ingest route
+  (`POST /ingest/span`) that is **off by default** (unauthenticated ingest is a
+  Day-26 boundary). `Collector.submit` and `submit_report` swallow any failure and
+  report it by value — a collector that raises changes nothing about the request.
+- **Instrumented edges:** `server.py` continues/mints the inbound identity and
+  returns `trace_id` in the body **and** a header (`X-Trace-Id` + `traceparent`),
+  with a `response_sent` event and TTFT for streams; `gateway.py` attempts are
+  `client` spans that inject the context (providers merge `outbound_headers()`);
+  `data.py` emits `client` `postgres.query` spans carrying a **statement hash**,
+  the allow-list/policy verdict, rows, truncation, and `statement_timeout` (never
+  SQL text, rows, or a DSN); `rag.py`'s retrieval is an `internal` span naming the
+  **local file** store, with `retrieve_remote()` the named seam a network vector DB
+  would use; the schema card is an `internal` span (no boundary crossed).
+- **The genuinely crossing component (`worker.py`):** a second process — a stdlib
+  HTTP service — that **extracts** the header, **continues** with a remote parent
+  (same trace id, fresh span id, `kind=server`), does one job (a Saleor-shaped
+  lookup), and **reports its spans back**. `dispatch()` is fail-open: `None` on a
+  dead/hung worker, which the caller records as a **gap**.
+- **Three views, one identity:** `structured_logging.py` emits one JSON object per
+  line on a fixed spine, binds `trace_id`/`span_id` from the *same* context
+  variable Day 23 uses, redacts **before** serialization, and keeps a bounded ring
+  (`GET /logs?trace_id=…`); the `ai_os.gateway` logger migrated first (prose with
+  no ids → the spine). `metrics.py` derives counters and **fixed-bucket**
+  histograms from **span closes** (a registered hook), so metrics and traces
+  cannot disagree; labels come from an **allow-list** (`GET /metrics`).
+- **ALL DAY 24 (D1–D9) CHECKS PASSED** (`tools/distributed_smoke.py`; two real
+  processes, one trace id) + the deterministic unit suite `test_day24.py`:
+  D1 continuation with reasons · D2 outbound injection proven end-to-end (the stub
+  captures the header; the worker echoes it and reconstructs the parent chain) ·
+  D3 idempotent/order-free/loss-aware assembly · D4 the end-to-end spine (one
+  `server` root, `internal` retrieval, `client` provider attempt, worker `server`
+  + its `client` Saleor hop; `components_seen = [api, gateway, rag, worker]`) ·
+  D5 gap honesty (a dead worker → a named `missing`, `complete: false`, no
+  fabricated success) · D6 structured logs (one spine, ids resolve, >1 component
+  across both processes, redaction finds nothing) · D7 metrics (span-close
+  derivation, ledger reconciliation, declared buckets, label allow-list) ·
+  D8 money/latency (`root=6.744 ms` ≠ `Σhops=16.933 ms`; exact ledger delta; TTFT)
+  · D9 the **control** (on ≡ off; off injects no header; a raising collector
+  changes nothing).
+- **Gate:** Day 24's D1–D9 row joins `tools/regress_all.py` (**20 rows, 0 moved**).
+  Days 7–23 re-run unchanged with propagation, logging, and metrics installed; O9
+  still proves tracing is passive, and D9 extends it to the cross-process path.
+- **Cost shape:** distributed tracing is **0 chats, 0 embeds, 0 extra SQL**; the
+  only new overhead is local CPU/memory (headers, serialization, a bounded ring,
+  bounded counters). No instrumentation decision is allowed to nudge a retry.
+- **`PENDING` (named, not declared solved):** a production collector / log
+  shipping / metrics backend / scrape alerting; real sampling and retention
+  policy; the internals of Postgres, Saleor, and the providers (labeled gaps); the
+  seam a remote vector DB would use; **client-side spans**; and authentication/
+  rate-limiting on the ingest route (**Day 26**).
+- Re-verify with `python tools/distributed_smoke.py` and `python test_day24.py`.
+
 ## Known gaps (what blocks "everything green for real")
 
 1. **Git:** Days 2–17 are committed (HEAD `e1c796f`, the Day-17 rollup); **Days 18–21**
@@ -1492,6 +1579,27 @@ metric that needed the golden set to exist first. Concept + evaluation:
     propagation are Day 24 / deployment work**, not hidden inside today's local
     in-memory store. Re-verify with `python tools/trace_smoke.py`.
 
+20. **Day 24 semantics** — the MECH half is green (`tools/distributed_smoke.py`;
+    D1–D9 with the **D9 control** — propagation/logging/metrics on ≡ off, a
+    collector that raises changes nothing — plus a second real process on `:8710`
+    whose span reports assemble into one tree). The wire format, continuation with
+    recorded reasons, outbound injection, idempotent/order-free/loss-aware
+    assembly, gap honesty, the structured-log spine, the metric arithmetic, and
+    cross-boundary money/latency are all deterministic, and Days 7–23 re-run
+    unchanged with the new machinery installed (`tools/regress_all.py` is now
+    **20 rows, 0 moved**). Still `PENDING`: (a) **a production collector / log
+    shipping / metrics backend / scrape alerting** — the ring and the JSON snapshot
+    are a *local* surface, named as such; (b) **real sampling and retention
+    policy** — the sampled bit is propagated, the policy is trivial by admission;
+    (c) the **internals of Postgres, Saleor, and the providers** — a `client` span
+    measures *our* wait, never the far side's plan/resolvers, which stay labeled
+    gaps; (d) the **remote vector-store seam** (`retrieve_remote` raises) until a
+    network store exists; (e) **client-side spans** (browser/CLI) — the
+    outside-the-trace remainder is named, not claimed; (f) **ingest authentication
+    and rate limiting** (`POST /ingest/span` ships disabled — a Day-26 boundary);
+    (g) the **topology is hand-written** and can drift from reality. Re-verify with
+    `python tools/distributed_smoke.py`.
+
 ## How to re-verify, in one line
 
 ```bash
@@ -1519,6 +1627,8 @@ python tools/bench_agent.py --fixtures   # day 22 AB1–AB9 (task success · TSR
 python tools/bench_agent.py --stub       # day 22 §9 A-report (stub world; 21 rows, 21 verdicts)
 python tools/bench_agent.py --real       # day 22 real-model agent benchmark (the Day-11/12 PENDING handoff)
 python tools/trace_smoke.py              # day 23 O1–O9 (one request's causal tree + the O9 control), 0 chats
+python tools/distributed_smoke.py        # day 24 D1–D9 (the wire format · continuation · injection · assembly · gaps · logs · metrics · money/latency · the D9 control); two processes, one trace id, 0 chats
+python test_day24.py                     # day 24 unit: traceparent grammar · baggage bounds · assembler idempotency · collector fail-open · metric labels · log spine/redaction
 LLM_PROVIDERS=cloudflare: python tools/build_code_store.py --corpus corpus_code/saleor --out data/code_store.json --batch 100  # real build (resume; see gap 6)
 python tools/retrieval_day10.py --store data/code_store.json --doc-store data/store.json  # real corpora
 ```
@@ -1557,6 +1667,8 @@ python tools/bench_agent.py --fixtures   # day 22 AB1–AB9 (task success · TSR
 python tools/bench_agent.py --stub       # day 22 §9 A-report (stub world; 21 rows, 21 verdicts)
 python tools/bench_agent.py --real       # day 22 real-model agent benchmark (the Day-11/12 PENDING handoff)
 python tools/trace_smoke.py              # day 23 O1–O9 (one request's causal tree + the O9 control), 0 chats
+python tools/distributed_smoke.py        # day 24 D1–D9 (the wire format · continuation · injection · assembly · gaps · logs · metrics · money/latency · the D9 control); two processes, one trace id, 0 chats
+python test_day24.py                     # day 24 unit: traceparent grammar · baggage bounds · assembler idempotency · collector fail-open · metric labels · log spine/redaction
 python tools/regress_all.py              # day 20/21 Rule-2 gate: doc nine + code six + every day suite (7–21, bench included) + the golden rows, exactly as green
 python tools/regress_all.py --fast       # day 20 gate: fixtures + golden rows only
 LLM_PROVIDERS=cloudflare: python tools/build_code_store.py --corpus corpus_code/saleor --out data/code_store.json --batch 100  # real build (resume; see gap 6)

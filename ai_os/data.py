@@ -50,6 +50,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from ai_os import observability as obs
 from ai_os import sql_safety
 from ai_os.sql_safety import Policy, SafeSql, load_policy
 
@@ -620,6 +621,70 @@ class DataAgent:
             self.policy,
             explain_cost=getattr(store, "explain_cost", None))
 
+    # ------------------------------------------------- Day 24 — the client edge
+    # The data hop is a *client* edge: we measure our own socket wait, status, and
+    # result shape — never Postgres's plan, indexes, or lock waits. The statement
+    # is hashed, never stored; the verdict and row shape are, because they are
+    # what we can honestly know.
+
+    def _endpoint(self) -> str:
+        return ("postgres" if type(self.store).__name__ == "PostgresDataStore"
+                else "sqlite")
+
+    @staticmethod
+    def _span_attrs(result: "QueryResult") -> dict[str, Any]:
+        attrs: dict[str, Any] = {
+            "executed": result.executed,
+            "row_count": result.row_count,
+            "truncated": result.truncated,
+            "db_elapsed_ms": round(float(result.elapsed_ms), 3),
+        }
+        if result.validation:
+            attrs["validation"] = result.validation
+        if result.rejection_class:
+            attrs["rejection_class"] = result.rejection_class
+        if result.stage:
+            attrs["stage"] = result.stage
+        if result.cost_estimate is not None:
+            attrs["cost_estimate"] = result.cost_estimate
+        if result.statement_timeout_ms is not None:
+            attrs["statement_timeout_ms"] = result.statement_timeout_ms
+        if result.error_kind:
+            attrs["error_kind"] = result.error_kind
+        if result.executed_sql:
+            # "what ran" as a hash — the normalized + LIMIT-rewritten form, never
+            # the SQL text (a query can carry a literal a reader must not keep).
+            attrs["executed_sha256"] = obs.sha256_text(result.executed_sql)
+        return attrs
+
+    def _trace_call(self, operation: str, fn, *,
+                    statement: str | None = None):
+        """Run one DB call inside a `client` span (no-op when tracing is off)."""
+        tr = obs.current_trace()
+        span = None
+        if tr is not None and getattr(tr, "recording", False):
+            attrs: dict[str, Any] = {"operation": operation}
+            if statement is not None:
+                attrs["statement_sha256"] = obs.sha256_text(statement)
+            span = tr.start_span(obs.KIND_TOOL, "postgres.query",
+                                 span_kind=obs.SPAN_CLIENT, remote=True,
+                                 remote_endpoint=self._endpoint(),
+                                 component="data", attributes=attrs)
+        try:
+            result = fn()
+        except BaseException as exc:
+            if span is not None:
+                obs.end_span(span, status=obs.status_for_error(exc),
+                             error=obs.error_fact(exc))
+                tr.leave(span)
+            raise
+        if span is not None:
+            span.update(**self._span_attrs(result))
+            obs.end_span(span, status=(obs.STATUS_OK if result.ok
+                                       else obs.STATUS_ERROR))
+            tr.leave(span)
+        return result
+
     def run(self, sql: str, *, row_limit: int | None = None,
             validate: bool = True) -> QueryResult:
         """The §3 choke point: normalize → parse → policy → cost → rewrite → execute.
@@ -627,7 +692,18 @@ class DataAgent:
         `validate=False` skips the layer entirely — the escape hatch Day 14's Q5
         uses to prove the *engine* (layer 2) refuses a write that bypasses the
         layer-1 rejection. Nothing else should call it.
+
+        Day 24 wraps the whole decision in a `client` span: a rejected statement
+        is still rejected, and now also visible as a closed span carrying the
+        verdict and the rejection class.
         """
+        return self._trace_call("run_saleor_sql",
+                                lambda: self._run_core(sql, row_limit=row_limit,
+                                                       validate=validate),
+                                statement=sql)
+
+    def _run_core(self, sql: str, *, row_limit: int | None = None,
+                  validate: bool = True) -> QueryResult:
         limit = min(self.row_limit if row_limit is None else max(1, row_limit),
                     max(1, self.policy.row_limit))
         if not validate:
@@ -679,7 +755,9 @@ class DataAgent:
             "LEFT JOIN product_productvariantchannellisting l ON l.variant_id = v.id "
             f"WHERE p.id = {_literal(product_id)} LIMIT 1"
         )
-        return self.store.query(sql, row_limit=1)
+        return self._trace_call("get_product",
+                                lambda: self.store.query(sql, row_limit=1),
+                                statement=sql)
 
     def get_order(self, order_id: str) -> QueryResult:
         sql = (
@@ -689,7 +767,9 @@ class DataAgent:
             "FROM order_order o "
             f"WHERE o.id = {_literal(order_id)} LIMIT 1"
         )
-        return self.store.query(sql, row_limit=1)
+        return self._trace_call("get_order",
+                                lambda: self.store.query(sql, row_limit=1),
+                                statement=sql)
 
     def get_customer(self, customer_id: str) -> QueryResult:
         sql = (
@@ -700,7 +780,9 @@ class DataAgent:
             "FROM account_user u "
             f"WHERE u.id = {_literal(customer_id)} LIMIT 1"
         )
-        return self.store.query(sql, row_limit=1)
+        return self._trace_call("get_customer",
+                                lambda: self.store.query(sql, row_limit=1),
+                                statement=sql)
 
 
 def _literal(value: Any) -> str:

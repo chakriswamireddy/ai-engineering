@@ -246,7 +246,8 @@ def run_rag(gateway, store, question: str, *, k: int | None = None,
     own = tr is None or not getattr(tr, "recording", False)
     if own:
         tr = obs.start_trace("rag", attributes={
-            "route": "/rag", "question_sha256": obs.sha256_text(q),
+            "route": "/rag", "component": "rag",
+            "question_sha256": obs.sha256_text(q),
             "question_chars": len(q)})
     else:
         tr.add_event("request", route="/rag",
@@ -284,10 +285,12 @@ def _run_rag_traced(gateway, store, q: str, *, k, budget_chars, max_tokens,
 
     if k is None:
         k = k_from_budget(budget_chars, store.avg_chunk_len(), len(store))
-    with tr.span(obs.KIND_RETRIEVAL, "retrieval", attributes={
-            "query_sha256": obs.sha256_text(q), "k": k,
-            "store": store.embedding_model, "store_dim": store.dimension,
-            "budget_chars": budget_chars}) as rspan:
+    with tr.span(obs.KIND_RETRIEVAL, "retrieval", component="rag",
+                 span_kind=obs.SPAN_INTERNAL, attributes={
+                     "query_sha256": obs.sha256_text(q), "k": k,
+                     "store": store.embedding_model, "store_dim": store.dimension,
+                     "store_version": STORE_VERSION, "store_kind": "local_file",
+                     "budget_chars": budget_chars}) as rspan:
         results = store.retrieve(qvec, k)
         context, used, kept = build_context(results, budget_chars)
         kept_ids = {c.chunk_id for _, c in kept}
@@ -373,3 +376,17 @@ def code_store_path_from_env(default: str = "data/code_store.json") -> str:
 
 def load_code_store_from_env(default: str = "data/code_store.json") -> RagStore:
     return RagStore.load(code_store_path_from_env(default))
+
+
+def retrieve_remote(*_args: Any, **_kwargs: Any) -> list[tuple[float, Chunk]]:
+    """Day 24 §7 — the seam a real *network* vector database will use.
+
+    Today's `RagStore` is a local JSON file, so its read is an `internal` span in
+    `_run_rag_traced` (no request left the process). When a remote store exists,
+    this function is where the `client` span with injection belongs. It raises so
+    it can never be mistaken for a working path — the day names the chain's
+    Vector DB hop and does not fake it.
+    """
+    raise NotImplementedError(
+        "remote vector store is PENDING: RagStore is a local file today; a "
+        "network vector DB would emit a client span here (Day 24 names the seam)")

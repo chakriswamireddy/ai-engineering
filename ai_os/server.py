@@ -14,10 +14,11 @@ All knobs come from the env (see ai_os.config). Responses use the normalized
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
 from ai_os import observability as obs
@@ -38,6 +39,11 @@ except Exception as e:  # keep /health informative instead of a hard 500
     _build_error = str(e)
 
 app = FastAPI(title="AI OS — Day 4 Model Gateway", version="0.2.0")
+
+
+def _headers_of(request: Request) -> dict[str, str]:
+    """Lowercased inbound headers — what `obs.extract` expects."""
+    return {k.lower(): v for k, v in request.headers.items()}
 
 
 class ChatRequest(BaseModel):
@@ -87,21 +93,25 @@ def health() -> dict[str, Any]:
 
 
 @app.post("/chat")
-def chat_endpoint(req: ChatRequest) -> dict[str, Any]:
+def chat_endpoint(req: ChatRequest, request: Request):
     if gateway is None:
         return {"error": _build_error}
-    # Day 23 §7 — the route mints the request root; the gateway's attempt spans
-    # attach to it. `trace_id` is the one additive field on the response.
-    trace = obs.start_trace("chat", attributes={
-        "route": "/chat", "messages": len(req.messages),
-        "input_chars": sum(len(m.get("content", "")) for m in req.messages)})
+    # Day 24 §7 — the inbound edge. A valid `traceparent` is *continued* (same
+    # trace id, fresh span id, remote parent); absent/malformed/all-zero/unknown-
+    # version mints a fresh root with the reason recorded. A bad header never
+    # fails the request, and it never selects a store, tenant, or permission.
+    trace, extract = obs.start_server_trace("chat", _headers_of(request), attributes={
+        "route": "/chat", "component": "api", "messages": len(req.messages),
+        "input_chars": sum(len(m.get("content", "")) for m in req.messages),
+        "continuation_reason": extract.reason})
+    headers = obs.response_trace_headers(trace)
     try:
         completion = gateway.chat(
             req.messages, temperature=req.temperature, max_tokens=req.max_tokens)
     except ProviderError as e:
         obs.finish_trace(trace, status=obs.status_for_error(e),
                          error=obs.error_fact(e))
-        return _error_response(e)
+        return JSONResponse(_error_response(e), headers=headers)
     obs.add_final_answer_event(trace, ans=completion.text,
                                citations=0, refusal=False)
     obs.finish_trace(trace)
@@ -117,11 +127,12 @@ def chat_endpoint(req: ChatRequest) -> dict[str, Any]:
     }
     if getattr(trace, "recording", False):
         out["trace_id"] = trace.trace_id
-    return out
+        out["continuation_reason"] = extract.reason
+    return JSONResponse(out, headers=headers)
 
 
 @app.post("/chat/stream")
-async def chat_stream_endpoint(req: ChatRequest) -> StreamingResponse:
+async def chat_stream_endpoint(req: ChatRequest, request: Request) -> StreamingResponse:
     if gateway is None:
         return StreamingResponse(
             iter([f"data: {json.dumps({'error': _build_error})}\n\n"]),
@@ -129,10 +140,12 @@ async def chat_stream_endpoint(req: ChatRequest) -> StreamingResponse:
 
     # Day 23 §8 — the trace id rides in a response *header*, so the SSE chunk
     # bytes are unchanged and TTFT is untouched; the stream's spans (including
-    # `ttft_ms`) still land in the trace.
-    trace = obs.start_trace("chat", attributes={
-        "route": "/chat/stream", "messages": len(req.messages)})
-    headers = {"X-Trace-Id": trace.trace_id} if getattr(trace, "recording", False) else {}
+    # `ttft_ms`) still land in the trace. Day 24 continues the inbound context
+    # and adds the response `traceparent`.
+    trace, extract = obs.start_server_trace("chat", _headers_of(request), attributes={
+        "route": "/chat/stream", "component": "api", "messages": len(req.messages),
+        "continuation_reason": extract.reason})
+    headers = obs.response_trace_headers(trace)
 
     def events():
         with obs.use_trace(trace):
@@ -147,6 +160,8 @@ async def chat_stream_endpoint(req: ChatRequest) -> StreamingResponse:
             except ProviderError as e:
                 yield f"data: {json.dumps(_error_response(e))}\n\n"
             finally:
+                if getattr(trace, "recording", False):
+                    trace.add_event("response_sent", ok=True, stream=True)
                 obs.finish_trace(trace)
 
     return StreamingResponse(events(), media_type="text/event-stream",
@@ -183,7 +198,7 @@ def _rag_store(corpus: str = "docs") -> RagStore | None:
 
 
 @app.post("/rag")
-def rag_endpoint(req: RagRequest) -> dict[str, Any]:
+def rag_endpoint(req: RagRequest, request: Request):
     """Day 6 §6 — question → embed → retrieve → context → chat → answer.
 
     `citations` is the retrieved set itself (with scores), so every claim
@@ -192,6 +207,10 @@ def rag_endpoint(req: RagRequest) -> dict[str, Any]:
 
     Day 10 adds `corpus` ("docs" | "code"): a second store behind the same
     endpoint, so a code citation is still `cited ⊆ retrieved`.
+
+    Day 24 §7 — the inbound edge runs first: a valid `traceparent` continues
+    the trace, so this request and everything it calls (embed, retrieval,
+    provider) share one identity across the wire.
     """
     if gateway is None:
         return {"error": _build_error}
@@ -202,14 +221,68 @@ def rag_endpoint(req: RagRequest) -> dict[str, Any]:
         return {"error": f"no RAG store at {which}",
                 "hint": "run `python tools/build_rag_store.py` (docs) or "
                         "`python tools/build_code_store.py` (code) first"}
+    trace, extract = obs.start_server_trace("rag", _headers_of(request), attributes={
+        "route": "/rag", "component": "api", "corpus": req.corpus,
+        "question_sha256": obs.sha256_text(req.question),
+        "continuation_reason": extract.reason})
+    headers = obs.response_trace_headers(trace)
     try:
         result = run_rag(gateway, store, req.question, k=req.k,
                          budget_chars=req.budget_chars,
                          max_tokens=req.max_tokens)
     except ProviderError as e:
-        return _error_response(e)
+        obs.finish_trace(trace, status=obs.status_for_error(e), error=obs.error_fact(e))
+        return JSONResponse(_error_response(e), headers=headers)
     except DimensionMismatch as e:
-        return {"error": str(e)}
+        obs.finish_trace(trace, status=obs.STATUS_ERROR)
+        return JSONResponse({"error": str(e)}, headers=headers)
     except ValueError as e:
-        return {"error": str(e)}
-    return result
+        obs.finish_trace(trace, status=obs.STATUS_ERROR)
+        return JSONResponse({"error": str(e)}, headers=headers)
+    if getattr(trace, "recording", False):
+        trace.add_event("response_sent", ok=True)
+        result["continuation_reason"] = extract.reason
+    obs.finish_trace(trace)
+    return JSONResponse(result, headers=headers)
+
+
+@app.get("/metrics")
+def metrics_endpoint(format: str = "json"):
+    """Day 24 §8 — the aggregated view (JSON snapshot, optional Prometheus text)."""
+    from ai_os import metrics as metrics_mod
+    if format == "prometheus":
+        return PlainTextResponse(metrics_mod.registry().render_prometheus())
+    return metrics_mod.registry().snapshot()
+
+
+@app.get("/logs")
+def logs_endpoint(trace_id: str | None = None, limit: int | None = None):
+    """Day 24 §8 — one grep by `trace_id` returns one request's lines."""
+    from ai_os import structured_logging as slog
+    ring = slog.get_ring()
+    if ring is None:
+        return {"lines": [],
+                "hint": "structured logging not set up (call structured_logging.setup())"}
+    return {"lines": ring.lines(trace_id=trace_id, limit=limit)}
+
+
+def _ingest_enabled() -> bool:
+    return os.getenv("TRACE_INGEST", "0").strip().lower() in {
+        "1", "true", "yes", "on"}
+
+
+@app.post("/ingest/span")
+def ingest_span_endpoint(payload: dict):
+    """Day 24 §6 — the loopback-only span report route, **off by default**.
+
+    Unauthenticated ingest is a Day-26 boundary: enabling this binds a collector
+    that accepts writes from anywhere without a credential, so it ships disabled
+    and says so rather than pretending a local route is a service.
+    """
+    if not _ingest_enabled():
+        return JSONResponse(
+            {"error": "trace ingest disabled; set TRACE_INGEST=1 to enable "
+                      "(unauthenticated ingest is a Day-26 boundary)"},
+            status_code=404)
+    ok = obs.ingest_payload(payload)
+    return JSONResponse({"accepted": ok}, status_code=200 if ok else 400)

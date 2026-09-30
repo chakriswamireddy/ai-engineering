@@ -16,6 +16,7 @@ import time
 from typing import Any, Iterator
 from urllib import error as urlerror, request
 
+from ai_os import observability as obs
 from ai_os.contract import (
     Completion, ProviderError, InvalidKeyError,
     ProviderTimeout, NetworkError, ToolCall,
@@ -99,11 +100,13 @@ class AnthropicProvider:
     # -- private: wire format lives only here --------------------------------
 
     def _headers(self) -> dict[str, str]:
+        # Day 24 — inject the current trace context on the outbound edge.
         return {
             "content-type": "application/json",
             "x-api-key": self.api_key,
             "anthropic-version": self.ANTHROPIC_VERSION,
             "User-Agent": "ai-layer/0.2 (anthropic provider)",
+            **obs.outbound_headers(),
         }
 
     def _message_body(self, messages: list[dict[str, Any]], *, temperature: float,

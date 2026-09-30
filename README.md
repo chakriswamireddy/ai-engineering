@@ -1,4 +1,4 @@
-# ai-layer — Days 4–22: Gateway → Search → RAG → Code RAG → Tools → Loop → Data → Safe SQL → Planning → State → Memory → Multi-Agent → Evaluation → RAG Benchmark → Agent Benchmark
+# ai-layer — Days 4–24: Gateway → Search → RAG → Code RAG → Tools → Loop → Data → Safe SQL → Planning → State → Memory → Multi-Agent → Evaluation → RAG Benchmark → Agent Benchmark → Observability → Distributed Observability
 
 A reusable AI layer built in layers:
 
@@ -124,6 +124,31 @@ A reusable AI layer built in layers:
     labelled worlds (stub / real), pins `data/agent-baseline.json`, and hosts the
     **AB1–AB9** fixture set with the **AB9 control**. All `MECH`, **0 chats** — the
     judge reads one run dict and never re-executes the run.
+18. **Day 23 — AI Observability**: *understand what happens inside an AI request*.
+    Day 23 gives one in-process request **one identity, one span tree, one
+    monotonic clock, one prompt vocabulary, and one ledger-reconciled bill**.
+    `ai_os/observability.py` builds `Trace`/`Span`/`Event`, a scoped context, and a
+    bounded `TraceStore`; the gateway wraps every provider attempt (retry = sibling
+    attempts, fallback names each provider); RAG and the agent build their causal
+    spines; `Ledger.CallRecord` gains trace/span/prompt provenance and
+    `price_status`; `server.py` returns `trace_id` and serves `GET /traces/{id}`.
+    The invariant is **`judged ⊆ pre-registered`**'s peer — *one request, one
+    root* — and the control is **O9**: tracing off and on leave the same answer,
+    attempts, tools, tokens, and cost. All `MECH`, **0 chats**.
+19. **Day 24 — Distributed AI Observability**: *understand cross-component
+    execution*. The chain **User → AI API → Agent → RAG → Vector DB → Saleor API →
+    PostgreSQL → Response** becomes **one identity that survives the wire**. Day 23's
+    grammar grows a **W3C trace-context** wire format (`TraceContext`
+    parse/format/validate, bounded non-secret baggage, `extract`/`inject`), a
+    continuation rule with a **recorded reason**, a second `span_kind` axis
+    (`server`/`client`/`internal`) with a `remote` flag, an idempotent
+    **order-free loss-aware `TraceAssembler`** (late · duplicate · `missing` from a
+    declared topology; end-to-end = the root, never Σ hops), a bounded **fail-open
+    collector**, **structured logs** (fixed JSON spine, pre-serialization
+    redaction), **bounded metrics** (span-close increments, fixed buckets, a label
+    allow-list), and the genuinely-crossing **`ai_os/worker.py`** second process.
+    The control is **D9**: propagation/logging/metrics on ≡ off, and a collector
+    that raises changes nothing. All `MECH`, **0 chats / 0 embeds / 0 extra SQL**.
 
 ```
 Application
@@ -196,6 +221,13 @@ raw HTTP via `urllib`.
 | `tools/rag_smoke.py` | day 6 deliberate-failure suite for the RAG loop |
 | `corpus/`, `data/store.json` | 6 real Saleor doc pages, committed store (250 chunks, stub vectors) |
 | `test_search.py`, `test_chunk.py`, `test_rag.py`, `test_day10.py` | deterministic unit suites (no network) |
+| `ai_os/observability.py` | day 23/24: the trace core (`Trace`/`Span`/`Event`, scoped context, bounded `TraceStore`, ledger-linked totals, prompt refs, redaction) + day 24's crossing primitives (`TraceContext` W3C parse/format/validate, `extract`/`inject`, bounded baggage, `span_kind`/`remote`, `SpanReport`, `Topology`, `TraceAssembler`, fail-open `Collector`, span/trace hooks; `schema_version` v2) |
+| `ai_os/structured_logging.py` | day 24: structured logs — one JSON object per line, the fixed spine, ids bound from the same context var, **pre-serialization redaction**, a bounded ring, and `GET /logs` |
+| `ai_os/metrics.py` | day 24: counters + fixed-bucket histograms incremented at **span close**, a registry with snapshot/reset, an enumerable **label allow-list**, `GET /metrics` |
+| `ai_os/worker.py` | day 24: the genuinely crossing second process — extract → continue (remote parent) → do one job → report spans back; `dispatch()` is fail-open (`None` ⇒ a recorded gap) |
+| `tools/trace_smoke.py` | day 23: **O1–O9** offline suite (one request's causal tree, model lineage, money, failure closure, prompt provenance, redaction/retention, stream pass-through, the O9 control) |
+| `tools/distributed_smoke.py` | day 24: **D1–D9** offline suite (the wire format · continuation · injection · assembly · gaps · structured logs · metrics · cross-boundary money/latency · the D9 control); two real processes, one trace id |
+| `test_day24.py` | day 24: deterministic unit suite under the D-fixtures (traceparent grammar, baggage bounds, assembler idempotency, collector fail-open, metric labels, log spine + redaction) |
 
 ## Run it for real
 
@@ -270,7 +302,10 @@ python tools/bench_rag.py --fixtures    # day 21 R1–R9 (recall@K · precision@
 python tools/bench_rag.py --stub        # day 21 §9 R-report (stub: D1 precision 0.444; K1 fails support; I1 pending-human)
 python tools/bench_agent.py --fixtures  # day 22 AB1–AB9 (task success · TSR@1 · args · steps · unnecessary · recovery · cost · latency · the AB9 control), 0 new chats
 python tools/bench_agent.py --stub      # day 22 §9 A-report (the stub world; 21 rows, 21 verdicts)
-python tools/regress_all.py             # day 20/21 Rule-2 gate: doc nine + code six + every day suite (7–21) + the golden rows, exactly as green
+python tools/trace_smoke.py             # day 23 O1–O9 (one request's causal tree + the O9 control), 0 chats
+python tools/distributed_smoke.py       # day 24 D1–D9 (wire format · continuation · injection · assembly · gaps · logs · metrics · money/latency · the D9 control); two processes, one trace id, 0 chats
+python test_day24.py                    # day 24 unit suite (traceparent grammar · baggage · assembler · collector · metrics · log spine)
+python tools/regress_all.py             # day 20/21 Rule-2 gate: doc nine + code six + every day suite (7–24, the D-fixtures included) + the golden rows, exactly as green
 ```
 
 The stub serves both providers on `:8700` (OpenAI) and `:8701` (Anthropic)
@@ -381,6 +416,11 @@ and exits 2 rather than a false FAIL.
 | `MEMORY_MIN_SOURCES` | `2` | day 18: the distiller's sample-size rule (a receipt is not a lesson) |
 | `MEMORY_DISTILL_TTL` | `604800` | day 18: a concept's clock backstop (7d; relevance is the policy) |
 | `MEMORY_STRENGTH_DECAY` | `0.5` | day 18: the re-prompt loop's decay step (`strength × (1 − rate)`) |
+| `AI_TRACING` | `1` | day 23: the master trace switch; `0` → no trace, no id, no spans (O9) |
+| `TRACE_PROPAGATION` | `1` | day 24: inject/extract `traceparent`; `0` adds no outbound header (D9) |
+| `TRACE_LOGGING` | `1` | day 24: structured-log JSON spine + bounded ring |
+| `TRACE_METRICS` | `1` | day 24: span-close counter/histogram increments |
+| `TRACE_INGEST` | `0` | day 24: enable `POST /ingest/span` (loopback only; off — Day-26 boundary) |
 
 Omitted keys are a startup error in `build_gateway_from_env` (fail fast, not a
 runtime 401 surprise). Embedding model is passed per-provider, so the key lives
@@ -393,6 +433,16 @@ with the provider config it belongs to.
 - `POST /chat/stream` — same body, SSE events; first chunk carries `ttft_ms`
 - `POST /rag` — `{question, k?, budget_chars?, corpus?}` → answer, `refused`, retrieval/generation cost split, citations (`corpus="docs"` default, `"code"` for symbols)
 - `GET /ledger` → aggregates: records, ok/failed, tokens, `cost_usd`, by_model, by_day
+- `GET /traces/{id}` → the sanitized trace (assembled when the request crossed a
+  boundary, else local), `404` on an unknown id; `GET /traces` → the index
+- `GET /metrics` → the JSON snapshot (`?format=prometheus` for the text exposition)
+- `GET /logs?trace_id=…&limit=…` → the bounded structured-log ring, one request's lines
+- `POST /ingest/span` → the loopback span-report route (**off** unless `TRACE_INGEST=1`)
+
+Day 24: `/chat`, `/rag`, and `/chat/stream` **extract** an inbound `traceparent`
+(continue when valid, else mint a fresh root and record why) and return `trace_id`
+in the body plus `X-Trace-Id`/`traceparent` headers; every outbound provider call
+**injects** the current context. Bodies are unchanged — propagation is additive.
 
 `usage` is the normalized `{input_tokens, output_tokens, total_tokens}` shape.
 `/ledger` counts failed attempts too — retries are not free, and now visible.
@@ -517,3 +567,25 @@ with the provider config it belongs to.
   `docs/concepts/rag-benchmark.md`, `docs/evaluations/bench-day21.md`, and
   `python tools/bench_rag.py --fixtures`. Real answer *quality* is the real-key
   handoff; agent behaviour is **Day 22's** benchmark.
+- Day 23 makes one request explainable: `ai_os/observability.py` (trace/span/event,
+  scoped context, monotonic timing, a bounded `TraceStore`, ledger-linked totals,
+  `PromptRef`), the gateway's attempt spans, the RAG/agent causal spines, the
+  additive `CallRecord` provenance, and `GET /traces/{id}`. The control is **O9**:
+  tracing off ≡ on except the additive id. See `docs/concepts/observability.md`,
+  `docs/evaluations/trace-day23.md`, and `python tools/trace_smoke.py` (O1–O9).
+- Day 24 makes the explanation survive the wire: `ai_os/observability.py` grows
+  `TraceContext` (W3C traceparent parse/format/validate), `extract`/`inject`,
+  bounded non-secret baggage, a `span_kind`/`remote` axis, an idempotent
+  order-free loss-aware `TraceAssembler` (late/duplicate/`missing` from a declared
+  topology; end-to-end = the root, **never Σ hops**), and a bounded fail-open
+  `Collector`; `ai_os/structured_logging.py` and `ai_os/metrics.py` are the two
+  derived views (fixed log spine with pre-serialization redaction; span-close
+  counters/histograms with a label allow-list); `ai_os/worker.py` is the second
+  process that continues a trace with a remote parent and reports back. The
+  control is **D9**: propagation/logging/metrics on ≡ off, and a collector that
+  raises changes nothing. See `docs/concepts/distributed-tracing.md`,
+  `docs/evaluations/trace-day24.md`, and `python tools/distributed_smoke.py`
+  (D1–D9). One honest limit, named not hidden: **a `client` span measures our own
+  wait** — Postgres's plan, Saleor's resolvers, and a provider's queue time stay
+  labeled gaps; a production collector, sampling policy, client-side spans, and
+  ingest auth are `PENDING` (deployment / Day 26).

@@ -17,6 +17,7 @@ from typing import Any, Iterator
 from urllib import error as urlerror, request
 from urllib.parse import urljoin
 
+from ai_os import observability as obs
 from ai_os.contract import (
     Completion, Embedding, InvalidKeyError, ProviderError, ProviderTimeout,
     NetworkError, Usage, usage_from_dict,
@@ -54,10 +55,12 @@ class CloudflareProvider:
     # -- private: wire format lives only here --------------------------------
 
     def _headers(self) -> dict[str, str]:
+        # Day 24 — inject the current trace context on the outbound edge.
         return {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
             "User-Agent": "ai-layer/0.2 (cloudflare provider)",
+            **obs.outbound_headers(),
         }
 
     def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:

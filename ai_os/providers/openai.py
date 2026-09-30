@@ -12,6 +12,7 @@ from typing import Any, Iterator
 from urllib import error as urlerror, request
 from urllib.parse import urljoin
 
+from ai_os import observability as obs
 from ai_os.contract import (
     Completion, Embedding, ProviderError, InvalidKeyError,
     ProviderTimeout, NetworkError, ToolCall, Usage,
@@ -98,10 +99,14 @@ class OpenAIProvider:
     # -- private: wire format lives only here --------------------------------
 
     def _headers(self) -> dict[str, str]:
+        # Day 24 — the outbound edge injects the current trace context. Empty
+        # when propagation is off (or no trace is active), so a pre-Day-24
+        # request sends exactly the headers it always did (D9).
         return {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
             "User-Agent": "ai-layer/0.2 (openai provider)",
+            **obs.outbound_headers(),
         }
 
     def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:

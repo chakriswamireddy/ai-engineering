@@ -73,6 +73,7 @@ SUITES: list[tuple[str, str, list[str]]] = [
     ("R1–R9 RAG bench", "tools/bench_rag.py", ["--fixtures"]),
     ("AB1–AB9 agent bench", "tools/bench_agent.py", ["--fixtures"]),
     ("O1–O9 trace fixtures", "tools/trace_smoke.py", []),
+    ("D1–D9 distributed trace", "tools/distributed_smoke.py", []),
 ]
 
 # The family replay (Day 8/9 retriever over the fixtures.py question sets) and
@@ -184,7 +185,7 @@ def main() -> None:
     replay_fixtures()
     replay_golden()
     if not args.fast:
-        print("\n== the day suites, replayed unchanged (Days 7–22)")
+        print("\n== the day suites, replayed unchanged (Days 7–24)")
         for label, script, argv in SUITES:
             replay_suite(label, script, argv)
 

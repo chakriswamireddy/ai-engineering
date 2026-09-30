@@ -25,6 +25,7 @@ import random
 import time
 from typing import Any, Iterator
 from urllib import error as urlerror
+from urllib.parse import urlsplit
 
 from ai_os import observability as obs
 from ai_os.contract import (
@@ -33,6 +34,20 @@ from ai_os.contract import (
 from ai_os.ledger import Ledger
 
 log = logging.getLogger("ai_os.gateway")
+
+
+def _endpoint(provider) -> str:
+    """The remote system's *host only* — never a credential or a full URL.
+
+    Day 24: a client span names the far side, and the name must be safe to keep
+    forever. `https://api.openai.com/v1` becomes `api.openai.com`.
+    """
+    base = getattr(provider, "base_url", "") or ""
+    try:
+        host = urlsplit(base).hostname
+    except ValueError:
+        host = ""
+    return host or getattr(provider, "name", "provider")
 
 
 def _backoff(attempt: int, err: ProviderError, base: float, cap: float) -> float:
@@ -99,6 +114,8 @@ class ModelGateway:
         if tr is not None and getattr(tr, "recording", False) and lspan is not None:
             span = tr.start_span(
                 obs.KIND_MODEL, f"model.{operation}.attempt", parent=lspan,
+                span_kind=obs.SPAN_CLIENT, remote=True, component="gateway",
+                remote_endpoint=_endpoint(provider),
                 attributes={"operation": operation, "provider": provider.name,
                             "model": model, "attempt": attempt,
                             "fallback_depth": depth,
@@ -183,9 +200,12 @@ class ModelGateway:
                         break                      # never retry semantic errors
                     delay = _backoff(attempt, perr, self.base_delay, self.max_delay)
                     self._retry_event(lspan, attempt, delay, perr)
-                    log.info("%s attempt %d/%d -> %s; sleeping %.2fs",
-                             provider.name, attempt, self.max_attempts,
-                             type(perr).__name__, delay)
+                    log.info("retry scheduled", extra={
+                        "component": "gateway", "event": "retry_scheduled",
+                        "provider": provider.name, "attempt": attempt,
+                        "max_attempts": self.max_attempts,
+                        "error_kind": obs.error_kind_of(perr),
+                        "delay_s": round(delay, 3)})
                     time.sleep(delay)
                     continue
                 self._record(tr, span_id, operation, attempts_total, prompt_ref,
@@ -198,8 +218,11 @@ class ModelGateway:
                 self.last_latency_ms = latency_ms
                 self.last_attempts = attempts_total
                 self.last_error = None
-                log.info("%s chat ok model=%s attempts=%d latency=%.1fms",
-                         provider.name, completion.model, attempts_total, latency_ms)
+                log.info("chat ok", extra={
+                    "component": "gateway", "event": "chat_ok",
+                    "provider": provider.name, "model": completion.model,
+                    "attempt": attempts_total, "latency_ms": round(latency_ms, 1),
+                    "status": "ok"})
                 return completion
             if deadline is not None and time.monotonic() >= deadline:
                 break
@@ -268,6 +291,8 @@ class ModelGateway:
                 if tr is not None and lspan is not None:
                     span = tr.start_span(
                         obs.KIND_MODEL, f"model.{operation}.attempt", parent=lspan,
+                        span_kind=obs.SPAN_CLIENT, remote=True, component="gateway",
+                        remote_endpoint=_endpoint(provider),
                         attributes={"operation": operation, "provider": provider.name,
                                     "model": getattr(provider, "model", ""),
                                     "attempt": attempt, "fallback_depth": depth,
@@ -407,9 +432,12 @@ class ModelGateway:
                         break                  # 401/400 never retried
                     delay = _backoff(attempt, perr, self.base_delay, self.max_delay)
                     self._retry_event(lspan, attempt, delay, perr)
-                    log.info("%s embed attempt %d/%d -> %s; sleeping %.2fs",
-                             provider.name, attempt, self.max_attempts,
-                             type(perr).__name__, delay)
+                    log.info("embed retry scheduled", extra={
+                        "component": "gateway", "event": "retry_scheduled",
+                        "provider": provider.name, "attempt": attempt,
+                        "max_attempts": self.max_attempts,
+                        "error_kind": obs.error_kind_of(perr),
+                        "delay_s": round(delay, 3)})
                     time.sleep(delay)
                     continue
                 usage = embeddings[0].usage if embeddings else None
@@ -421,9 +449,11 @@ class ModelGateway:
                 self.last_embed_provider = provider.name
                 self.last_embed_latency_ms = latency_ms
                 self.last_error = None
-                log.info("%s embed ok model=%s attempts=%d latency=%.1fms inputs=%d",
-                         provider.name, embeddings[0].model, attempts_total,
-                         latency_ms, len(inputs))
+                log.info("embed ok", extra={
+                    "component": "gateway", "event": "embed_ok",
+                    "provider": provider.name, "model": embeddings[0].model,
+                    "attempt": attempts_total, "inputs": len(inputs),
+                    "latency_ms": round(latency_ms, 1), "status": "ok"})
                 return embeddings
             if deadline is not None and time.monotonic() >= deadline:
                 break
@@ -434,7 +464,12 @@ class ModelGateway:
 
     def _log_failure(self, provider, attempt: int, err: ProviderError,
                      latency_ms: float) -> None:
-        retryable = "retryable" if err.retryable else "fatal"
-        log.info("%s attempt %d/%d -> %s (%s) in %.1fms",
-                 provider.name, attempt, self.max_attempts,
-                 type(err).__name__, retryable, latency_ms)
+        # Day 24 §8 — the first structured-log citizen: the same facts as before,
+        # now on the fixed spine and bound to whatever trace is active.
+        log.info("provider attempt failed", extra={
+            "component": "gateway", "event": "provider_attempt_failed",
+            "provider": provider.name, "attempt": attempt,
+            "max_attempts": self.max_attempts,
+            "error_kind": obs.error_kind_of(err),
+            "retryable": bool(err.retryable),
+            "latency_ms": round(latency_ms, 1), "status": "error"})

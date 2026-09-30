@@ -568,6 +568,13 @@ class World:
         self.embed_hits: dict[str, int] = {"openai": 0, "anthropic": 0}
         self.served: dict[str, list[str]] = {"openai": [], "anthropic": []}
         self.embed_served: dict[str, list[str]] = {"openai": [], "anthropic": []}
+        # Day 24 — the last trace-context headers each provider *received*, so the
+        # propagation fixture can prove injection end-to-end (not just claim it).
+        self.captured: dict[str, dict[str, str]] = {"openai": {}, "anthropic": {}}
+
+    def capture(self, provider: str, headers: dict[str, str]) -> None:
+        with self.lock:
+            self.captured[provider] = dict(headers)
 
     def reset(self, provider: str, script: list[str], retry_after: float,
               hang_s: float | None = None, embed_script: list[str] | None = None) -> None:
@@ -583,6 +590,7 @@ class World:
             self.embed_hits = {"openai": 0, "anthropic": 0}
             self.served = {"openai": [], "anthropic": []}
             self.embed_served = {"openai": [], "anthropic": []}
+            self.captured = {"openai": {}, "anthropic": {}}
 
     def next(self, provider: str) -> str:
         with self.lock:
@@ -613,6 +621,7 @@ class World:
                 "embed_scripts": dict(self.embed_scripts),
                 "retry_after": self.retry_after,
                 "hang_s": self.hang_s,
+                "captured": {k: dict(v) for k, v in self.captured.items()},
             }
 
 
@@ -794,6 +803,11 @@ class Handler(BaseHTTPRequestHandler):
                         embed_script)
             self._raw(200, json.dumps({"ok": True}).encode(), "application/json")
             return
+
+        # Day 24 — remember the trace-context headers the client injected.
+        WORLD.capture(self.provider, {
+            k.lower(): v for k, v in self.headers.items()
+            if k.lower() in ("traceparent", "baggage")})
 
         is_embed = self.path.rstrip("/").endswith("/embeddings")
         if is_embed:

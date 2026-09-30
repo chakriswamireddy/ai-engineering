@@ -651,7 +651,8 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
     own_trace = tr is None or not getattr(tr, "recording", False)
     if own_trace:
         tr = obs.start_trace("agent", attributes={
-            "route": "agent", "request_sha256": obs.sha256_text(q),
+            "route": "agent", "component": "agent",
+            "request_sha256": obs.sha256_text(q),
             "request_chars": len(q)})
     else:
         tr.add_event("request", route="agent", request_sha256=obs.sha256_text(q),
@@ -728,7 +729,7 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
         # result, and model turn is linked to it. A `break` closes the span
         # cleanly, so a terminated loop still has a complete tree (O6).
         with tr.span(obs.KIND_STEP, f"agent.step.{step_no}",
-                     attributes={"step": step_no}) as sspan:
+                     attributes={"step": step_no}, component="agent") as sspan:
             completion = gateway.chat_with_tools(
                 transcript, tools=registry.schemas(),
                 prompt_ref=REASONING_PROMPT_REF, operation="chat_with_tools",

@@ -37,6 +37,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from ai_os import observability as obs
 from ai_os.data import (
     DIALECT_NOTE,
     GLOSSARY,
@@ -619,13 +620,36 @@ def _sql_tool(name: str, agent: DataAgent) -> Callable[[dict], ToolResult]:
 
 def _schema_tool(name: str) -> Callable[[dict], ToolResult]:
     def fn(args: dict[str, Any]) -> ToolResult:
-        entry = describe_table(args["table"])
-        if entry is None:
-            return ToolResult.failure(
-                name, f"unknown table {args['table']!r} (known: {table_names()})",
-                args=args, error_kind=ERROR_NO_DATA)
-        return ToolResult.success(name, args=args, data={
-            **entry, "dialect": DIALECT_NOTE, "definitions": GLOSSARY})
+        # Day 24 — the schema card is in-process, so this is an *internal* span,
+        # not a client one. The day names the chain's Saleor/Postgres hops; it
+        # does not license marking a dict lookup as a boundary we crossed.
+        tr = obs.current_trace()
+        span = None
+        if tr is not None and getattr(tr, "recording", False):
+            span = tr.start_span(obs.KIND_TOOL, "schema.describe",
+                                 span_kind=obs.SPAN_INTERNAL, component="data",
+                                 attributes={"operation": "describe_saleor_schema",
+                                             "table": args.get("table")})
+        try:
+            entry = describe_table(args["table"])
+            if entry is None:
+                if span is not None:
+                    span.update(found=False)
+                    obs.end_span(span, status=obs.STATUS_ERROR,
+                                 error={"kind": "no_data",
+                                        "message": f"unknown table {args['table']!r}"})
+                return ToolResult.failure(
+                    name, f"unknown table {args['table']!r} (known: {table_names()})",
+                    args=args, error_kind=ERROR_NO_DATA)
+            if span is not None:
+                span.update(found=True, columns=len(entry.get("columns") or {}))
+            return ToolResult.success(name, args=args, data={
+                **entry, "dialect": DIALECT_NOTE, "definitions": GLOSSARY})
+        finally:
+            if span is not None:
+                if not span.closed:
+                    obs.end_span(span)
+                tr.leave(span)
     return fn
 
 
