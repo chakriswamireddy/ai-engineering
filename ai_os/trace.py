@@ -317,6 +317,7 @@ def run_trace(gateway, store, question: str, *,
         "input_tokens": completion.usage.input_tokens,
         "output_tokens": completion.usage.output_tokens,
         "attempts": getattr(gateway, "last_attempts", None),
+        "fallback_depth": getattr(gateway, "last_fallback_depth", 0),
     }
     trace["verdict"] = classify_trace(trace)
     return trace

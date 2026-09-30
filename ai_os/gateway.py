@@ -80,6 +80,7 @@ class ModelGateway:
         self.last_provider: str | None = None
         self.last_latency_ms: float = 0.0
         self.last_attempts: int = 0
+        self.last_fallback_depth: int = 0
         self.last_error: ProviderError | None = None
         self.last_embeddings: list[Embedding] | None = None
         self.last_embed_provider: str | None = None
@@ -217,6 +218,7 @@ class ModelGateway:
                 self.last_provider = provider.name
                 self.last_latency_ms = latency_ms
                 self.last_attempts = attempts_total
+                self.last_fallback_depth = depth
                 self.last_error = None
                 log.info("chat ok", extra={
                     "component": "gateway", "event": "chat_ok",
@@ -359,6 +361,7 @@ class ModelGateway:
                                  latency_ms=latency_ms, ok=True)
                     self.last_provider = provider.name
                     self.last_latency_ms = latency_ms
+                    self.last_fallback_depth = depth
                     return
 
         raise last_err or ProviderError("gateway", "no providers configured")
