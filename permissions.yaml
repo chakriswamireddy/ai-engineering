@@ -1,11 +1,13 @@
 # Day 26 §3/§6 — who may call what, and what may come back.
+# Day 27 §2/§5 — what happens if it is wrong, and who has to sign for it.
 #
-# The grant file. The layer that decides (ai_os/permissions.py) reads it, and the
-# choke point that refuses (ai_os/tools.py's ToolRegistry) enforces it. Nothing
-# here is a heuristic the executor embeds: the `default` set is exactly today's
-# seven registered tools, the argument caps are pinned to measured legitimate
-# maxima, and the read-only claim is a *reviewable* fact — there is no `write`
-# effect anywhere in this file.
+# The grant file. The layer that decides (ai_os/permissions.py) reads it, the
+# choke point that refuses (ai_os/tools.py's ToolRegistry) enforces it, and — since
+# today — the approval desk (ai_os/approval.py) inherits the same file's answer to
+# "whose approval is required". Nothing here is a heuristic the executor embeds:
+# the `default` set is exactly today's seven registered tools, the argument caps
+# are pinned to measured legitimate maxima, and the read-only claim is a
+# *reviewable* fact — there is no `write` effect anywhere in this file.
 #
 #   * allow-lists, always: a tool has no authority until a grant names it, so a
 #     tool added tomorrow arrives DENIED until a human edits this file.
@@ -22,9 +24,34 @@
 #     the cap; `evidence` is the retrieval contract; `redact` names columns the
 #     result check drops (and records) before the value reaches the model.
 #
+# ── Day 27: reversibility, not effect, is the axis `confirm` keys on ──────────
+# Every grant declares a `reversibility` class, and the rule is
+# `irreversible ⇒ confirm: human` **whatever the effect** — because the risk
+# ordering and the effect ordering disagree in this very file:
+#
+#   get_customer            read  / pii  → reversible   (no external effect)
+#   export_customer_report  read  / pii  → IRREVERSIBLE (the rows leave the process)
+#   a write to our own log  write / internal → reversible (append a correcting record)
+#
+# An absent `reversibility` is a **load error**, so forgetting produces a boot error
+# rather than a silent disclosure (only a grant that already says `confirm: human`
+# may omit it, and then it receives the conservative class). A `reversible` or
+# `compensatable` grant must **name the action that undoes it** — `undo`, who
+# performs it, and within what time — because a declaration nobody cross-checks is a
+# comment. `confirm: human` is read as `required_approver_role`: a *role*, resolved
+# as a grant from `approver_roles` below, never an assertion that somebody said yes.
+#
+# Day 27 adds exactly one grant, and its authority is a **read**:
+# `export_customer_report` (harness_only — the shipped registry never registers it,
+# the fixtures do). It is declared with `harness_only: true` so the fixture-only
+# client can be reviewed here while remaining unassigned in this file, which means
+# the shipped system refuses it for every principal with `no_grant`. That is the
+# point of the day: the most consequential class of action in this repository is
+# already covered, and the system's maximum authority is still a read.
+#
 # The `email` decision is deliberately OPEN (PENDING, Day 4 owner: the team that
-# owns account_user): the strict default redacts it; denying the tool or granting
-# the column per principal are the other two mechanisms this file could express.
+# owns account_user), and Day 27 makes it *more* urgent rather than less: the export
+# client this day gates reads exactly the rows that decision is about.
 
 version: 1
 
@@ -32,21 +59,42 @@ version: 1
 # caller whose name appears in no entry — so an unknown caller is LESS privileged
 # than a known one, never more. Its union is still only the seven tools of
 # `build_default_registry`; tightening is a one-line, human, reviewable change.
+#
+# `support_lead` and `executor` hold **no tools at all**: they are the two roles the
+# approval workflow resolves, and an approver or an executor with tool authority
+# would be a second, unexamined authorization path attached to the first.
 principals:
-  default:   [search_saleor_docs, search_saleor_code, get_product, get_order,
-              get_customer, run_saleor_sql, describe_saleor_schema]
-  analyst:   [search_saleor_docs, search_saleor_code, run_saleor_sql,
-              describe_saleor_schema]
-  support:   [search_saleor_docs, search_saleor_code, get_order, get_product,
-              get_customer]
+  default:      [search_saleor_docs, search_saleor_code, get_product, get_order,
+                 get_customer, run_saleor_sql, describe_saleor_schema]
+  analyst:      [search_saleor_docs, search_saleor_code, run_saleor_sql,
+                 describe_saleor_schema]
+  support:      [search_saleor_docs, search_saleor_code, get_order, get_product,
+                 get_customer]
+  support_lead: []
+  executor:     []
+
+# Day 27 §4 — who may approve, and who may apply. `approver_role` on a grant names
+# one of these; `executor` is the principal that applies a staged effect, and it is
+# deliberately a different principal from the requester, so "who approved" and "who
+# ran it" are two answerable questions with two answers.
+approver_roles:
+  support_lead: [support_lead]
+  executor:     [executor]
 
 # Per-tool declarations. `effect: read` everywhere — the file's maximum authority
-# is a read, and a `write` may only be added with `confirm: human` (which no tool
-# in this repository implements yet; the C3 fixture proves the refusal).
+# is a read, and a `write` may only be added with `confirm: human` (which no tool in
+# this repository implements yet; the C3 fixture proves the refusal).
 tools:
+  # The shared compensation for an ordinary in-process read: no external effect
+  # occurred, so there is nothing in the world to put back. That claim is exactly
+  # what `export_customer_report` below cannot make — and the contrast is the day.
   search_saleor_docs:
     effect: read
     data: public
+    reversibility: reversible
+    compensation: &read_none
+      undo: "none — an in-process read leaves the prior world unchanged"
+      performer: none
     args:
       query: {maxLength: 512}                 # measured: longest legitimate doc query
       k: {minimum: 1, maximum: 10}
@@ -56,6 +104,8 @@ tools:
   search_saleor_code:
     effect: read
     data: public
+    reversibility: reversible
+    compensation: *read_none
     args:
       query: {maxLength: 512}
       kind: {enum: [function, class, mutation, test, module]}
@@ -66,6 +116,8 @@ tools:
   run_saleor_sql:
     effect: read
     data: internal
+    reversibility: reversible
+    compensation: *read_none
     args:
       sql: {maxLength: 8000, semantic: true}  # a *query*: SafeSql owns it, plus a byte cap
     result: {columns: "*", max_rows: 100}     # the store's page is the cap
@@ -73,6 +125,8 @@ tools:
   describe_saleor_schema:
     effect: read
     data: internal
+    reversibility: reversible
+    compensation: *read_none
     args:
       table: {enum: [order_order, order_orderline, product_product,
                      product_productvariant,
@@ -83,6 +137,8 @@ tools:
   get_product:
     effect: read
     data: public
+    reversibility: reversible
+    compensation: *read_none
     args:
       id: {pattern: "^[A-Za-z0-9_-]{1,64}$"}
     result: {columns: [id, name, slug, product_type, currency, price, variants],
@@ -91,6 +147,8 @@ tools:
   get_order:
     effect: read
     data: internal
+    reversibility: reversible
+    compensation: *read_none
     args:
       id: {pattern: "^[A-Za-z0-9_-]{1,64}$"}
     result: {columns: [id, number, status, currency, total, lines], max_rows: 1}
@@ -98,7 +156,28 @@ tools:
   get_customer:
     effect: read
     data: pii                                # PII without being a secret: the deny
-    args:                                    # list has no vocabulary for it, so the
-      id: {pattern: "^[A-Za-z0-9_-]{1,64}$"} # result contract does
+    reversibility: reversible                # list has no vocabulary for it, so the
+    compensation: *read_none                 # result contract does
+    args:
+      id: {pattern: "^[A-Za-z0-9_-]{1,64}$"}
     result: {columns: [id, email, orders, currency], max_rows: 1,
              redact: [email]}                # the value leaves; the shape stays
+
+  # Day 27 §5 — the harness-only client, and the day's real point: `effect: read`,
+  # `reversibility: irreversible`. A bulk export of the rows `get_customer` may
+  # return one of is a *read* whose result **leaves the process** — disclosure is
+  # its purpose — so nothing this system does afterwards restores the prior world,
+  # and a gate keyed on `effect` would have waved it through. It is not in
+  # `build_default_registry`, and no principal above is assigned it: the fixtures
+  # grant it from their own PermissionSet to prove the gate, and the shipped system
+  # refuses it with `no_grant`.
+  export_customer_report:
+    effect: read
+    data: pii
+    reversibility: irreversible              # the rows left; disclosure has no undo
+    confirm: human                           # so the layer opens a request the model cannot
+    approver_role: support_lead              # a grant, not an assertion that a human said yes
+    harness_only: true                       # fixtures register it; the product never does
+    args: {customer_ids: {maxLength: 2048, pattern: "^[A-Za-z0-9_,-]{1,2048}$"}}
+    result: {columns: [id, email, orders, currency], max_rows: 500,
+             egress: external}               # where the result goes is part of the contract
