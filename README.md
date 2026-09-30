@@ -149,6 +149,23 @@ A reusable AI layer built in layers:
     allow-list), and the genuinely-crossing **`ai_os/worker.py`** second process.
     The control is **D9**: propagation/logging/metrics on ≡ off, and a collector
     that raises changes nothing. All `MECH`, **0 chats / 0 embeds / 0 extra SQL**.
+20. **Day 25 — Prompt Injection**: *attack the system*. The finding is not "prompts
+    can be jailbroken" but that **a model is a confused deputy** — so the defense
+    lives where the model cannot edit it. Four layers, **L1 load-bearing**: **L0
+    structure** (`context.py` emits kept chunks as delimited, source-tagged,
+    byte-capped evidence blocks instead of a bare `"\n\n".join`), **L1 authority**
+    (the existing `policy.yaml`/`SafeSql`, `validate_args`, closed `StateStore` write
+    path, and read-only role — now with `maxLength`/`pattern` argument bounds),
+    **L2 detection** (`ai_os/injection.py`'s bounded, offline `scan()` — reports,
+    never decides), **L3 refusal and report** (an injection implying a privileged
+    action normalizes into `ToolResult(refused=True, rejection_class="policy")` and
+    the loop stops), and **L4 evidence hygiene** (`cited ⊆ retrieved` /
+    `conclusion ⊆ evidence` hold under attack). **Control bits are read out of band**
+    from the executor's objects, so a forged `repairable` downgrade is inert by data
+    flow. **Label, don't launder**: an injected sentence inside a cited document stays
+    cited and bounded. The court **hashes the evidence** (a moved row is
+    `unresolvable`, never `passed`). The control is **I9**: firewall on ≡ off on
+    legitimate traffic, **0 chats / 0 embeds / 0 extra SQL**.
 
 ```
 Application
@@ -228,6 +245,9 @@ raw HTTP via `urllib`.
 | `tools/trace_smoke.py` | day 23: **O1–O9** offline suite (one request's causal tree, model lineage, money, failure closure, prompt provenance, redaction/retention, stream pass-through, the O9 control) |
 | `tools/distributed_smoke.py` | day 24: **D1–D9** offline suite (the wire format · continuation · injection · assembly · gaps · structured logs · metrics · cross-boundary money/latency · the D9 control); two real processes, one trace id |
 | `test_day24.py` | day 24: deterministic unit suite under the D-fixtures (traceparent grammar, baggage bounds, assembler idempotency, collector fail-open, metric labels, log spine + redaction) |
+| `ai_os/injection.py` | day 25: the L2 detection layer — `TaintSource`, `InjectionSignal`, `TaintedSpan`, the bounded offline `scan(text, source, path)`, `implies_privileged_action()`, and the scan/signal caps |
+| `tools/injection_corpus.py` | day 25: the attack corpus **as data** (22 rows over 10 families + a pinned 14-row legitimate set) with per-row expected signals, enforcement outcome, and forbidden effect; `corpus_hash()` |
+| `tools/injection_smoke.py` | day 25: **I1–I9** offline suite (the corpus through the real seams with a *complying* and a *realistic* hostile stub; the I9 control) |
 
 ## Run it for real
 
@@ -305,7 +325,8 @@ python tools/bench_agent.py --stub      # day 22 §9 A-report (the stub world; 2
 python tools/trace_smoke.py             # day 23 O1–O9 (one request's causal tree + the O9 control), 0 chats
 python tools/distributed_smoke.py       # day 24 D1–D9 (wire format · continuation · injection · assembly · gaps · logs · metrics · money/latency · the D9 control); two processes, one trace id, 0 chats
 python test_day24.py                    # day 24 unit suite (traceparent grammar · baggage · assembler · collector · metrics · log spine)
-python tools/regress_all.py             # day 20/21 Rule-2 gate: doc nine + code six + every day suite (7–24, the D-fixtures included) + the golden rows, exactly as green
+python tools/injection_smoke.py         # day 25 I1–I9 (the attack corpus through the real seams: enforcing on every row, 0 chats/0 embeds/0 SQL; the I9 control)
+python tools/regress_all.py             # day 20/21 Rule-2 gate: doc nine + code six + every day suite (7–25, the D- and I-fixtures included) + the golden rows, exactly as green
 ```
 
 The stub serves both providers on `:8700` (OpenAI) and `:8701` (Anthropic)

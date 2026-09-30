@@ -1,4 +1,4 @@
-# Progress — ai-layer (Days 2–24)
+# Progress — ai-layer (Days 2–25)
 
 > Live status of what is implemented, verified, and still open in this repo.
 > Kept up to date as days are worked; the canonical per-day detail lives in
@@ -42,6 +42,7 @@ Updated: 2026-09-29
 | 22 | Agent Evaluation | PARTIAL (all MECH green offline; **AB1–AB9** with the six trace columns printed (task success · TSR@1 · args · steps · cost · latency) + the two newly defined (unnecessary calls via the pre-registered `necessary_calls` envelope, U1/U2/U3 + the owned `undecided`; failure recovery = progress-after-failure with the `fabricated` gate + `gave_up` the honest zero), the **AB9 control** (bench off ≡ production), the `--baseline` pin, and Days 7–21 re-run unchanged — the gate is now 18 rows; the real-model column is the day's real-key handoff) | `ai_os/agent_bench.py` (new), `tools/bench_agent.py` (new), `ai_os/golden.yaml` (`necessary_calls`/`expected_steps`/`expected_termination`), `ai_os/eval_dataset.py` (the envelope's parse/validate/hash), `data/agent-baseline.json` (new), `tools/regress_all.py` (the AB1–AB9 row), `docs/concepts/agent-benchmark.md`, `docs/evaluations/bench-day22.md` |
 | 23 | AI Observability | PARTIAL (all MECH green offline; **O1–O9** + the **O9 control** — tracing off ≡ on except the additive id; one root request → a nested, clocked, ledger-reconciled span tree; gateway attempt lineage (retry → sibling attempts, fallback names each provider); RAG `request → embed → retrieval → documents → chat → answer`; agent `step → tool-call → validation → result` with parallel/deferred semantics; explicit prompt refs (name · version · exact-content hash); money read from linked ledger rows with `price_status=unknown` flagged; typed error closure; bounded oldest-first lookup with secret redaction; Day 23's rows added to the gate (**19 rows**); **`PENDING`: operational-usefulness/attribute balance (design judgment), raw-payload fidelity, and durable storage/export + cross-process propagation (Day 24)**) | `ai_os/observability.py` (new), `ai_os/gateway.py` (attempt spans), `ai_os/ledger.py` (trace/span/prompt provenance + `price_status`), `ai_os/rag.py` (request/retrieval/document/generation/answer + `RAG_PROMPT_REF`), `ai_os/agent.py` (steps/tools/final + reasoning/termination prompt refs), `ai_os/server.py` (`trace_id` + `GET /traces/{id}`), `tools/trace_smoke.py` (new; O1–O9 + O8b stream), `tools/regress_all.py` (the O row), `docs/concepts/observability.md`, `docs/evaluations/trace-day23.md` |
 | 24 | Distributed AI Observability | PARTIAL (all MECH green offline; **D1–D9** + the **D9 control** — one identity that survives the wire: W3C trace-context `extract`/`inject` with a validated continuation (or a fresh root with a **recorded reason**), the second axis `span_kind` (`server`/`client`/`internal`) with `remote` + `remote_endpoint`, span ids made wire-shaped (32/16 hex, **globally unique across processes continuing one trace**), the idempotent **order-free loss-aware** `TraceAssembler` (duplicates counted, late recorded, `missing` materialized from a **declared topology**; `complete`/`gap_count`/`components_seen`; end-to-end = the root/critical path, **never Σ hops**), the bounded **fail-open** `Collector` (+ a loopback-only `/ingest/span`, **off**), **structured logs** (fixed JSON spine, ids from the same context var, **pre-serialization redaction**, bounded ring, `GET /logs`), **bounded metrics** (counters + fixed-bucket histograms incremented at **span close**, a label **allow-list**, `GET /metrics`), the genuinely-crossing **`ai_os/worker.py`** (extract → continue with a remote parent → do one job → report back), and `GET /traces/{id}` serving assembled and local traces through one schema; **Days 7–23 re-run unchanged** (the gate is now **20 rows, 0 moved**), and O9/D9 keep tracing **passive and fail-open**; **`PENDING`: a production collector / log shipping / metrics backend / scrape alerting, real sampling + retention policy, the internals of Postgres / Saleor / the providers, client-side spans, and ingest authentication (Day 26)**) | `ai_os/observability.py` (**`TraceContext`**/`SpanReport`/`Topology`/`TraceAssembler`/`Collector` + span/trace hooks, `schema_version` → 2), `ai_os/structured_logging.py` (new), `ai_os/metrics.py` (new), `ai_os/worker.py` (new), `ai_os/server.py` (inbound continue-or-mint + `/metrics` `/logs` `/ingest/span`), `ai_os/gateway.py` (client attempts + inject + structured logger), `ai_os/data.py` (`client` postgres spans), `ai_os/rag.py` (internal store span + `retrieve_remote` seam), `ai_os/tools.py` (schema internal span), `ai_os/providers/{openai,anthropic,cloudflare}.py` (outbound header injection), `tools/mock_gateway.py` (header capture), `tools/distributed_smoke.py` (new; D1–D9), `test_day24.py` (new), `tools/regress_all.py` (the D row), `docs/concepts/distributed-tracing.md`, `docs/evaluations/trace-day24.md` |
+| 25 | Prompt Injection | PARTIAL (all MECH green offline; **I1–I9** + the **I9 control** — the attack corpus run through the real seams with a *complying* and a *realistic* hostile stub: the four-layer ladder with **L1 load-bearing**, the provenance/delimited/byte-capped evidence framing (`context.py`), the single new reasoning-prompt rule (bumped version), `maxLength`/`pattern` in `validate_args`, the bounded offline `scan()` (`ai_os/injection.py`, 7 signal classes, 7 taint sources, `implies_privileged_action()`), the **out-of-band control read** (a forged `repairable` downgrade is inert, zero retries), the policy-class refusal routing, taint propagation into the distiller, **evidence hashing** (`unresolvable`, never `passed`), the `/attacks` ring, and a **0 privileged false-positive** count on the pinned 14-row legitimate set; the firewall is **0 chats / 0 embeds / 0 SQL**, on ≡ off on legitimate traffic, and Days 7–24 re-run unchanged — **21 rows, 0 moved**; **`PENDING`: a novel paraphrase, an adaptive/red-team attacker, multi-turn escalation, permission boundaries (Day 26), human approval (Day 27), and isolation/secrets (Day 29)**) | `ai_os/injection.py` (new), `ai_os/context.py` (evidence framing + per-block cap), `ai_os/agent.py` (the rule + refusal routing + taint, prompt version bump), `ai_os/tools.py` (`maxLength`/`pattern`), `ai_os/trace.py` (`taint`/`signals`/`injection_blocked`), `ai_os/eval_dataset.py` (evidence pre-registration), `ai_os/judge.py` (lane off by default), `ai_os/server.py` (`GET /attacks`), `tools/mock_gateway.py` (`HostileStub` + the D25 payloads), `tools/injection_corpus.py` (new), `tools/injection_smoke.py` (new; I1–I9), `tools/regress_all.py` (the I row), `docs/concepts/prompt-injection.md`, `docs/evaluations/injection-day25.md` |
 
 ---
 
@@ -1300,6 +1301,66 @@ metric that needed the golden set to exist first. Concept + evaluation:
   rate-limiting on the ingest route (**Day 26**).
 - Re-verify with `python tools/distributed_smoke.py` and `python test_day24.py`.
 
+## Day 25 — Prompt Injection `PARTIAL`
+
+- **The finding:** the model is a *confused deputy* — it reads untrusted text and then
+  acts with authority the text did not have — so the boundary has to live somewhere
+  the model cannot edit. The day's rule: **a defense that lives in the prompt is a
+  preference, not a boundary.**
+- **The four-layer ladder (L1 load-bearing):** **L0 structure** — `context.py` emits
+  kept chunks as delimited, source-tagged (`doc_id`/chunk id/rank/score),
+  byte-capped evidence blocks instead of a bare `"\n\n".join`, so untrusted text
+  enters only in **data positions**. **L1 authority** — the existing non-model,
+  fail-closed boundaries (`policy.yaml`+`SafeSql`, `validate_args` now with
+  `maxLength`/`pattern`, the closed `StateStore` write path, the `saleor_read_only`
+  role, the ledger/turn/timeout walls). **L2 detection** — `ai_os/injection.py`'s
+  bounded, offline `scan(text, source, path)`: 7 signal classes, 7 taint sources,
+  `implies_privileged_action()`; it **reports and never decides**. **L3 refusal and
+  report** — an injection that reaches a privileged action is normalized into
+  `ToolResult(refused=True, rejection_class="policy")`, the loop stops, and the
+  attempt is a record. **L4 evidence hygiene** — `cited ⊆ retrieved` /
+  `conclusion ⊆ evidence` hold under attack.
+- **Out-of-band control read:** `refused`, `rejection_class`, `error_kind`, and the
+  step budget come from the executor's objects, never from model-visible strings, so
+  a forged `repairable` downgrade has no branch to open (I6: zero retries).
+- **Label, don't launder:** an injected sentence inside a cited document stays cited
+  and bounded (I3) — deleting it would break `cited ⊆ retrieved` and corrupt Days
+  21–22's groundedness verdicts.
+- **Attacking the measurement:** the evaluation court now **hashes the evidence**
+  (store version + per-document content hashes); a golden row whose evidence changed
+  is `unresolvable` — never `passed`, never `wrong` (I8). The judge lane stays off by
+  default.
+- **The corpus:** `tools/injection_corpus.py` — 22 rows over 10 families, each with
+  expected signal classes, enforcement outcome, and the **specific forbidden effect**
+  it tries to cause, plus a pinned 14-row legitimate set for the false-positive
+  measurement. `tools/injection_smoke.py` runs it through the real seams in stub mode
+  with a **complying** and a **realistic** hostile model (the complying stub is what
+  makes the fixtures non-vacuous).
+- **ALL DAY 25 (I1–I9) CHECKS PASSED** (`tools/injection_smoke.py`): I1 direct
+  override (+ obfuscation) · I2 privilege/disclosure (refused `policy`, one step,
+  0 chats, `system_prompt ⊄ answer`) · I3 indirect in a document (cited, labeled,
+  not executed, not deleted) · I4 indirect in a record field (field path, not
+  payload) · I5 tool manipulation (invented tool → `tool_error`; `maxLength=512`;
+  Day 13 `no_progress`) · I6 forged control state (inert by data flow) · I7 state/
+  memory poisoning (`recalled ⊆ authored`; a tainted episode cannot mint) · I8
+  benchmark/judge poisoning (`unresolvable`) · **I9 control** (on ≡ off,
+  0 chats/embeds/SQL, a raising scanner changes nothing, **0 privileged false
+  positives** on the 14 legitimate rows).
+- **The control and the cost:** on a legitimate request, firewall on ≡ off —
+  byte-identical answers, tools, SQL, tokens, cost. The layer is **0 chats, 0 embeds,
+  0 extra SQL**; the only measured overhead is CPU (scan cap × bytes) and bounded,
+  hashed trace bytes.
+- **Gate:** Day 25's I1–I9 row joins `tools/regress_all.py` (**21 rows, 0 moved**).
+  Days 7–24 re-run unchanged with the firewall installed.
+- **`PENDING` (named, not declared solved):** a novel paraphrase that fools the model
+  (a probabilistic question the corpus cannot answer — an injection past L2 changes
+  what the model *says*, only L1 decides what it can *do*); an adaptive attacker who
+  has read the document and multi-turn gradual escalation; a full red team / fuzzer;
+  permission boundaries (**Day 26**); human approval (**Day 27**); network isolation,
+  egress policy, and secret management (**Day 29**). **"Prompt injection is
+  mitigated" is never a line this rollup is allowed to claim.**
+- Re-verify with `python tools/injection_smoke.py`.
+
 ## Known gaps (what blocks "everything green for real")
 
 1. **Git:** Days 2–17 are committed (HEAD `e1c796f`, the Day-17 rollup); **Days 18–21**
@@ -1600,6 +1661,28 @@ metric that needed the golden set to exist first. Concept + evaluation:
     (g) the **topology is hand-written** and can drift from reality. Re-verify with
     `python tools/distributed_smoke.py`.
 
+21. **Day 25 semantics** — the MECH half is green (`tools/injection_smoke.py`;
+    I1–I9 over the 22-row/10-family attack corpus, with the **I9 control** — firewall
+    on ≡ off on legitimate traffic, 0 chats / 0 embeds / 0 SQL — and a **0 privileged
+    false-positive** count on the pinned 14-row legitimate set). The framing
+    (`context.py` delimited, source-tagged, byte-capped evidence blocks), the single
+    new reasoning-prompt rule (bumped version), `maxLength`/`pattern` in
+    `validate_args`, the bounded offline `scan()` (`ai_os/injection.py`), the
+    out-of-band control read (a forged `repairable` downgrade is inert), the
+    policy-class refusal routing, taint propagation into the distiller, evidence
+    hashing (`unresolvable`, never `passed`), and the `/attacks` ring are all
+    deterministic, and Days 7–24 re-run unchanged with the firewall installed
+    (`tools/regress_all.py` is now **21 rows, 0 moved**). Still `PENDING`: (a) **a
+    novel paraphrase that fools the model** is a probabilistic question the corpus
+    cannot answer — an injection past L2 changes what the model *says*, only L1
+    decides what it can *do*; (b) **an adaptive attacker who has read the document,
+    multi-turn gradual escalation, and attacks on the components' own code** are out
+    of scope; (c) **a full red team / fuzzer / paid human attacker** is not today;
+    (d) **permission boundaries** are Day 26, **human approval** is Day 27, and
+    **network isolation / egress policy / secret management** are Day 29; and
+    **"prompt injection is mitigated" is never a line this rollup is allowed to
+    claim.** Re-verify with `python tools/injection_smoke.py`.
+
 ## How to re-verify, in one line
 
 ```bash
@@ -1629,6 +1712,7 @@ python tools/bench_agent.py --real       # day 22 real-model agent benchmark (th
 python tools/trace_smoke.py              # day 23 O1–O9 (one request's causal tree + the O9 control), 0 chats
 python tools/distributed_smoke.py        # day 24 D1–D9 (the wire format · continuation · injection · assembly · gaps · logs · metrics · money/latency · the D9 control); two processes, one trace id, 0 chats
 python test_day24.py                     # day 24 unit: traceparent grammar · baggage bounds · assembler idempotency · collector fail-open · metric labels · log spine/redaction
+python tools/injection_smoke.py          # day 25 I1–I9 (the attack corpus through the real seams: enforcement on every row · taint/signals · the I9 control), 0 chats / 0 embeds / 0 SQL
 LLM_PROVIDERS=cloudflare: python tools/build_code_store.py --corpus corpus_code/saleor --out data/code_store.json --batch 100  # real build (resume; see gap 6)
 python tools/retrieval_day10.py --store data/code_store.json --doc-store data/store.json  # real corpora
 ```
@@ -1669,6 +1753,7 @@ python tools/bench_agent.py --real       # day 22 real-model agent benchmark (th
 python tools/trace_smoke.py              # day 23 O1–O9 (one request's causal tree + the O9 control), 0 chats
 python tools/distributed_smoke.py        # day 24 D1–D9 (the wire format · continuation · injection · assembly · gaps · logs · metrics · money/latency · the D9 control); two processes, one trace id, 0 chats
 python test_day24.py                     # day 24 unit: traceparent grammar · baggage bounds · assembler idempotency · collector fail-open · metric labels · log spine/redaction
+python tools/injection_smoke.py          # day 25 I1–I9 (the attack corpus through the real seams: enforcement on every row · taint/signals · the I9 control), 0 chats / 0 embeds / 0 SQL
 python tools/regress_all.py              # day 20/21 Rule-2 gate: doc nine + code six + every day suite (7–21, bench included) + the golden rows, exactly as green
 python tools/regress_all.py --fast       # day 20 gate: fixtures + golden rows only
 LLM_PROVIDERS=cloudflare: python tools/build_code_store.py --corpus corpus_code/saleor --out data/code_store.json --batch 100  # real build (resume; see gap 6)
