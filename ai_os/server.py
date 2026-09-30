@@ -324,6 +324,91 @@ def audit_verify_endpoint() -> dict[str, Any]:
     return audit_mod.default_audit_log().verify()
 
 
+# ==================================================== Day 27 §8 — the approvals
+# Three facts a reader six months from now needs, recorded **at the registration
+# site** rather than in a changelog:
+#
+#   1. this repository has no authentication, no session, no agent route and no
+#      `principal` header — `principal` is a caller-supplied string. Day 26 called
+#      that *authorization without authentication*; today the same string could be
+#      the person who signs off on an irreversible action.
+#   2. **there is deliberately no decision route.** `POST /approvals/{id}/decide`
+#      does not exist and must not be added here: it would place the single most
+#      valuable call in the system behind the least protected surface in the
+#      system. The decision surface is `tools/approvals.py` — a shell command whose
+#      operator already has the repository, and whose ordinary shell history, git
+#      author and filesystem ACL make today's approvals attributable *by accident*.
+#      That accident is a real property and it is worth more than a convenient API.
+#   3. the owner of the authenticated surface is **Day 29**, and when it adds the
+#      route it will have to re-earn the attribute this absence provides for free.
+#
+# `?reveal=1` discloses argument **values** on a surface with no identity. It is
+# documented as an argument for Day 29's authentication work, not as a feature: the
+# default is masked exactly as Day 26's metadata-safe rule requires.
+
+def _approval_desk():
+    """The read-only desk, or `None` when approvals are switched off."""
+    from ai_os import approval as approval_mod
+    if not approval_mod.enabled():
+        return None
+    return approval_mod.ApprovalStore(approval_mod.state_store_for_approvals())
+
+
+@app.get("/approvals")
+def approvals_endpoint(state: str | None = None, tool: str | None = None,
+                       principal: str | None = None, reveal: int = 0
+                       ) -> dict[str, Any]:
+    """Day 27 §8 — the queue, read-only: `{count, records}` with values masked.
+
+    Nothing here needs a signature to read: the record's tool, state, digest,
+    reversibility, signal *keys*, expiry and the parties involved are the facts an
+    operator greps at 3 a.m. — and every argument value is replaced by its shape
+    unless `?reveal=1` is passed.
+    """
+    from ai_os import approval as approval_mod
+    desk = _approval_desk()
+    if desk is None:
+        return {"count": 0, "records": [],
+                "note": "APPROVALS=none — the gate is off, so no request was opened"}
+    rows = desk.all_records()
+    if state is not None:
+        rows = [r for r in rows if r.state == state]
+    if tool is not None:
+        rows = [r for r in rows if r.tool == tool]
+    if principal is not None:
+        rows = [r for r in rows
+                if principal in (r.requested_by, r.decided_by, r.applied_by)]
+    return {"count": len(rows),
+            "state": state, "tool": tool, "principal": principal,
+            "reveal": bool(reveal),
+            "records": [approval_mod.approval_view(r, reveal=bool(reveal))
+                        for r in rows],
+            "note": ("values masked by default; ?reveal=1 is unauthenticated and is "
+                     "therefore the strongest argument for Day 29's authentication "
+                     "work rather than a feature")}
+
+
+@app.get("/approvals/{request_id}")
+def approval_endpoint(request_id: str, reveal: int = 0):
+    """Day 27 §8 — one record, read-only, 404 on an unknown id.
+
+    The full canonical rendering is deliberately *not* served here: this route
+    returns the record (values masked unless `reveal=1`), and the human-readable
+    rendering with the digest on its first line belongs to the CLI, where the reader
+    is the approver rather than an unauthenticated canvas of arbitrary callers.
+    """
+    from ai_os import approval as approval_mod
+    desk = _approval_desk()
+    if desk is None:
+        return JSONResponse({"error": "APPROVALS=none — no desk to read"},
+                            status_code=404)
+    rec = desk.get(request_id)
+    if rec is None:
+        return JSONResponse({"error": f"unknown approval {request_id}"},
+                            status_code=404)
+    return approval_mod.approval_view(rec, reveal=bool(reveal))
+
+
 def _ingest_enabled() -> bool:
     return os.getenv("TRACE_INGEST", "0").strip().lower() in {
         "1", "true", "yes", "on"}
