@@ -59,7 +59,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 import yaml
 
@@ -480,6 +480,77 @@ def hash_rows(rows: list[dict[str, Any]]) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+# ================================================ Day 25 §7 — the evidence hash
+# Day 20 pre-registers *rows* and hashes them. But the rows resolve against a
+# **corpus**, and the corpus was never hashed — so an attacker who adds one
+# well-written document can capture a golden row's evidence, `expected ⊆ retrieved`
+# still holds, and the benchmark reports a *pass* for a poisoned answer. The fix is
+# unglamorous: hash the evidence a row resolves against (store version + per-document
+# content hashes) alongside the row, and report a row whose resolved evidence hash
+# changed as **`unresolvable`** — not `passed`, not `wrong`, because neither verdict
+# is a claim the system can support.
+
+EVAL_UNRESOLVABLE = "unresolvable"
+
+
+def hash_evidence(evidence_texts: Mapping[str, str]) -> str:
+    """sha256 over an `id -> text` evidence map (sorted, so order is not a fact)."""
+    blob = json.dumps({str(k): str(v) for k, v in evidence_texts.items()},
+                      sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def row_evidence_hash(row: dict[str, Any],
+                      corpus_text: Mapping[str, str]) -> str:
+    """The evidence hash a row resolves to *right now*, over its expected ids.
+
+    Only the row's `expected_evidence` is hashed — the set the row's claims are
+    oracle-derivable from — so an unrelated corpus edit does not move the hash while
+    a substitution *of a row's own evidence* does.
+    """
+    want = [str(e) for e in (row.get("expected_evidence") or [])]
+    return hash_evidence({e: str(corpus_text.get(e, "")) for e in want})
+
+
+def preregister_evidence(rows: list[dict[str, Any]],
+                         corpus_text: Mapping[str, str], *,
+                         version: Any = None) -> dict[str, Any]:
+    """Record the evidence a row set resolves against, with the pre-registration.
+
+    Returns `{version, per_row, combined}` — the store version, one content hash per
+    row's evidence, and a combined hash — to be written beside the dataset hash. The
+    ROW hash is Day 20's; this is the corpus half Day 22 named and handed here.
+    """
+    per_row = {str(r["id"]): row_evidence_hash(r, corpus_text) for r in rows}
+    combined = hashlib.sha256(json.dumps(
+        {"version": version, "per_row": per_row},
+        sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    return {"version": version, "per_row": per_row, "combined": combined}
+
+
+def evidence_changed(rows: list[dict[str, Any]], corpus_text: Mapping[str, str],
+                     pinned: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Which rows' resolved evidence hash moved away from its pinned value.
+
+    `checked` is `False` when there is nothing pinned (a dataset that predates
+    Day 25), so the caller reports `unresolvable` only where a comparison was
+    actually made — a verdict where the pre-registration was silent is not a verdict.
+    """
+    pinned_map = dict((pinned or {}).get("per_row") or {})
+    if not pinned_map:
+        return {"checked": False, "changed": [], "unresolvable": []}
+    changed: list[str] = []
+    for r in rows:
+        rid = str(r["id"])
+        want = pinned_map.get(rid)
+        if want is None:
+            continue
+        if row_evidence_hash(r, corpus_text) != want:
+            changed.append(rid)
+    return {"checked": True, "changed": sorted(changed),
+            "unresolvable": sorted(changed)}
+
+
 # ------------------------------------------------------------------- loading
 
 def load_golden(path: str | Path = GOLDEN_PATH, *, verify_hash: bool = True,
@@ -519,6 +590,12 @@ def load_golden(path: str | Path = GOLDEN_PATH, *, verify_hash: bool = True,
         "pinned_hash": pinned,
         "rows": rows,
         "by_id": {r["id"]: r for r in rows},
+        # Day 25 — the *evidence* pre-registration (top-level, so it never touches
+        # the row hash). Absent on a Day-20/21 dataset; when present with a
+        # `corpus_text`, the resolved evidence is compared and a moved row is
+        # reported `unresolvable` rather than graded.
+        "evidence_preregistration": raw.get("evidence_hash"),
+        "evidence_version": raw.get("evidence_version"),
     }
 
 

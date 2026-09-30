@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -202,6 +203,22 @@ class ToolResult:
                 ) -> "ToolResult":
         return cls(name=name, ok=True, args=args, refused=True, error=reason)
 
+    @classmethod
+    def rejected(cls, name: str, *, reason: str, args: dict | None = None,
+                 error_kind: str = "policy_violation",
+                 rejection_class: str = "policy") -> "ToolResult":
+        """Day 25 §7 — a *policy-class* refusal, normalized into the existing shape.
+
+        The injection firewall's privileged-action refusal becomes exactly the
+        `ToolResult` Day 15 already produces for a forbidden request, so Day 12's
+        STOP rule, Day 13's guard ring, the `policy_violations` counter, and the
+        trace handle it with code that already exists — **no parallel mechanism**.
+        `refused=True` marks it a refusal; `rejection_class="policy"` is the STOP.
+        """
+        return cls(name=name, ok=False, args=args, refused=True, error=reason,
+                   error_kind=error_kind, rejection_class=rejection_class,
+                   retryable=False)
+
     @property
     def doc_ids(self) -> list[str]:
         return [str(r.get("doc_id")) for r in self.evidence if r.get("doc_id")]
@@ -298,6 +315,31 @@ def validate_args(schema: dict[str, Any], args_raw: Any) -> tuple[bool, Any]:
         enum = spec.get("enum")
         if enum is not None and value not in enum:
             return False, f"argument {key!r} must be one of {enum}, got {value!r}"
+        # Day 25 §6 — the argument *shape* restrictions, enforced (not advisory).
+        # A free-text argument is a channel: whatever the model puts there leaves the
+        # system through a provider call, a log, a trace, or a search index. An
+        # energetic `maxLength` + `pattern` turns "smuggle 4 KB out through a query"
+        # into a *validation failure* the loop already knows how to route — and the
+        # message names the field and the bound, because the loop self-corrects
+        # against exactly this message. The value is never coerced or truncated.
+        if isinstance(value, str):
+            max_len = spec.get("maxLength")
+            if max_len is not None and len(value) > max_len:
+                return False, (f"argument {key!r} exceeds maxLength={max_len} "
+                               f"(got {len(value)} chars)")
+            min_len = spec.get("minLength")
+            if min_len is not None and len(value) < min_len:
+                return False, (f"argument {key!r} must be at least minLength="
+                               f"{min_len} (got {len(value)} chars)")
+            pattern = spec.get("pattern")
+            if pattern is not None:
+                try:
+                    matched = re.fullmatch(pattern, value) is not None
+                except re.error:
+                    return False, (f"argument {key!r}: schema pattern {pattern!r} "
+                                   "is not a valid regular expression")
+                if not matched:
+                    return False, (f"argument {key!r} must match pattern {pattern!r}")
         if isinstance(value, int) and not isinstance(value, bool):
             if spec.get("minimum") is not None and value < spec["minimum"]:
                 return False, (f"argument {key!r} must be >= {spec['minimum']}, "
@@ -473,6 +515,19 @@ def _retrieval_result(name: str, retriever: Retriever | None, args: dict[str, An
 
 # -------------------------------------------------------------------- schemas
 
+# Day 25 §6 — the caps the validator enforces. Free-text gets an explicit
+# `maxLength`; identifier-shaped fields get a `pattern`. They are wide enough that
+# every legitimate demo question and query passes (measured on the pinned
+# legitimate set), and narrow enough that an injected 4 KB payload is a rejection.
+DEFAULT_MAX_QUERY = 512
+DEFAULT_MAX_SQL = 4096
+DEFAULT_MAX_ID = 64
+DEFAULT_MAX_MODULE = 200
+_ID_PATTERN = r"[A-Za-z0-9_.:-]+"
+_MODULE_PATTERN = r"[A-Za-z0-9_./-]+"
+_TABLE_PATTERN = r"[A-Za-z_][A-Za-z0-9_]*"
+
+
 def search_docs_schema() -> dict[str, Any]:
     return {
         "name": "search_saleor_docs",
@@ -486,7 +541,8 @@ def search_docs_schema() -> dict[str, Any]:
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string"},
+                "query": {"type": "string", "minLength": 1,
+                          "maxLength": DEFAULT_MAX_QUERY},
                 "k": {"type": "integer", "minimum": 1, "maximum": 10, "default": 4},
                 "max_chars": {"type": "integer", "minimum": 1},
             },
@@ -509,10 +565,12 @@ def search_code_schema() -> dict[str, Any]:
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string"},
+                "query": {"type": "string", "minLength": 1,
+                          "maxLength": DEFAULT_MAX_QUERY},
                 "kind": {"type": "string",
                          "enum": ["function", "class", "mutation", "test", "module"]},
-                "module": {"type": "string"},
+                "module": {"type": "string", "maxLength": DEFAULT_MAX_MODULE,
+                           "pattern": _MODULE_PATTERN},
                 "k": {"type": "integer", "minimum": 1, "maximum": 10, "default": 4},
             },
             "required": ["query"],
@@ -526,7 +584,9 @@ def _record_schema(name: str, description: str) -> dict[str, Any]:
         "description": description,
         "parameters": {
             "type": "object",
-            "properties": {"id": {"type": "string"}},
+            "properties": {"id": {"type": "string", "minLength": 1,
+                                  "maxLength": DEFAULT_MAX_ID,
+                                  "pattern": _ID_PATTERN}},
             "required": ["id"],
         },
     }
@@ -590,7 +650,8 @@ def run_sql_schema(*, card: str | None = None) -> dict[str, Any]:
         ),
         "parameters": {
             "type": "object",
-            "properties": {"sql": {"type": "string"}},
+            "properties": {"sql": {"type": "string", "minLength": 1,
+                                   "maxLength": DEFAULT_MAX_SQL}},
             "required": ["sql"],
         },
     }
@@ -606,7 +667,9 @@ def describe_schema_schema() -> dict[str, Any]:
         ),
         "parameters": {
             "type": "object",
-            "properties": {"table": {"type": "string"}},
+            "properties": {"table": {"type": "string", "minLength": 1,
+                                     "maxLength": DEFAULT_MAX_ID,
+                                     "pattern": _TABLE_PATTERN}},
             "required": ["table"],
         },
     }

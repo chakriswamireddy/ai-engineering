@@ -37,7 +37,7 @@ import os
 import re
 from typing import Any
 
-from ai_os.eval_dataset import JUDGE_HUNTING_KIND, claim_derivable
+from ai_os.eval_dataset import EVAL_UNRESOLVABLE, JUDGE_HUNTING_KIND, claim_derivable
 from ai_os.rag import NOT_COVERED
 from ai_os.trace import expected_stats
 
@@ -268,13 +268,21 @@ def deterministic_checks(row: dict[str, Any], trace: dict[str, Any]) -> dict[str
 # ------------------------------------------------------------- layer 1 verdict
 
 def judge_row(row: dict[str, Any], trace: dict[str, Any], *,
-              kind: str | None = None, gateway=None) -> dict[str, Any]:
+              kind: str | None = None, gateway=None,
+              unresolvable: bool = False) -> dict[str, Any]:
     """Grade one golden row against one trace. Layer 1 decides; layers 2/3 annotate.
 
     The returned **verdict row** is `pass | fail` from layer 1, with the failing
     checks named and one owner per symptom; `semantic` is always `pending` (with
     its owner) unless the flagged model lane adds a *comment* that never changes
     `deterministic_verdict`.
+
+    Day 25 §7 — `unresolvable=True` is set by the caller when the row's **resolved
+    evidence hash changed** since registration (the corpus was poisoned under the
+    row). The verdict is then neither `pass` nor `fail`: the deterministic checks
+    are still computed and reported, but the verdict is `unresolvable`, because
+    "did this answer match the pre-registration?" is not a question the system can
+    answer about a corpus that moved.
     """
     kind = kind or judge_kind_from_env()
     checks = deterministic_checks(row, trace)
@@ -314,6 +322,20 @@ def judge_row(row: dict[str, Any], trace: dict[str, Any], *,
     }
     out["tokens"] = _ledger_tokens(view["ledger"])
     out["latency_ms"] = (view["ledger"] or {}).get("latency_ms")
+    # Day 25 §7 — a row whose evidence moved is *unresolvable*: never `pass` (the
+    # answer may have matched a poisoned document) and never `fail` (the system
+    # cannot prove the model was wrong). The deterministic checks stay in `checks`
+    # for the reader; the verdict is the corpus's, not the model's.
+    if unresolvable:
+        out["verdict"] = EVAL_UNRESOLVABLE
+        out["deterministic_verdict"] = EVAL_UNRESOLVABLE
+        out["evidence_changed"] = True
+        out["graded_by"] = "evidence"
+        out["judged_subset_preregistered"] = True
+        out["verdict_note"] = (
+            "the row's resolved evidence hash changed since registration — a "
+            "poisoned evidence row is unresolvable, neither passed nor wrong")
+        return out
     if kind == "model" and gateway is not None:
         note = model_judge(gateway, row, trace)
         out["semantic"] = note.get("semantic", "pending")

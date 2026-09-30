@@ -266,6 +266,29 @@ def logs_endpoint(trace_id: str | None = None, limit: int | None = None):
     return {"lines": ring.lines(trace_id=trace_id, limit=limit)}
 
 
+@app.get("/attacks")
+def attacks_endpoint(trace_id: str | None = None):
+    """Day 25 §8 — the injection inspection surface.
+
+    `GET /attacks?trace_id=…` returns the signals and classes the firewall found
+    for one request (payloads **hashed** — the metadata-safe default intact), and
+    `GET /attacks` returns the bounded local ring. Findings you cannot look up do
+    not get tuned, so this is the small, boring surface the day's ladder is tuned
+    through — deliberately no bigger than the trace and log rings beside it.
+    """
+    from ai_os import injection as inj
+    rows = inj.attempts(trace_id)
+    return {
+        "trace_id": trace_id,
+        "count": len(rows),
+        "ring_size": inj.ring_size(),
+        "attempts": rows,
+        "note": ("signals carry class + field path + sha256 + offsets; the payload "
+                 "is never stored — the metadata-safe default does not relax for "
+                 "hostile input"),
+    }
+
+
 def _ingest_enabled() -> bool:
     return os.getenv("TRACE_INGEST", "0").strip().lower() in {
         "1", "true", "yes", "on"}

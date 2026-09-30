@@ -914,7 +914,53 @@ def memory_columns(*, enabled: bool = True, principal: str | None = None,
     return out
 
 
-# ======================================================== Day 19 — the topology
+# ======================================================== Day 25 — the injection
+# The trace grows `taint`, `signals`, and `injection_blocked`, and **loses
+# nothing**: the signals are already metadata-safe (class + source + path + hash +
+# offsets + severity — never the payload), and the Days 23–24 redaction scan is
+# *extended* over the new fields rather than bypassed by them. A security feature
+# that expands what gets recorded is a security regression wearing a feature's
+# clothes, so the check below is the guard that keeps the two facts joined.
+
+INJECTION_BLOCKED = "blocked"
+
+
+def signal_rows(signals: Sequence[Any]) -> list[dict[str, Any]]:
+    """Serialize signals to their metadata-safe rows (class + hash + offsets)."""
+    return [s.as_dict() if hasattr(s, "as_dict") else dict(s) for s in signals or []]
+
+
+def injection_columns(*, taint: Sequence[str] = (), signals: Sequence[Any] = (),
+                      blocked: bool = False,
+                      extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The Day 25 row: what was tainted, what was flagged, and whether the run
+    was stopped — every cell a bounded, hashed fact.
+
+    `taint` is the distinct untrusted sources that entered the request (the run's
+    `taint`); `signals` is the metadata-safe signal list; `injection_blocked` is
+    `True` only when the authority refused a privileged action. Additive by
+    construction: a legitimate run that produced no signals has an *empty* row, so
+    nothing new is recorded (I9's zero-delta control).
+    """
+    out: dict[str, Any] = {
+        "taint": sorted({str(t) for t in taint}),
+        "signals": signal_rows(signals),
+        "signal_count": len(list(signals or [])),
+        "injection_blocked": bool(blocked),
+    }
+    out.update(extra or {})
+    return out
+
+
+def signals_are_metadata_safe(signals: Sequence[Any]) -> bool:
+    """Extend the Day 23/24 redaction scan over the new signal fields.
+
+    A serialized signal may carry only `class`/`source`/`path`/`sha256`/`start`/
+    `end`/`severity`. Any other key — or a payload-shaped value — fails, which is
+    how "no raw payload in the trace" stays a checkable fact rather than a promise.
+    """
+    from ai_os import injection as _inj
+    return _inj.signals_are_metadata_safe(signals)
 # §9's architecture table columns. The comparison's variable is *topology*, so the
 # trace must carry it: which topology ran, where the role-context router sent the
 # question, the delegations and their statuses, and the three judge columns — the

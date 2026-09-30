@@ -148,6 +148,11 @@ def episodicize(run: dict[str, Any], *, task_id: str | None = None) -> dict[str,
     # the citation contract Day 17 fixed; a role is a property of the finding.
     if run.get("role"):
         payload["role"] = run["role"]
+    # Day 25 §7 — an episode over a tainted run carries its taint, so a distiller
+    # asked to mint from it can refuse (`authored ⊆ grounded`, now taint-aware).
+    # Additive: absent on a clean run, so an untainted episode payload is unchanged.
+    if run.get("taint"):
+        payload["tainted"] = sorted(run["taint"])
     return payload
 
 

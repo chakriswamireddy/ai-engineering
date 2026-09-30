@@ -241,6 +241,18 @@ def validate_concept(candidate: dict[str, Any],
     if contradicted:
         reasons.append("contradiction")
 
+    # 2b. Day 25 §7 — a **tainted** grounding episode cannot ground a lesson at all.
+    # The closed write path already refuses a foreign/absent `source`; this is the
+    # honest residue of the day's sharpest point — provenance is a write-authorization
+    # property, not a truth property, and the distiller *is* an authored source. So
+    # the extra precondition is taint: an episode whose run carried an injection
+    # signal (or whose payload says so) is refused as a source, and a concept that
+    # would rest on it is never minted.
+    tainted_sources = sorted(str(e.get("task_id")) for e in agreeing
+                             if e.get("tainted"))
+    if tainted_sources:
+        reasons.append("tainted_source")
+
     # 3. privacy — no principal names survive the mint
     names = principal_names(f"{claim or ''} {json.dumps(cand_claims, default=str)}",
                             principals)
@@ -258,6 +270,8 @@ def validate_concept(candidate: dict[str, Any],
         "unsupported_entities": unsupported_entities,
         "contradicted": contradicted,
         "principal_names": names,
+        # Day 25 — the taint precondition: episodes that carried an injection.
+        "tainted_sources": tainted_sources,
     }
 
 
