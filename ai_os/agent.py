@@ -72,6 +72,7 @@ from ai_os.state import (
     persist_conversation,
 )
 from ai_os.tools import (
+    ERROR_APPROVAL_REQUIRED,
     ERROR_TIMEOUT,
     ERROR_TOOL,
     TOOL_ERROR_KINDS,
@@ -80,6 +81,7 @@ from ai_os.tools import (
 )
 from ai_os.trace import (
     AGENT_TERMINATIONS,
+    approval_from_result,
     contradiction_coverage,
     contradiction_rows,
     cost_estimates,
@@ -244,6 +246,25 @@ TERMINATION_NOTE: dict[str, str] = {
         "rephrasing: say plainly that the request was refused and why (naming the "
         "class, not schema details), and do NOT attempt a workaround. Answer only "
         "from the observations already in this transcript. Do NOT invent evidence."
+    ),
+    # Day 27 §7 — the withheld-pending-a-person note, and it shares the `policy`
+    # class with the note above *in the refusal*, which is exactly why it needs its
+    # own words. The three things it must say are all *true* statements the run can
+    # back up: the action requires human approval; **nothing was applied**; and the
+    # request id was named in the refusal (the model may cite it, because the
+    # refusal is an observation in its own transcript). The last clause is the one
+    # that is not decoration: rule 5 describes a `policy` refusal as a forbidden
+    # request, so a model told only "stop" may reasonably try a rephrasing — and a
+    # rephrasing is precisely the bypass this gate exists to prevent.
+    "awaiting_approval": (
+        "The run stopped because this call requires **human approval** and the "
+        "permission layer has opened a durable approval request for it (its id is "
+        "in the refusal message above). Nothing was applied and no data left the "
+        "process. State plainly that the action requires human approval, name the "
+        "request id, and say that it is pending a person — do NOT attempt the call "
+        "again, do NOT rephrase it, and do NOT look for a workaround: a human "
+        "decides this, not you. Answer only from the observations already in this "
+        "transcript. Do NOT invent evidence."
     ),
 }
 
@@ -484,6 +505,7 @@ def _call_row(call, vr: ToolResult, result: ToolResult,
         row["obs_clamped"] = True
     row.update(data_columns(result))          # Day 14 §8 — gen_sql/validation/…
     row.update(permission_columns(result))    # Day 26 §7 — decision/code/redacted
+    row.update(approval_from_result(result))  # Day 27 §7 — request/state/digest
     return row
 
 
@@ -796,6 +818,16 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
     gave_up = False
     termination: str | None = None
     answer_text = ""
+    # Day 27 §7 — the loop's *two* additions. `step_approval` is not a second
+    # control plane: it is a flag on the same `policy`-class path, and the only
+    # thing it changes is **which terminal owns the stop**, because a run withheld
+    # pending a person and a run that asked for something forbidden must not share
+    # one. The four run fields below it are recorded facts about the request the
+    # layer opened (or refused to open), never a model-supplied value.
+    step_approval = False
+    approval_request_id: str | None = None
+    approval_state: str | None = None
+    approval_digest: str | None = None
 
     # Day 25 §7 — the refusal path is **normalization into the existing
     # vocabulary**, not a new parallel mechanism. A privileged-action injection is
@@ -912,7 +944,18 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
                     tool_timeout_s=timeout_cap, clock=clock,
                     decision=vr.decision)
                 retries = failures = timeouts = 0
-                if result.rejection_class == POLICY_CLASS:
+                if result.error_kind == ERROR_APPROVAL_REQUIRED:
+                    # Day 27 §7 — line one of two. The layer withheld the call
+                    # pending a person, so the run stops (like a policy wall: no
+                    # retry, no sibling substitution) but under its *own* terminal.
+                    step_approval = True
+                    step_policy = True
+                    info = getattr(result, "approval", None) or {}
+                    approval_request_id = info.get("request_id") or approval_request_id
+                    approval_state = info.get("state") or approval_state
+                    approval_digest = info.get("digest") or approval_digest
+                    policy_hits += 1
+                elif result.rejection_class == POLICY_CLASS:
                     policy_hits += 1
                     step_policy = True
                 elif result.error_kind in TOOL_ERROR_KINDS:
@@ -1016,6 +1059,16 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
             # not have, so self-correction must not apply and the loop must not
             # invite another attempt. Checked first so a policy hit owns the terminal,
             # not `no_progress`/`oscillation`/`tool_failure` arriving the same step.
+            #
+            # Day 27 §7 — line two of two: the *withheld* terminal is checked before
+            # the *forbidden* one. Both arrive here under the same `policy` class, and
+            # they are not the same event: `awaiting_approval` is resolvable by a
+            # person, `policy` is not resolvable at all. Sharing the terminal would
+            # make the model's note claim a request was refused as a violation on the
+            # day the system is asking a human for a signature.
+            if step_approval:
+                termination = "awaiting_approval"
+                break
             if step_policy:
                 termination = "policy"
                 break
@@ -1133,6 +1186,19 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
         # changes the answer — Topology A ≡ Days 12–18 (G9).
         "routed_to": routed_to,
         "role": role,
+        # Day 27 §7 — the approval contract on the run object: four fields and
+        # nothing else. `awaiting_approval` is the terminal flag; `approval_request_id`
+        # and `approval_digest` name *what a person is being asked about*, so the
+        # answer's plain statement of the request id is backed by a recorded value
+        # rather than by the model's recollection; `approval_state` is the record's
+        # state at the moment the run stopped (`requested`, or `None` when the desk
+        # refused to open a second request in this run). All four are `None`/`False`
+        # on a run that never reached the gate, which is what keeps H9's
+        # on ≡ off projection exact.
+        "awaiting_approval": bool(step_approval),
+        "approval_request_id": approval_request_id,
+        "approval_state": approval_state,
+        "approval_digest": approval_digest,
     }
 
     # Day 26 §7 — the permission contract, additive and **empty on an ungoverned
