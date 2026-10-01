@@ -1,0 +1,50 @@
+# docs/deployment.yaml — Day 29's addition. An image is a subset of a
+#   repository, and the interesting part is the subset.
+#   * `why` is required per entry: a file nobody can justify is a file that
+#     should not ship (measured: 578 MB context -> 587 MB image).
+#   * `absent` is a first-class section. A deployment doc that lists only
+#     what exists is a brochure.
+image:
+  base: python:3.12-slim
+  runtime_user: ai-os            # never root; the store is 0644 and read-only
+  exposes: [8000]
+  healthcheck:                   # the *contract*, mirrored by ai_os/health.py
+    liveness:
+      path: /healthz
+      touches: []
+      timeout_s: 2
+    readiness:
+      path: /readyz
+      touches: [gateway, store, database, state]
+      timeout_s: 30
+include:
+  - path: ai_os/
+    why: the application
+  - path: tools/
+    why: the offline fixtures the N-set runs inside the image
+  - path: policy.yaml
+    why: Day 15's SQL policy the data layer enforces
+  - path: .env.example
+    why: the configuration *contract*; never a value source
+  - path: requirements.txt
+    why: four dependencies, resolved at build
+  - path: data/store.json
+    why: 262,182,307 B · 11,061 chunks · dim 768
+absent:
+  - path: .env
+    why: secrets come from the run environment  (BUILT, ASSERTED)
+  - path: .git/
+    why: history is not a runtime dependency
+  - path: .venv/
+    why: the image installs its own; this one is py3.14
+  - path: corpus/
+    why: ingest-time input; `data/store.json` is the artifact
+  - path: corpus_code/
+    why: ditto — 98 MB of source the image does not serve
+  - path: "**/__pycache__/"
+    why: another interpreter's bytecode
+  - path: docs/
+    why: 2.7 MB of prose; the deployment doc is in git
+limits:
+  memory: 1g                  # measured floor 384m (survives), SIGKILL at 320m
+  workers: 1                  # one process; the single-writer lock enforces it
