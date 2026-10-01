@@ -517,6 +517,118 @@ class StateRecord:
         )
 
 
+# ====================================================== Day 29 §5.4 — single-writer guard
+"""The single-writer guard is an exclusive lock taken at boot, refusing the second
+process by name. It converts Day 28's "two writers lose records silently" from a
+drawing into a refusal, which means the container can honestly be scaled to
+exactly one.
+
+`flock` is advisory (every writer must take it — the state store is the only
+writer today, and the day is the only thing that can make that true) and it is
+filesystem-dependent (works on local volume and bind mount; NFS semantics vary
+and are not claimed). What it buys is enormous and specific: the refusal is the
+deliverable, and the fixture asserts the defect first.
+"""
+import fcntl
+import os
+from typing import Any
+
+
+class SecondWriter(RuntimeError):
+    """Raised when a second process attempts to acquire the state store lock.
+
+    The message names the holder's pid and path, and the fix:
+    "two writers on one state file lose records; run one process, or give each
+    its own STATE_STORE_PATH"
+    """
+    def __init__(self, holder_pid: int, path: str) -> None:
+        self.holder_pid = holder_pid
+        self.path = path
+        super().__init__(
+            f"second writer refused: pid {holder_pid} holds lock on {path}; "
+            f"two writers on one state file lose records; "
+            f"run one process, or give each its own STATE_STORE_PATH"
+        )
+
+
+class SingleWriter:
+    """Exclusive lock on the state file path, taken at boot.
+
+    Opens `<state>.lock`, takes `fcntl.flock(LOCK_EX | LOCK_NB)`, and on failure
+    raises `SecondWriter` with the holder's pid and path. The lock is held for
+    the process lifetime and released on exit.
+
+    Wired into readiness()'s `state` check and into the process's start-up, so
+    `uvicorn --workers 2` or a second replica on a shared volume fails at boot
+    with a sentence instead of corrupting a file over the next hour.
+    """
+
+    def __init__(self, state_path: str | os.PathLike) -> None:
+        self.path = str(state_path)
+        self.lock_path = self.path + ".lock"
+        self._lock_fd: int | None = None
+        self._acquire()
+
+    def _acquire(self) -> None:
+        # Ensure parent directory exists
+        os.makedirs(os.path.dirname(self.lock_path) or ".", exist_ok=True)
+        # Open lock file (create if needed)
+        self._lock_fd = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            # Non-blocking exclusive lock
+            fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # Lock held by another process — read holder's pid from lock file
+            holder_pid = self._read_holder_pid()
+            os.close(self._lock_fd)
+            self._lock_fd = None
+            raise SecondWriter(holder_pid, self.path)
+
+    def _read_holder_pid(self) -> int:
+        """Best-effort read of holder's pid from lock file."""
+        try:
+            with open(self.lock_path, "r") as f:
+                content = f.read().strip()
+                if content.isdigit():
+                    return int(content)
+        except Exception:
+            pass
+        return -1
+
+    def __enter__(self) -> "SingleWriter":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.release()
+
+    def release(self) -> None:
+        """Release the lock and close the file descriptor."""
+        if self._lock_fd is not None:
+            try:
+                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+            except Exception:
+                pass
+            try:
+                os.close(self._lock_fd)
+            except Exception:
+                pass
+            self._lock_fd = None
+
+    def __del__(self) -> None:
+        self.release()
+
+
+def acquire_single_writer_lock(state_path: str | os.PathLike) -> SingleWriter:
+    """Acquire the single-writer lock for the given state path.
+
+    Returns the SingleWriter instance (must be kept alive for the process lifetime).
+    Raises SecondWriter if another process holds the lock.
+
+    This is the function called at process startup to enforce the one-writer rule.
+    """
+    return SingleWriter(state_path)
+
+
 class StateStore:
     """File-backed, bounded, expiring, provenance-enforced state (`MECH`).
 
