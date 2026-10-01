@@ -1,0 +1,105 @@
+# ai_os/scenarios.yaml — Day 30's addition. A SCENARIO is a question with
+#   ten pre-registered columns. A column with no expectation is refused:
+#   * `expect` is written before the run (the series' rule since Day 7).
+#   * `pending` is a first-class cell. A demo that lists only what it proved
+#     is a brochure; a demo that names what it could not prove is a defence.
+version: 1
+scenarios:
+  - id: S1
+    name: knowledge
+    question: "How does Saleor handle checkout?"
+    route:
+      kind: http
+      method: POST
+      path: /rag
+      body: {corpus: "docs"}
+    expect:
+      tools: [search_saleor_docs]
+      invariant: cited_subset_retrieved
+      refusal_on: ["unrelated question", "empty corpus"]
+    cost: {embeds: 1, chats: 1, sql: 0, rows: 0}
+    pending: ["real-model answer quality (day20 L2)", "retrieval completeness on real store (day21)"]
+
+  - id: S2
+    name: code
+    question: "Where is this behavior implemented?"
+    route:
+      kind: http
+      method: POST
+      path: /rag
+      body: {corpus: "code"}
+    expect:
+      tools: [search_saleor_code]
+      invariant: cited_subset_retrieved
+      refusal_on: ["unrelated question", "empty corpus"]
+    cost: {embeds: 1, chats: 1, sql: 0, rows: 0}
+    pending: ["real code store (day10 quota)", "real-model answer quality (day20 L2)"]
+
+  - id: S3
+    name: data
+    question: "Which products generated the most revenue?"
+    route:
+      kind: library
+      call: run_agent
+      tools: [run_saleor_sql]
+    expect:
+      tools: [run_saleor_sql]
+      invariant: asserted_subset_returned
+      labels: {backend: "stub (SEED_SQL)"}
+      refusal_on: ["DELETE-shaped request -> policy stop, 0 DB execution"]
+    cost: {embeds: 0, chats: 2, sql: 1, rows: 1, writes: 0}
+    pending: ["real Postgres backend (day14 seam)", "semantic answer quality (day20 L2)"]
+
+  - id: S4
+    name: customer_investigation
+    question: "Why did this customer fail to complete checkout?"
+    route:
+      kind: library
+      call: executor.run_plan
+      plan: stored
+    expect:
+      tools: [search_saleor_code, run_saleor_sql, search_saleor_docs]
+      invariant: [conclusion_subset_evidence, recalled_subset_authored]
+      refusal_on: ["fabricated cause"]
+    cost: {embeds: "per_step", chats: "per_step + 1", sql: 1, rows: 1, writes: "k+1"}
+    pending: ["real-model plan quality (day21)", "semantic answer quality (day20 L2)"]
+
+  - id: S5
+    name: engineering_investigation
+    question: "Why is this test failing?"
+    route:
+      kind: none
+    expect:
+      tools: []
+      invariant: null
+    cost: {embeds: 0, chats: 0, sql: 0, rows: 0, writes: 0}
+    finding: "no test-runner tool exists; registry.names() = 7 reads, 0 executors"
+    pending: ["a run_tests tool (owner: a future ingestion+sandbox day)"]
+
+  - id: S6
+    name: operational_investigation
+    question: "Why did latency increase?"
+    route:
+      kind: http
+      method: GET
+      path: /traces/{trace_id}
+    expect:
+      tools: []
+      invariant: trace_provenance_plus_ledger_reconciliation
+      labels: {aggregate: "PENDING - no sink, no retention, no baseline"}
+    cost: {embeds: 0, chats: 0, sql: 0, rows: 0}
+    pending: ["trace sink and retention (day28)", "metric baseline (day28)", "semantic operational answer (day20 L2)"]
+
+  - id: S7
+    name: controlled_action
+    question: "Perform an approved operation."
+    route:
+      kind: library
+      call: approval_workflow
+    expect:
+      tools: []
+      invariant: decision_digest_and_refusal
+      labels: {saleor_rows_changed: 0, wrote: false}
+      refusal_on: ["no write path", "no effect:write grant"]
+    cost: {embeds: 0, chats: 0, sql: 0, rows: 0, writes: 0}
+    pending: ["approval workflow (day27 designed not built)", "write path (no owner, deliberately - day27 judgment)"]
