@@ -179,7 +179,7 @@ def deterministic_checks(row: dict[str, Any], trace: dict[str, Any]) -> dict[str
         bad = sorted(set(must_not) & set(evidence))
         checks["must_not"] = {
             "ok": not bad, "graded": True, "owner": OWNERS["must_not"],
-            "detail": (f"no wrong sense retrieved → OK" if not bad
+            "detail": ("no wrong sense retrieved → OK" if not bad
                        else f"wrong sense retrieved → {bad}"),
         }
     else:

@@ -1,0 +1,6 @@
+# WS0 — guardrail tooling (CI only; never shipped in the image).
+# Pinned == so CI is reproducible. Runtime image uses requirements.txt only.
+ruff==0.16.9
+mypy==2.3.1
+pip-audit==2.10.1
+pytest==9.1.1

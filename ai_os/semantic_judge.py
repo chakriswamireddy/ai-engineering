@@ -29,7 +29,7 @@ this module never re-answers; it reads the run's own context and answer, and
 """
 from __future__ import annotations
 
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 from ai_os.eval_dataset import claim_derivable
 

@@ -13,8 +13,15 @@
 #
 # The manifest in docs/deployment.yaml is the source of truth for what ships.
 # This Dockerfile copies exactly the include set and nothing else.
+# WS0: requirements.txt is hash-pinned (direct + transitive closure, cp312+cp314
+# wheels); pip enforces hashes automatically in hash-checking mode.
 
 FROM python:3.12-slim
+
+# WS0 — OCI labels for traceability; the SBOM artifact is generated below.
+LABEL org.opencontainers.image.title="ai-layer" \
+      org.opencontainers.image.base="python:3.12-slim" \
+      org.opencontainers.image.revision="ws0"
 
 # Runtime user — never root; the store is 0644 and read-only
 RUN groupadd -r ai-os && useradd -r -g ai-os ai-os
@@ -35,6 +42,13 @@ COPY data/store.json ./data/store.json
 
 # Ensure data directory is writable by ai-os user (for state.json and lock file)
 RUN mkdir -p /app/data && chown -R ai-os:ai-os /app/data
+
+# WS0 — SBOM generation in the image build (CycloneDX JSON, stdlib-only writer).
+# Stored outside /app so the Day-29 manifest include set is unchanged; CI copies
+# it out as a build artifact (`docker build --output type=local,dest=./sbom-out`
+# or `python tools/sbom.py --out sbom.json`). For attestations prefer:
+# `docker buildx build --sbom=true --provenance=true .`
+RUN mkdir -p /sbom && python tools/sbom.py --out /sbom/sbom.json && chown -R ai-os:ai-os /sbom
 
 # Non-root user
 USER ai-os

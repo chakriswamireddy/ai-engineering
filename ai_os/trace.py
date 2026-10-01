@@ -33,7 +33,6 @@ from ai_os.rag import (
     NOT_COVERED,
     SYSTEM_PROMPT,
     build_context,
-    citation,
     k_from_budget,
 )
 from ai_os.state import AUTHORED_SOURCES, STATE_OFF, STATE_ON

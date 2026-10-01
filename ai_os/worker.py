@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Mapping
@@ -67,7 +66,6 @@ def run_job(traceparent: str | None, job: str,
     the serialized span reports to merge.
     """
     payload = dict(payload or {})
-    carrier = {obs.TRACEPARENT: traceparent} if traceparent else None
     ctx, reason = obs.TraceContext.parse(traceparent)
     tr = obs.start_trace(f"worker.{job}", attributes={"component": COMPONENT,
                                                       "job": job},

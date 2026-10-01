@@ -1,0 +1,64 @@
+# WS0 guardrails — single config for ruff / mypy / pytest.
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = [".venv", "corpus", "corpus_code", "data", "__pycache__"]
+
+[tool.ruff.lint]
+# Conservative: pyflakes + pycodestyle errors only. No reformatting of Day suites.
+select = ["E4", "E7", "E9", "F"]
+ignore = [
+    # E402: the Day suites' documented import convention is
+    # `sys.path.insert(0, ...)` before local imports (script-runnable fixtures).
+    "E402",
+    # Style-only codes: never block CI (E501 line length already ignored).
+    "E741",  # ambiguous one-letter names in fixture math
+    "E731",  # lambda assignment in tiny local builders
+    "E702",  # semicolon one-liners in scripts
+    "E714",  # `not is` test spelling in fixtures
+]
+
+# WS0 baseline: the Day 7-30 script suites (test_*.py, tools/*) are checked by
+# regress_all.py as fixtures, not as libraries. Dead imports/vars and
+# f-string prefixes there are churn to fix, not bugs — F821 (undefined name),
+# F811 (redefinition) and E9 (syntax) stay enforced everywhere, and ai_os/ +
+# the WS0 guardrail tools (gate_prod.py, sbom.py) stay under full enforcement
+# via CI's second strict ruff pass.
+[tool.ruff.lint.per-file-ignores]
+"test_*.py" = ["F401", "F841", "F541"]
+"tools/*.py" = ["F401", "F841", "F541"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+# Day suites are script-style and never passed to mypy (CI runs `mypy ai_os`
+# only), so no override is needed for them.
+
+# WS0 baseline: 15 ai_os modules carry pre-existing annotation gaps (110
+# errors, concentrated in agent.py:41 + sql_safety.py:22). Fixing them is a
+# behavior-risk rewrite, so they are baselined here and burn down in later
+# workstreams. Every module NOT listed — including any new module — is fully
+# type-checked in CI.
+[[tool.mypy.overrides]]
+module = [
+    "ai_os.agent",
+    "ai_os.sql_safety",
+    "ai_os.tools",
+    "ai_os.server",
+    "ai_os.observability",
+    "ai_os.ingest",
+    "ai_os.approval",
+    "ai_os.executor",
+    "ai_os.memory",
+    "ai_os.ingest_code",
+    "ai_os.providers.openai",
+    "ai_os.capacity",
+    "ai_os.permissions",
+    "ai_os.metrics",
+    "ai_os.gateway",
+]
+ignore_errors = true
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+norecursedirs = [".venv", "__pycache__", "corpus", "corpus_code", "data", ".git"]

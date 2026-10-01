@@ -23,7 +23,7 @@ from ai_os.contract import (
     NetworkError, Usage, usage_from_dict,
 )
 from ai_os.providers import register
-from ai_os.providers import parse_sse_line, raise_for_status, retry_after_from, try_parse_json_bytes
+from ai_os.providers import raise_for_status, retry_after_from, try_parse_json_bytes
 
 
 @register

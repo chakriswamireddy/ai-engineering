@@ -21,7 +21,7 @@ from typing import Any, Iterable
 import yaml
 
 from ai_os.gate import should_refuse
-from ai_os.trace import duplicate_ratio, retrieve_trace
+from ai_os.trace import retrieve_trace
 
 FIXTURES_PATH = Path(__file__).with_name("questions.yaml")
 CODE_FIXTURES_PATH = Path(__file__).with_name("code_questions.yaml")

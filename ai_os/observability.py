@@ -43,7 +43,6 @@ promised.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import re
 import threading
@@ -794,7 +793,6 @@ def current_context() -> "TraceContext | None":
         return None
     span = tr.current_span() or getattr(tr, "root", None)
     sid = getattr(span, "span_id", None) or new_span_id()
-    flags = "01"
     ctx = getattr(tr, "parent_context", None)
     if ctx is not None:
         return TraceContext(trace_id=tr.trace_id, span_id=sid, flags=ctx.flags)

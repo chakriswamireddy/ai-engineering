@@ -24,6 +24,7 @@ evidence union as ordered set arithmetic. Zero chats, zero embeds.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import time
@@ -529,9 +530,6 @@ filesystem-dependent (works on local volume and bind mount; NFS semantics vary
 and are not claimed). What it buys is enormous and specific: the refusal is the
 deliverable, and the fixture asserts the defect first.
 """
-import fcntl
-import os
-from typing import Any
 
 
 class SecondWriter(RuntimeError):

@@ -355,7 +355,7 @@ def _run_rag_traced(gateway, store, q: str, *, k, budget_chars, max_tokens,
             "usage": completion.usage.as_dict(),
             "attempts": gateway.last_attempts,
             "latency_ms": gateway.last_latency_ms,
-            "fallback_depth": gateway.last_fallback_depth,
+            "fallback_depth": getattr(gateway, "last_fallback_depth", 0),
             "cost_usd": round(gateway.ledger.cost(completion.model,
                                                  completion.usage), 8),
         },
@@ -421,7 +421,6 @@ def _load_store_cached_slot(
     clock,
 ) -> tuple[RagStore, tuple[RagStore, str, float, int, str]]:
     """Load or return cached store, keyed on (mtime, size, sha256, embedding_model, dimension)."""
-    import stat
     st = os.stat(path)
     mtime = st.st_mtime
     size = st.st_size

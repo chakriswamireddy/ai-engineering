@@ -86,7 +86,7 @@ def _check_database() -> HealthCheck:
         if url:
             # Verify psycopg is available (imported lazily in data.py)
             try:
-                import psycopg
+                import psycopg  # noqa: F401 — availability probe, binding intentionally unused
                 ok = True
                 detail = "postgres"
             except ImportError:

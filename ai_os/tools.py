@@ -866,7 +866,6 @@ class ToolRegistry:
                result: ToolResult | None) -> None:
         if self._audit is None:
             return
-        decision_meta = decision if hasattr(decision, "meta") else None
         self._audit.append({
             "run_id": self.run_id,
             "trace_id": self.trace_id,

@@ -6,7 +6,6 @@ a limit nobody can be refused by is a comment with a number in it.
 """
 from __future__ import annotations
 
-import hashlib
 import time
 from dataclasses import dataclass
 from typing import Any

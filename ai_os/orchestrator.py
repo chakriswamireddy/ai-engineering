@@ -47,7 +47,6 @@ from typing import Any, Sequence
 
 from ai_os.agent import ROLES, RoleAgent, _new_run_id, route_question
 from ai_os.receipt import (
-    REFUSED,
     RETURNED,
     Receipt,
     check_delegated_subset_returned,

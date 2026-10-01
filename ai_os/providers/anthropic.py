@@ -18,7 +18,7 @@ from urllib import error as urlerror, request
 
 from ai_os import observability as obs
 from ai_os.contract import (
-    Completion, ProviderError, InvalidKeyError,
+    Completion, InvalidKeyError,
     ProviderTimeout, NetworkError, ToolCall,
     usage_from_dict,
 )

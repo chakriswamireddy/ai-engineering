@@ -46,7 +46,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 # The one config knob. Default lives beside the other runtime artifacts.
 AUDIT_PATH_ENV = "AUDIT_LOG_PATH"

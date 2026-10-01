@@ -848,7 +848,6 @@ def returned_values(records: list[dict[str, Any]]) -> tuple[set[float], set[str]
             continue
         values.add(float(rec.get("row_count") or 0))
         values.add(float(len(rec.get("columns") or [])))
-        columns = rec.get("columns") or []
         numeric: dict[int, list[float]] = {}
         for row in rec.get("rows") or []:
             for i, cell in enumerate(row):

@@ -1,0 +1,69 @@
+# WS0 — guardrail CI: lint, typecheck, audit, prod-gate, SBOM.
+# Red on: ruff/mypy/pip-audit findings, regress/demo/pytest failures,
+# any PENDING without owner (tools/gate_prod.py). SBOM uploaded per build.
+# Install is two steps because requirements.txt is hash-pinned (hash-checking
+# mode would reject the hash-free dev file in a combined invocation).
+name: ws0-guardrails
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: ruff check ai_os tools/gate_prod.py tools/sbom.py conftest.py --select F,E9 --isolated --target-version py312
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-dev.txt
+      - run: mypy ai_os
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-dev.txt
+      - run: pip-audit -r requirements.txt
+
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-dev.txt
+      - run: python tools/gate_prod.py
+
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python tools/sbom.py --out sbom.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom.json

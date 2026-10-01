@@ -136,7 +136,8 @@ def readyz() -> dict[str, Any]:
     Returns 200 if all pass, 503 if any fails. Body is a table of named checks.
     """
     # Use the module-level gateway if available, otherwise try to build
-    gw_builder = lambda: gateway
+    def _gw_builder():
+        return gateway
     # Store loader uses the identity-keyed cache (Day 28)
     def store_loader(corpus: str):
         path = code_store_path_from_env() if corpus == "code" else store_path_from_env()
@@ -147,7 +148,7 @@ def readyz() -> dict[str, Any]:
             return None
     state_path = state_store_path_from_env()
     status, body = readiness(
-        gateway_builder=gw_builder,
+        gateway_builder=_gw_builder,
         store_loader=store_loader,
         state_path=state_path,
     )
@@ -164,8 +165,7 @@ def chat_endpoint(req: ChatRequest, request: Request):
     # fails the request, and it never selects a store, tenant, or permission.
     trace, extract = obs.start_server_trace("chat", _headers_of(request), attributes={
         "route": "/chat", "component": "api", "messages": len(req.messages),
-        "input_chars": sum(len(m.get("content", "")) for m in req.messages),
-        "continuation_reason": extract.reason})
+        "input_chars": sum(len(m.get("content", "")) for m in req.messages)})
     headers = obs.response_trace_headers(trace)
     try:
         completion = gateway.chat(
@@ -205,8 +205,7 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request) -> StreamingR
     # `ttft_ms`) still land in the trace. Day 24 continues the inbound context
     # and adds the response `traceparent`.
     trace, extract = obs.start_server_trace("chat", _headers_of(request), attributes={
-        "route": "/chat/stream", "component": "api", "messages": len(req.messages),
-        "continuation_reason": extract.reason})
+        "route": "/chat/stream", "component": "api", "messages": len(req.messages)})
     headers = obs.response_trace_headers(trace)
 
     def events():
@@ -289,8 +288,7 @@ def rag_endpoint(req: RagRequest, request: Request):
                         "`python tools/build_code_store.py` (code) first"}
     trace, extract = obs.start_server_trace("rag", _headers_of(request), attributes={
         "route": "/rag", "component": "api", "corpus": req.corpus,
-        "question_sha256": obs.sha256_text(req.question),
-        "continuation_reason": extract.reason})
+        "question_sha256": obs.sha256_text(req.question)})
     headers = obs.response_trace_headers(trace)
     try:
         result = run_rag(gateway, store, req.question, k=req.k,

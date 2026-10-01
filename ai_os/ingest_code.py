@@ -42,7 +42,7 @@ plugs in behind this same `ingest_code` seam — the honest way to leave it.
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 

@@ -156,13 +156,13 @@ that under-declares memory is a crash loop with a cause nobody can see.
 
 | item | trigger | owner |
 |------|---------|-------|
-| rate limiter attachment | TLS + identity + ALB land | day identity lands |
-| TLS, reverse proxy, service unit, compose file | orchestration story earned | — |
-| external anchor for audit chain | KMS + append-only store | — |
-| connection pool + read replica | two processes (delayed by single-writer lock) | — |
-| trace sink + retention | sink exists | — |
-| ANN / real vector store | corpus × 10 | — |
-| object storage (S3) | corpus refresh slower than deploy | — |
+| rate limiter attachment | TLS + identity + ALB land | WS1 (identity day) |
+| TLS, reverse proxy, service unit, compose file | orchestration story earned | WS9 (K8s/service-unit; staging covered by Phase 0-A Compose+Nginx) |
+| external anchor for audit chain | KMS + append-only store | WS9 (KMS anchor) |
+| connection pool + read replica | two processes (delayed by single-writer lock) | WS7/WS9 (pool + PgBouncer) |
+| trace sink + retention | sink exists | WS7 (trace sink) |
+| ANN / real vector store | corpus × 10 | WS5 (real code store) |
+| object storage (S3) | corpus refresh slower than deploy | WS7 (S3 object storage) |
 
 ## Clean Claims (carried forward)
 

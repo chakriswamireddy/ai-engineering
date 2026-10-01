@@ -345,4 +345,4 @@ class Retriever:
             lex = [all_lex[i] for i in candidates]
         else:
             lex = [0.0] * len(candidates)
-        return [fuse_score(alpha, s, l) for s, l in zip(sem, lex)]
+        return [fuse_score(alpha, s, lex_score) for s, lex_score in zip(sem, lex)]

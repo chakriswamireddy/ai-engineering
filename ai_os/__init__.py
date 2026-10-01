@@ -20,10 +20,10 @@ from ai_os.contract import (
     ProviderError, RateLimitError, ProviderTimeout, NetworkError,
     InvalidKeyError, BadRequestError,
 )
-from ai_os.config import build_gateway_from_env, provider_from_spec, _provider_specs
+from ai_os.config import build_gateway_from_env, provider_from_spec
 
 __all__ = [
-    "OpenAIProvider", "AnthropicProvider",
+    "OpenAIProvider", "AnthropicProvider", "CloudflareProvider",
     "ModelGateway", "Ledger", "MODEL_PRICES", "cost_of", "CallRecord",
     "Usage", "Completion", "Embedding",
     "ProviderError", "RateLimitError", "ProviderTimeout", "NetworkError",
