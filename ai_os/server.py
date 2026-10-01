@@ -26,10 +26,29 @@ from ai_os.config import build_gateway_from_env
 from ai_os.contract import (
     ProviderError, RateLimitError, InvalidKeyError, BadRequestError, ProviderTimeout,
 )
+from ai_os.health import liveness, readiness
 from ai_os.rag import (
     RagStore, DimensionMismatch, StoreVersionError,
     code_store_path_from_env, run_rag, store_path_from_env,
 )
+from ai_os.state import (
+    state_store_path_from_env,
+    acquire_single_writer_lock,
+    SecondWriter,
+)
+
+# Day 29 §5.4 — single-writer guard: acquire exclusive lock at boot.
+# AI_OS_LOCK_STATE=0 disables the guard (off-switch, default on).
+_lock_state = os.getenv("AI_OS_LOCK_STATE", "1").strip().lower() not in {"0", "false", "off", "no"}
+_writer_lock = None
+if _lock_state:
+    state_path = state_store_path_from_env()
+    if state_path:
+        try:
+            _writer_lock = acquire_single_writer_lock(state_path)
+        except SecondWriter as e:
+            # Refuse to start — the message names the holder and the fix
+            raise SystemExit(str(e))
 
 try:
     gateway = build_gateway_from_env()
@@ -90,6 +109,49 @@ def health() -> dict[str, Any]:
         "max_delay_s": gateway.max_delay,
         "total_budget_s": gateway.total_budget_s,
     }
+
+
+# ====================================================== Day 29 — health probes
+# Two additive routes: /healthz (liveness) and /readyz (readiness).
+# The old /health stays byte-identical because something in the series may
+# depend on it, and deleting an anti-pattern by adding a correct thing is the
+# only way to do it without breaking a contract.
+#
+# server.py:35's import-time gateway build is NOT moved: hoisting it would be
+# the right refactor, but it changes when a misconfiguration becomes visible,
+# and the day refuses to move a failure's timing inside a day whose deliverable
+# is a container. The comment at the seam says exactly that.
+
+@app.get("/healthz")
+def healthz() -> dict[str, Any]:
+    """Liveness probe — touches nothing external. Returns 200 with empty checks."""
+    status, body = liveness()
+    return JSONResponse(body, status_code=status)
+
+
+@app.get("/readyz")
+def readyz() -> dict[str, Any]:
+    """Readiness probe — checks gateway, store, database, state.
+
+    Returns 200 if all pass, 503 if any fails. Body is a table of named checks.
+    """
+    # Use the module-level gateway if available, otherwise try to build
+    gw_builder = lambda: gateway
+    # Store loader uses the identity-keyed cache (Day 28)
+    def store_loader(corpus: str):
+        path = code_store_path_from_env() if corpus == "code" else store_path_from_env()
+        try:
+            from ai_os.rag import load_store_cached
+            return load_store_cached(path)
+        except Exception:
+            return None
+    state_path = state_store_path_from_env()
+    status, body = readiness(
+        gateway_builder=gw_builder,
+        store_loader=store_loader,
+        state_path=state_path,
+    )
+    return JSONResponse(body, status_code=status)
 
 
 @app.post("/chat")
