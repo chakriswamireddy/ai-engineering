@@ -1,0 +1,29 @@
+# Day 29 — deny-by-default allow-list.
+# The manifest in docs/deployment.yaml is the source of truth for what ships.
+# An exclusion list is a list of things someone remembered; the failure mode of
+# forgetting is silent and irreversible in a layer. An allow-list fails loud:
+# a new file is excluded by default and shows up in N1 as a context path with
+# no reason.
+
+# Deny everything by default
+*
+
+# Allow only the manifest's include set (paths relative to repo root)
+!ai_os/
+!tools/
+!policy.yaml
+!.env.example
+!requirements.txt
+!data/store.json
+
+# Explicit non-size exclusions (named because they are the ones that matter)
+.env
+.git/
+.venv/
+**/__pycache__/
+**/*.pyc
+*.pem
+.netrc
+.aws/
+data/*
+!data/store.json
