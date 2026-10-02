@@ -121,8 +121,8 @@ def render_list(records: list, *, state: str | None = None, tool: str | None = N
                                               approval_mod.STATE_APPROVED)]
     decided = [r for r in rows if r not in pending]
     if not rows:
-        print("(no approval records — expected on the default grants: the only gated "
-              "client is harness-only and no shipped question touches it)")
+        print("(no approval records — expected on the default grants: every gated "
+              "client is harness-only and no shipped question touches them)")
         return
     print(f"{'request_id':<14}{'tool':<26}{'state':<13}{'requested_by':<14}"
           f"{'expires_at':<14}{'signals'}")

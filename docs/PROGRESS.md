@@ -1866,3 +1866,94 @@ python tools/regress_all.py --fast       # day 20 gate: fixtures + golden rows o
 LLM_PROVIDERS=cloudflare: python tools/build_code_store.py --corpus corpus_code/saleor --out data/code_store.json --batch 100  # real build (resume; see gap 6)
 python tools/retrieval_day10.py --store data/code_store.json --doc-store data/store.json  # real corpora
 ```
+## Workstreams WS0–WS9 — the deployable-product plan
+
+Status per `docs/deployable-product-plan.md` (WS0 committed `45130cf`; WS1+ live in
+the tree, verified by the fixtures below — nothing here is claimed without a
+fixture that goes red when it breaks):
+
+| WS | scope | fixture | status |
+|----|-------|---------|--------|
+| WS0 | guardrails: pinned deps, prod gate, SBOM, CI | `tools/gate_prod.py` | `DONE` (committed) |
+| WS1 | OIDC authN + principal plumbing | `tools/auth_smoke.py` (U1–U7) | green |
+| WS2 | `/agent`, `/sql`, quotas behind auth | in `tools/auth_smoke.py` + server | green |
+| WS3 | write path (SafeSql write gates) | `tools/write_smoke.py` (W1–W6) | green |
+| WS4 | approval decide/apply + compensation | `tools/apply_smoke.py` (F1–F7) | green |
+| WS5 | real code store (self-hosted Ollama bge) | `tools/code_store_smoke.py` (C1–C5) | green (live path needs Ollama) |
+| WS6 | semantic eval L2/L3 + thresholds join | `tools/semantic_smoke.py` (E1–E6) | green (live path needs a model) |
+| WS7 | trace sink, retention, per-route metrics | `tools/trace_sink_smoke.py` (T1–T6) | green (Postgres sink staging) |
+| WS8 | sandboxed `run_tests` (`effect: execute`) | `tools/sandbox_smoke.py` (B1–B6) | green |
+| WS9 | survive: deploy/secrets/DB/rate/DR | `tools/survive_smoke.py` (R1–R11, 34 checks) | green offline; staging steps named |
+
+### WS9 — what shipped and how it is proven
+
+- **Deploy** — `k8s/{deployment,external-secrets}.yaml`, `k8s/hpa.yaml` (2–10),
+  `k8s/pdb.yaml` (minAvailable 1), rolling update with `maxUnavailable: 0`,
+  readiness `/readyz` = gateway+store+DB+state (named checks), liveness
+  `/healthz` touches nothing. One-writer across replicas:
+  `ai_os/state.py::acquire_distributed_writer_lock` (Postgres advisory lock when
+  `STATE_ADVISORY_DSN` set; **byte-identical Day-29 file lock otherwise**, and
+  file-lock fallback when the DB is unreachable — R11 proves both).
+- **Secrets** — External Secrets → Vault, 15m rotation, no `.env` in the image.
+  Verified at the **image level**: `docker run ai-layer-ws9` without env →
+  `/readyz` **503**, `checks.gateway.ok=false` (R2 runs this live when docker +
+  the image are present, SKIP-with-reason otherwise).
+- **DB** — `saleor-platform/writer_role.sql` (table-scoped writer, never
+  `GRANT ALL`), `replica_user.sql` untouched (SELECT-only), `pgbouncer.ini`
+  (reader/writer pools), `migrations/001_ws9_roles.sql` (idempotent + PITR
+  wal_level guard).
+- **Rate/abuse** — `ai_os/rate.py` quotas per tenant/principal (Redis when
+  `REDIS_URL`, memory otherwise), 429 + `Retry-After` in the identity middleware;
+  off by default so offline suites never 429; `AGENT_BUDGET_USD` kills the loop
+  with the `budget` termination.
+- **Privacy** — `columns_deny` now enforced on **results**
+  (`DataAgent._apply_columns_deny`; drop recorded in `result.redacted`), PII
+  redaction in logs/traces (R7), encryption at rest stated as the managed-DB
+  default in `docs/runbook.md`.
+- **Audit immutability** — `ai_os/audit.py::seal_audit/verify_seal`: the chain
+  head sealed to a second location (`AUDIT_SEAL_PATH`, KMS object in staging).
+  Closes `verify()`'s structural blind spot: **tail truncation** and head
+  rewrites are now detected by name (R8 truncates the log and shows the refusal).
+- **DR** — RPO 15m / RTO 1h written down; `scripts/restore_drill.sh`,
+  `scripts/chaos_kill_replica.sh` (kill 1 replica, PDB keeps 1, advisory lock
+  keeps one writer), `scripts/k6-50rps.js` (50 rps / 5m / p95 < 2s). Staging
+  runs them; the scripts are the artifact.
+- **Observability** — `grafana/dashboard.json` (p50/p95 by route, cost/run,
+  refusal rate, approval-queue age) + `prometheus/alerts.yaml` (`EvalDrop`,
+  `QuotaExhaustion`, `SinkLag`, `RouteP95High`), every alert naming its
+  `docs/runbook.md` section.
+
+**Defects found and fixed while closing WS9** (each was red or dishonest first):
+1. Image `HEALTHCHECK` called `curl`, absent from `python:3.12-slim` → every
+   container would be marked unhealthy forever. Now uses the interpreter in the
+   image; `health=healthy` verified live.
+2. `check()` in `test_day{24,26,27}.py`/`test_rag.py` never raised → gate_prod's
+   `pytest -q` leg could not go red on a failed day check. Now raises under
+   `PYTEST_CURRENT_TEST` (script mode unchanged).
+3. `demonstrate.py` cell accounting counted named residuals as filled cells →
+   `-13 unaccounted`, exit 1. Now: every empty cell must be named **in its own
+   record**; extra residuals are reported, not penalized (0/0 target held).
+4. Day-27 registration-site comment + `test_day27` still asserted "no decision
+   route exists" after WS4 added it. Comment now carries the WS1/WS4 amendments
+   (history preserved); the test asserts the route is POST-only, `_auth_guard` +
+   `_route_actor` attributed, contract recorded at the site.
+5. `approval_smoke` H2m / `test_day27` asserted the harness-only set was
+   `(export_customer_report,)`; WS8's `run_tests` made it a two-element set —
+   assertions updated to the same-strength invariant (both refused for every
+   shipped principal, `default` still exactly seven tools), prose "only gated
+   client" → "every gated client".
+6. `?reveal=1` note claimed it was "unauthenticated" unconditionally; now states
+   which world it is in (`ALLOW_ANON`) at runtime.
+
+**Staging-only (named, not claimed):** restore drill against real WAL, chaos
+kill under kubectl, k6 50 rps against a live cluster, KMS-backed seal location,
+real Redis quotas — all scripted in `scripts/` and owned by `docs/runbook.md`.
+
+**Re-verify WS9:**
+```bash
+.venv/bin/python tools/survive_smoke.py    # R1–R11 (docker row runs when built)
+.venv/bin/python tools/regress_all.py      # full: 31 rows, 0 moved
+.venv/bin/python tools/demo_smoke.py --regress
+.venv/bin/python tools/demonstrate.py --json   # exit 0, 0 unaccounted
+.venv/bin/python -m pytest -q && .venv/bin/ruff check ai_os tools/ && .venv/bin/mypy ai_os
+```

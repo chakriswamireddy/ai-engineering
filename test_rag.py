@@ -8,6 +8,7 @@ path. Generation is a fake `Completion`; nothing here needs a model.
 """
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -29,6 +30,10 @@ def check(label: str, cond: bool, detail: str = ""):
     global FAILS
     if not cond:
         FAILS += 1
+        # gate_prod leg 3 is `pytest -q`: a failed check must fail the run
+        # there, while as a script this keeps printing and reports at the end.
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            raise AssertionError(label + (f"  ({detail})" if detail else ""))
     print(f"[{'OK  ' if cond else 'FAIL'}] {label}" + (f"  ({detail})" if detail else ""))
 
 

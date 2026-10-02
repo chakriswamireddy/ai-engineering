@@ -765,6 +765,11 @@ _BUILTIN_POLICY: dict[str, Any] = {
     "statement_timeout_ms": 2_000,
     "lock_timeout_ms": 1_000,
     "idle_in_transaction_session_timeout_ms": 5_000,
+    # WS3 — the write path, closed by default: no write head, no write table,
+    # approval always required. Enabling is a reviewed file change.
+    "statement_allow_write": [],
+    "write_tables_allow": [],
+    "require_approval": True,
 }
 
 
@@ -784,6 +789,14 @@ class Policy:
     columns_deny: dict[str, list[str]]
     definitions: dict[str, dict[str, Any]]
     statement_allow: list[str] = field(default_factory=lambda: ["select", "with"])
+    # WS3 — the write path. `statement_allow_write` names the permitted write
+    # heads (subset of insert/update/delete), `write_tables_allow` the tables a
+    # write may touch, `require_approval` gates every write on an approval id.
+    # All default closed: a write is possible only with heads + tables granted
+    # together in the file, an `effect: write` grant, and an approval id.
+    statement_allow_write: list[str] = field(default_factory=list)
+    write_tables_allow: list[str] = field(default_factory=list)
+    require_approval: bool = True
     row_limit: int = 100
     max_cost: float = 1_000_000.0
     statement_timeout_ms: int = 2_000
@@ -807,6 +820,12 @@ class Policy:
                          for k, v in (raw.get("definitions") or {}).items()},
             statement_allow=[str(s).lower() for s in
                              (raw.get("statement_allow") or ["select", "with"])],
+            statement_allow_write=[str(s).lower() for s in
+                                   (raw.get("statement_allow_write") or [])],
+            write_tables_allow=[str(t).strip().lower()
+                                for t in (raw.get("write_tables_allow") or [])],
+            require_approval=(False if raw.get("require_approval") is False
+                              else True),
             row_limit=int(raw.get("row_limit", 100)),
             max_cost=float(raw.get("max_cost", 1_000_000)),
             statement_timeout_ms=int(raw.get("statement_timeout_ms", 2_000)),
@@ -927,6 +946,115 @@ class Policy:
                            detail={"cost_estimate": est, "max_cost": self.max_cost})
         return v
 
+    # ------------------------------------------------------- WS3 — write path
+    def check_write(self, sql_or_verdict: str | Verdict, *,
+                    approval_id: str | None = None,
+                    granted_tables: Any = None) -> Verdict:
+        """The write choke point: head → tables → columns → grant → approval.
+
+        A write is possible only with all four: the head in
+        `statement_allow_write`, every referenced table in `write_tables_allow`
+        *and* in the caller's `effect: write` grant (`granted_tables`), no
+        denied column named, and an approval id when `require_approval` holds.
+        Anything else is a `policy` rejection and `Wrote? = no`. Reads
+        (`select`/`with`) are refused here — the write path is write-only, and
+        the read path is `inspect()`.
+        """
+        v = (sql_or_verdict if isinstance(sql_or_verdict, Verdict)
+             else normalize(sql_or_verdict))
+        if not v.ok:
+            return v
+        tokens = tokenize(v.sql)
+        words = [t.text.lower() for t in tokens if t.kind == "word"]
+        if not words:
+            return _reject(v.raw, stage=STAGE_PARSE, error_kind=ERROR_INVALID_SQL,
+                           cls=REPAIRABLE, message="empty SQL statement", sql=v.sql)
+        head = words[0]
+        if head not in set(self.statement_allow_write):
+            return _reject(v.raw, stage=STAGE_POLICY, error_kind=ERROR_POLICY,
+                           cls=POLICY,
+                           message=("the statement type is not allowed on the write "
+                                    "path (no write head granted)"),
+                           sql=v.sql, detail={"head": head})
+        target = _write_target(head, words)
+        if target is None:
+            return _reject(v.raw, stage=STAGE_PARSE, error_kind=ERROR_INVALID_SQL,
+                           cls=REPAIRABLE,
+                           message=(f"cannot parse the {head} target table"),
+                           sql=v.sql, detail={"head": head})
+        # No second write/DDL keyword rides along (`INTO` is the insert syntax
+        # itself; everything else — `returning`, stacked DDL, a second head —
+        # waits for a real write grammar in a later workstream).
+        extra = sorted({w for w in words[1:]
+                        if w in WRITE_KEYWORDS and w != "into"})
+        if extra:
+            return _reject(v.raw, stage=STAGE_POLICY, error_kind=ERROR_POLICY,
+                           cls=POLICY,
+                           message=("the write statement carries keywords the write "
+                                    "path does not support"),
+                           sql=v.sql, detail={"keywords": extra})
+        # Every table the statement names must be write-granted: the target in
+        # the file's `write_tables_allow` and in the caller's grant, and any
+        # other referenced table (e.g. an INSERT..SELECT source) likewise.
+        known = set(self.tables_allow) | set(self.write_tables_allow)
+        referenced = sorted({w for w in words if w in known})
+        granted = {str(t).lower() for t in (granted_tables or [])}
+        file_allowed = set(self.write_tables_allow)
+        outside_file = sorted(set(referenced) - file_allowed)
+        if outside_file:
+            return _reject(v.raw, stage=STAGE_POLICY, error_kind=ERROR_POLICY,
+                           cls=POLICY,
+                           message=("the write references a table outside the "
+                                    "write allow-list"),
+                           sql=v.sql, detail={"tables": outside_file})
+        outside_grant = sorted(set(referenced) - granted)
+        if outside_grant:
+            return _reject(v.raw, stage=STAGE_POLICY, error_kind=ERROR_POLICY,
+                           cls=POLICY,
+                           message=("the write references a table the caller's "
+                                    "`effect: write` grant does not cover"),
+                           sql=v.sql, detail={"tables": outside_grant})
+        # Denied columns are never named, even on a write.
+        deny_names = {c.lower() for cols in self.columns_deny.values()
+                      for c in cols}
+        denied = sorted(set(words) & deny_names)
+        if denied:
+            return _reject(v.raw, stage=STAGE_POLICY, error_kind=ERROR_POLICY,
+                           cls=POLICY,
+                           message=("the write names a column the policy denies "
+                                    "(sensitive data is never writable blind)"),
+                           sql=v.sql, detail={"columns": denied})
+        if self.require_approval and not (approval_id or "").strip():
+            return _reject(v.raw, stage=STAGE_POLICY, error_kind=ERROR_POLICY,
+                           cls=POLICY,
+                           message=("the write carries no approval id "
+                                    "(`require_approval` is on)"),
+                           sql=v.sql, detail={"head": head, "table": target})
+        v.shape = Shape(tables=referenced or [target], columns=[])
+        return v
+
+
+def _write_target(head: str, words: list[str]) -> str | None:
+    """The write target table from head position — `INSERT INTO t`, `UPDATE t`,
+    `DELETE FROM t`. Quoting/bracketing stripped, lowercased. `None` when the
+    head has no parseable target."""
+    try:
+        if head == "insert":
+            if "into" in words:
+                raw = words[words.index("into") + 1]
+            else:
+                raw = words[1]
+        elif head == "update":
+            raw = words[1]
+        elif head == "delete":
+            raw = words[words.index("from") + 1] if "from" in words else words[1]
+        else:
+            return None
+    except IndexError:
+        return None
+    name = raw.strip().strip('"').strip("'").strip("`").strip("[]").lower()
+    return name or None
+
 
 def _policy_path_from_env() -> Path | None:
     import os
@@ -999,6 +1127,16 @@ class SafeSql:
         if not v.ok:
             return v
         return self.policy.check_cost(v, explain_cost=self.explain_cost)
+
+    def inspect_write(self, sql: str, *, approval_id: str | None = None,
+                    granted_tables: Any = None) -> Verdict:
+        """Normalize → write-policy in one call (the write half of the choke
+        point). Reads are refused here; use `inspect()` for the read path."""
+        v = normalize(sql)
+        if not v.ok:
+            return v
+        return self.policy.check_write(v, approval_id=approval_id,
+                                       granted_tables=granted_tables)
 
     def rewrite(self, v: Verdict, *, row_limit: int) -> str:
         if not v.ok:

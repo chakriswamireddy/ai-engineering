@@ -144,6 +144,12 @@ class QueryResult:
     executed_sql: str | None = None
     cost_estimate: float | None = None
     statement_timeout_ms: int | None = None
+    # WS9 — result-side privacy: `columns_deny` enforced on *results*, not just
+    # statements. A denied column that reaches the engine (e.g. via `SELECT *`
+    # on a future schema carrying it) is dropped here — values never reach the
+    # model, the shape stays (Day 26's no-partial-rows contract), and the drop
+    # is recorded in `redacted`.
+    redacted: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -170,6 +176,8 @@ class QueryResult:
             out["cost_estimate"] = self.cost_estimate
         if self.statement_timeout_ms is not None:
             out["statement_timeout_ms"] = self.statement_timeout_ms
+        if self.redacted:
+            out["redacted"] = list(self.redacted)
         return out
 
 
@@ -190,6 +198,86 @@ def failure(sql: str, *, error_kind: str, message: str,
                        rejection_class=(rejection_class
                                         or sql_safety.classify(error_kind)),
                        stage=stage, statement_timeout_ms=statement_timeout_ms)
+
+
+# ------------------------------------------------------- WS3 — write result
+
+@dataclass
+class WriteResult:
+    """A write's observation: `wrote` is measured, never asserted.
+
+    `wrote=True` iff the statement committed (`ok` and `executed` with no
+    rollback); `rows_changed` is the engine's rowcount on success, else 0.
+    A policy refusal has `executed=False, wrote=False`; an engine failure
+    after `BEGIN` has `executed=True, wrote=False, rolled_back=True`.
+    """
+
+    ok: bool
+    sql: str
+    validation: str = "write"
+    executed: bool = False
+    wrote: bool = False
+    rows_changed: int = 0
+    row_count: int = 0
+    rolled_back: bool = False
+    elapsed_ms: float = 0.0
+    principal: str | None = None
+    approval_id: str | None = None
+    note: str | None = None
+    error: str | None = None
+    error_kind: str | None = None
+    retryable: bool = False
+    rejection_class: str | None = None
+    stage: str | None = None
+    statement_timeout_ms: int | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "ok": self.ok, "sql": self.sql, "validation": self.validation,
+            "executed": self.executed, "wrote": self.wrote,
+            "rows_changed": self.rows_changed, "row_count": self.row_count,
+            "rolled_back": self.rolled_back,
+            "elapsed_ms": round(self.elapsed_ms, 3),
+        }
+        if self.principal:
+            out["principal"] = self.principal
+        if self.approval_id:
+            out["approval_id"] = self.approval_id
+        if self.note:
+            out["note"] = self.note
+        if self.error:
+            out["error"] = self.error
+        if self.error_kind:
+            out["error_kind"] = self.error_kind
+        if self.retryable:
+            out["retryable"] = True
+        if self.rejection_class:
+            out["rejection_class"] = self.rejection_class
+        if self.stage:
+            out["stage"] = self.stage
+        if self.statement_timeout_ms is not None:
+            out["statement_timeout_ms"] = self.statement_timeout_ms
+        return out
+
+
+def write_failure(sql: str, *, error_kind: str, message: str,
+                  retryable: bool = False, executed: bool = False,
+                  rolled_back: bool = False,
+                  rejection_class: str | None = None,
+                  stage: str | None = None,
+                  principal: str | None = None,
+                  approval_id: str | None = None,
+                  statement_timeout_ms: int | None = None) -> WriteResult:
+    """A typed write failure — an observation, never an exception. `wrote` is
+    always `False` here; the only question is whether anything rolled back."""
+    return WriteResult(ok=False, sql=sql, executed=executed, wrote=False,
+                       rows_changed=0, rolled_back=rolled_back,
+                       error=message, error_kind=error_kind,
+                       retryable=retryable,
+                       rejection_class=(rejection_class
+                                        or sql_safety.classify(error_kind)),
+                       stage=stage, principal=principal, approval_id=approval_id,
+                       statement_timeout_ms=statement_timeout_ms)
 
 
 def sql_error_kind(exc: BaseException) -> str:
@@ -499,6 +587,71 @@ class SqliteDataStore:
     def close(self) -> None:
         self._conn.close()
 
+    # ------------------------------------------------------- WS3 — write path
+    def execute_write(self, sql: str, principal: str, *,
+                      approval_id: str | None = None,
+                      timeout_ms: int | None = None) -> WriteResult:
+        """One write transaction: `BEGIN IMMEDIATE` → execute → `COMMIT`.
+
+        The session guard (`PRAGMA query_only`) is lifted for the transaction
+        and restored in `finally` — the pragma stays the default posture, and
+        the lift is a named, bounded region rather than a mode. `timeout_ms`
+        aborts runaway statements via a progress handler (sqlite has no server
+        wall); errors roll back, so a failure never half-writes.
+        """
+        started = time.monotonic()
+        self.queries += 1
+        head_parts = (sql or "").strip().split(None, 1)
+        head_word = head_parts[0].strip("(\"").lower() if head_parts else ""
+        if head_word not in ("insert", "update", "delete"):
+            # Defense in depth behind `check_write`: the store never writes
+            # what is not a write, even when called directly.
+            return write_failure(sql, error_kind=sql_safety.ERROR_POLICY,
+                                 message=("not a write statement on the write "
+                                          "path (use query() for reads)"),
+                                 executed=False,
+                                 stage=sql_safety.STAGE_POLICY,
+                                 principal=principal, approval_id=approval_id)
+        deadline = (None if not timeout_ms or timeout_ms <= 0
+                    else started + timeout_ms / 1000.0)
+
+        def _abort() -> int:
+            return 1 if deadline is not None and time.monotonic() > deadline else 0
+
+        conn = self._conn
+        conn.execute("PRAGMA query_only = OFF")
+        if deadline is not None:
+            conn.set_progress_handler(_abort, 1000)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                cur = conn.execute(sql)
+                changed = cur.rowcount if cur.rowcount >= 0 else 0
+                conn.execute("COMMIT")
+            except Exception as exc:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:                           # noqa: BLE001
+                    pass                                    # rollback best-effort; the failure below is the fact
+                elapsed = (time.monotonic() - started) * 1000
+                return write_failure(sql, error_kind=sql_error_kind(exc),
+                                     message=f"database error: {exc}",
+                                     executed=True, rolled_back=True,
+                                     stage=sql_safety.STAGE_EXECUTE,
+                                     principal=principal, approval_id=approval_id)
+            elapsed = (time.monotonic() - started) * 1000
+            return WriteResult(ok=True, sql=sql, executed=True, wrote=True,
+                               rows_changed=changed, row_count=changed,
+                               elapsed_ms=elapsed, principal=principal,
+                               approval_id=approval_id,
+                               statement_timeout_ms=timeout_ms)
+        finally:
+            try:
+                conn.set_progress_handler(None, 0)
+            except Exception:                               # noqa: BLE001
+                pass
+            conn.execute("PRAGMA query_only = ON")
+
 
 class PostgresDataStore:
     """The real thing: `psycopg` over `SALEOR_READONLY_DB_URL`, read-only twice.
@@ -526,6 +679,8 @@ class PostgresDataStore:
         self.row_limit = row_limit_from_env() if row_limit is None else max(1, row_limit)
         self.statement_timeout_ms = int(statement_timeout_ms)
         self._psycopg = psycopg
+        self._url = url
+        self._write_conn = None
         self._conn = psycopg.connect(url, autocommit=False)
         with self._conn.cursor() as cur:
             # Day 15 §6 — the *server-side* half of the timeout story. Day 13's
@@ -599,7 +754,109 @@ class PostgresDataStore:
         return row[0] if row else None
 
     def close(self) -> None:
+        pending = getattr(self, "_write_conn", None)
+        if pending is not None:
+            try:
+                pending.close()
+            except Exception:                               # noqa: BLE001
+                pass
+            self._write_conn = None
         self._conn.close()
+
+    # ------------------------------------------------------- WS3 — write path
+    def _write_session(self):
+        """A second session without `default_transaction_read_only`.
+
+        The read session's guard is never toggled: toggling it would make one
+        flag mean two things across interleaved calls. The write session fails
+        closed when the role is the read-only one — a writer URL pointed at a
+        reader role refuses rather than writing as the wrong principal.
+        """
+        conn = getattr(self, "_write_conn", None)
+        if conn is not None:
+            try:
+                conn.execute("SELECT 1")
+                return conn
+            except Exception:                               # noqa: BLE001
+                try:
+                    conn.close()
+                except Exception:                           # noqa: BLE001
+                    pass
+                self._write_conn = None
+        psycopg = self._psycopg
+        conn = psycopg.connect(self._url, autocommit=False)
+        with conn.cursor() as cur:
+            cur.execute(f"SET statement_timeout = {self.statement_timeout_ms}")
+            cur.execute("SET lock_timeout = 1000")
+            cur.execute("SELECT current_user, "
+                        "current_setting('default_transaction_read_only')")
+            user, readonly = cur.fetchone()
+            if str(user) == "saleor_read_only":
+                conn.close()
+                raise PermissionError(
+                    "write session refused: connected as the read-only role "
+                    f"{user!r} — point the writer at a role with write grants")
+            if str(readonly).lower() not in {"off", "false", "0", "no"}:
+                conn.close()
+                raise PermissionError(
+                    "write session refused: default_transaction_read_only is on")
+        self._write_conn = conn
+        return conn
+
+    def execute_write(self, sql: str, principal: str, *,
+                      approval_id: str | None = None,
+                      timeout_ms: int | None = None) -> WriteResult:
+        """One write transaction on the write session: execute → COMMIT.
+
+        `BEGIN` is psycopg's implicit transaction (`autocommit=False`); the
+        explicit act is the `COMMIT`, and any failure rolls back. `rowcount`
+        is the engine's measured `rows_changed`.
+        """
+        try:
+            conn = self._write_session()
+        except Exception as exc:
+            return write_failure(sql, error_kind=sql_safety.ERROR_POLICY,
+                                 message=f"write session refused: {exc}",
+                                 executed=False,
+                                 stage=sql_safety.STAGE_POLICY,
+                                 principal=principal, approval_id=approval_id)
+        head_parts = (sql or "").strip().split(None, 1)
+        head_word = head_parts[0].strip("(\"").lower() if head_parts else ""
+        if head_word not in ("insert", "update", "delete"):
+            return write_failure(sql, error_kind=sql_safety.ERROR_POLICY,
+                                 message=("not a write statement on the write "
+                                          "path (use query() for reads)"),
+                                 executed=False,
+                                 stage=sql_safety.STAGE_POLICY,
+                                 principal=principal, approval_id=approval_id)
+        started = time.monotonic()
+        self.queries += 1
+        wall = timeout_ms if timeout_ms else self.statement_timeout_ms
+        try:
+            with conn.cursor() as cur:
+                if timeout_ms:
+                    cur.execute(f"SET LOCAL statement_timeout = {int(timeout_ms)}")
+                cur.execute(sql)
+                changed = cur.rowcount if cur.rowcount >= 0 else 0
+            conn.commit()
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:                               # noqa: BLE001
+                pass
+            elapsed = (time.monotonic() - started) * 1000
+            return write_failure(sql, error_kind=sql_error_kind(exc),
+                                 message=f"database error: {exc}",
+                                 executed=True, rolled_back=True,
+                                 stage=sql_safety.STAGE_EXECUTE,
+                                 principal=principal, approval_id=approval_id,
+                                 statement_timeout_ms=wall)
+        elapsed = (time.monotonic() - started) * 1000
+        return WriteResult(ok=True, sql=sql, executed=True, wrote=True,
+                           rows_changed=changed, row_count=changed,
+                           elapsed_ms=elapsed, principal=principal,
+                           approval_id=approval_id,
+                           statement_timeout_ms=wall)
 
 
 class DataAgent:
@@ -702,8 +959,37 @@ class DataAgent:
                                                        validate=validate),
                                 statement=sql)
 
+    def _deny_names(self) -> set[str]:
+        """WS9 — the global denied-column name set (deny by name, fail closed).
+
+        Mirrors the statement layer (`sql_safety.check_write`): a denied name
+        is dropped from *results* whatever table it arrived on, because a
+        `SELECT *` on a future schema is exactly how a statement-allowed query
+        returns a statement-denied value.
+        """
+        return {c.lower() for cols in (self.policy.columns_deny or {}).values()
+                for c in (cols or [])}
+
+    def _apply_columns_deny(self, result: "QueryResult") -> "QueryResult":
+        """WS9 — enforce `columns_deny` on results, not just statements."""
+        deny = self._deny_names()
+        if not deny or not result.ok or not result.columns:
+            return result
+        drop = [i for i, col in enumerate(result.columns)
+                if str(col).lower() in deny]
+        if not drop:
+            return result
+        drop_set = set(drop)
+        result.redacted = [str(result.columns[i]) for i in drop]
+        result.columns = [c for i, c in enumerate(result.columns)
+                          if i not in drop_set]
+        result.rows = [[v for i, v in enumerate(row) if i not in drop_set]
+                       for row in result.rows]
+        result.row_count = len(result.rows)
+        return result
+
     def _run_core(self, sql: str, *, row_limit: int | None = None,
-                  validate: bool = True) -> QueryResult:
+                   validate: bool = True) -> QueryResult:
         limit = min(self.row_limit if row_limit is None else max(1, row_limit),
                     max(1, self.policy.row_limit))
         if not validate:
@@ -723,6 +1009,8 @@ class DataAgent:
 
         executed_sql = self.safety.rewrite(verdict, row_limit=limit)
         result = self.store.query(executed_sql, row_limit=limit)
+        if result.ok:
+            self._apply_columns_deny(result)
         # `sql` stays the artifact the *model* wrote (the trace's `gen_sql`); the
         # normalized + LIMIT-rewritten form is recorded separately, so "what was
         # asked" and "what ran" cannot be confused.
@@ -734,6 +1022,62 @@ class DataAgent:
         result.statement_timeout_ms = getattr(self.store, "statement_timeout_ms", None)
         if result.error_kind:
             result.rejection_class = sql_safety.classify(result.error_kind)
+        return result
+
+    # ------------------------------------------------------- WS3 — write path
+    def run_write(self, sql: str, *, principal: str,
+                  approval_id: str | None = None,
+                  granted_tables: Any = None,
+                  timeout_ms: int | None = None) -> WriteResult:
+        """The WS3 choke point: write-policy → transacted execute.
+
+        `granted_tables` are the tables the caller's `effect: write` grant
+        covers; `approval_id` is the approved request this write applies (WS4
+        owns the decide/apply workflow that produces it — this seam only
+        *requires* it). No grant + approval ⇒ policy refusal, `Wrote? = no`.
+        The loop never calls this (no tool exposes it until WS4 wires one).
+        """
+        verdict = self.safety.inspect_write(sql, approval_id=approval_id,
+                                            granted_tables=granted_tables)
+        if not verdict.ok:
+            return write_failure(sql, error_kind=verdict.error_kind or
+                                 sql_safety.ERROR_POLICY,
+                                 message=verdict.message or "rejected",
+                                 executed=False,
+                                 stage=verdict.stage,
+                                 principal=principal, approval_id=approval_id)
+        return self._trace_write(sql, principal, approval_id, timeout_ms)
+
+    def _trace_write(self, sql: str, principal: str, approval_id: str | None,
+                     timeout_ms: int | None) -> WriteResult:
+        """One write inside a `client` span (mirrors `_trace_call`)."""
+        tr = obs.current_trace()
+        span = None
+        if tr is not None and getattr(tr, "recording", False):
+            span = tr.start_span(obs.KIND_TOOL, "postgres.write",
+                                 span_kind=obs.SPAN_CLIENT, remote=True,
+                                 remote_endpoint=self._endpoint(),
+                                 component="data",
+                                 attributes={"statement_sha256":
+                                             obs.sha256_text(sql)})
+        try:
+            result = self.store.execute_write(sql, principal,
+                                              approval_id=approval_id,
+                                              timeout_ms=timeout_ms)
+        except BaseException as exc:
+            if span is not None:
+                obs.end_span(span, status=obs.status_for_error(exc),
+                             error=obs.error_fact(exc))
+                tr.leave(span)
+            raise
+        if span is not None:
+            span.update(executed=result.executed, wrote=result.wrote,
+                        rows_changed=result.rows_changed,
+                        rolled_back=result.rolled_back,
+                        db_elapsed_ms=round(float(result.elapsed_ms), 3))
+            obs.end_span(span, status=(obs.STATUS_OK if result.ok
+                                       else obs.STATUS_ERROR))
+            tr.leave(span)
         return result
 
     # --------------------------------------------------- parameterized resolvers

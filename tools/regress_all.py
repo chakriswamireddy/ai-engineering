@@ -77,6 +77,14 @@ SUITES: list[tuple[str, str, list[str]]] = [
     ("I1–I9 injection firewall", "tools/injection_smoke.py", []),
     ("C1–C9 permission boundary", "tools/permission_smoke.py", []),
     ("H1–H9 human approval", "tools/approval_smoke.py", []),
+    ("U1–U7 auth identity", "tools/auth_smoke.py", []),
+    ("W1–W6 write path", "tools/write_smoke.py", []),
+    ("F1–F7 approval execution", "tools/apply_smoke.py", []),
+    ("C1–C5 code store (WS5)", "tools/code_store_smoke.py", []),
+    ("E1–E6 semantic eval (WS6)", "tools/semantic_smoke.py", []),
+    ("T1–T6 trace sink (WS7)", "tools/trace_sink_smoke.py", []),
+    ("B1–B6 sandbox (WS8)", "tools/sandbox_smoke.py", []),
+    ("S1–S11 survive (WS9)", "tools/survive_smoke.py", []),
 ]
 
 # The family replay (Day 8/9 retriever over the fixtures.py question sets) and

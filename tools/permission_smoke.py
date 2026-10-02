@@ -351,14 +351,23 @@ def c3_read_only_by_default():
         effect_that_did_not_happen="the write head never reached the connection")
 
     # The three layers agree: declared `read` ⊆ statement_allow; tables == card.
+    # WS8 — harness_only tools (export_customer_report, run_tests) are not
+    # shipped authority: the invariant scopes to shipped grants, and `execute`
+    # is named separately (C3e2) so a new effect can never hide in this set.
     policy = load_policy()
-    declared = {g.effect for g in shipped.tools.values()}
+    shipped_grants = [g for g in shipped.tools.values() if not g.harness_only]
+    declared = {g.effect for g in shipped_grants}
+    harness_effects = sorted({g.effect for g in shipped.tools.values()
+                              if g.harness_only})
     ok &= check("C3e the three layers agree: declared read ⊆ statement_allow ⊆ the "
                 "read-only role (privilege PENDING offline)",
                 declared <= {perms.EFFECT_READ}
                 and set(policy.statement_allow) <= {"select", "with"}
                 and set(policy.tables_allow) == set(SCHEMA_CARD),
                 f"effect={sorted(declared)} heads={policy.statement_allow}")
+    ok &= check("C3e2 harness-only effects are named (execute lives outside shipped)",
+                set(harness_effects) <= {perms.EFFECT_READ, perms.EFFECT_EXECUTE},
+                f"harness={harness_effects}")
     ok &= check("C3f the privilege claim (saleor_read_only has no write grant) is "
                 "PENDING offline — the sqlite stub has no read-only role",
                 not _env_unset("SALEOR_READONLY_DB_URL").strip(),

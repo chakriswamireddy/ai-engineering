@@ -445,6 +445,7 @@ class ToolRegistry:
     def __init__(self, *, denied: dict[str, str] | None = None,
                  permissions: "perms_mod.PermissionSet | None" = None,
                  principal: str | None = None,
+                 tenant: str | None = None,
                  audit: "audit_mod.AuditLog | audit_mod.NullAuditLog | None" = None,
                  approval_store: "approval_mod.ApprovalStore | None" = None
                  ) -> None:
@@ -455,6 +456,18 @@ class ToolRegistry:
         self._principal = (principal if principal is not None
                            else (perms_mod.principal_from_env()
                                  if permissions is not None else None))
+        # WS1 — the audit tenant. Explicit wins; else the grant file's tenant
+        # for this principal; else "default". Never raises: audit scoping must
+        # not break a registry that predates tenancy.
+        if tenant is not None:
+            self._tenant = str(tenant)
+        elif permissions is not None:
+            try:
+                self._tenant = permissions.tenant_of(self._principal)
+            except Exception:                                   # noqa: BLE001
+                self._tenant = "default"
+        else:
+            self._tenant = "default"
         self._audit = audit if audit is not None else audit_mod.NullAuditLog()
         # Day 27 §7 — the approval desk. `None` is **the H9 off-switch**: with no
         # store the gate does not exist, `confirm: human` is a declaration nothing
@@ -543,6 +556,7 @@ class ToolRegistry:
             denied={n: f"{reason}: {n} is not in this role's tool group"
                     for n in self._tools if n not in keep},
             permissions=self._permissions, principal=self._principal,
+            tenant=getattr(self, "_tenant", "default"),
             audit=self._audit, approval_store=self._approvals)
         for n, tool in self._tools.items():
             if n in keep:
@@ -870,6 +884,7 @@ class ToolRegistry:
             "run_id": self.run_id,
             "trace_id": self.trace_id,
             "principal": self._principal,
+            "tenant": getattr(self, "_tenant", "default"),
             "tool": name,
             "effect": getattr(decision, "effect", None),
             "data": getattr(decision, "data", None),
@@ -1232,6 +1247,7 @@ def build_default_registry(*, doc: Retriever | None = None,
                            code_budget: int = DEFAULT_CODE_BUDGET,
                            permissions: "perms_mod.PermissionSet | None" = None,
                            principal: str | None = None,
+                           tenant: str | None = None,
                            audit: "audit_mod.AuditLog | audit_mod.NullAuditLog | None"
                            = None,
                            approval_store: "approval_mod.ApprovalStore | None" = None,
@@ -1263,7 +1279,8 @@ def build_default_registry(*, doc: Retriever | None = None,
     k_default = tool_top_k() if k is None else k
     agent = data if data is not None else DataAgent(make_data_store())
     decls = permissions if permissions is not None else perms_mod.default_permission_set()
-    reg = ToolRegistry(permissions=permissions, principal=principal, audit=audit,
+    reg = ToolRegistry(permissions=permissions, principal=principal,
+                       tenant=tenant, audit=audit,
                        approval_store=approval_store)
 
     def _grant(name: str) -> Any:
@@ -1324,11 +1341,12 @@ def build_default_registry(*, doc: Retriever | None = None,
 
 
 def build_governed_registry(*, permissions: "perms_mod.PermissionSet | None" = None,
-                            principal: str | None = None,
-                            audit: "audit_mod.AuditLog | audit_mod.NullAuditLog | None"
-                            = None,
-                            approval_store: "approval_mod.ApprovalStore | None" = None,
-                            **kw: Any) -> ToolRegistry:
+                           principal: str | None = None,
+                           tenant: str | None = None,
+                           audit: "audit_mod.AuditLog | audit_mod.NullAuditLog | None"
+                           = None,
+                           approval_store: "approval_mod.ApprovalStore | None" = None,
+                           **kw: Any) -> ToolRegistry:
     """The governed entry point: the same seven tools behind the permission layer.
 
     With `PERMISSIONS=none` (or a permissions file that will not load) it falls
@@ -1346,6 +1364,7 @@ def build_governed_registry(*, permissions: "perms_mod.PermissionSet | None" = N
             return build_default_registry(approval_store=approval_store, **kw)
         permissions = perms_mod.default_permission_set()
     return build_default_registry(permissions=permissions,
-                                 principal=(principal
-                                            or perms_mod.principal_from_env()),
-                                 audit=audit, approval_store=approval_store, **kw)
+                                principal=(principal
+                                           or perms_mod.principal_from_env()),
+                                tenant=tenant,
+                                audit=audit, approval_store=approval_store, **kw)

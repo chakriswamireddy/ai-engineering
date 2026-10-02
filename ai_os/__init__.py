@@ -13,6 +13,7 @@ from ai_os import providers as _providers  # noqa: F401
 from ai_os.providers.openai import OpenAIProvider
 from ai_os.providers.anthropic import AnthropicProvider
 from ai_os.providers.cloudflare import CloudflareProvider
+from ai_os.providers.ollama import OllamaProvider
 from ai_os.gateway import ModelGateway
 from ai_os.ledger import Ledger, MODEL_PRICES, cost_of, CallRecord
 from ai_os.contract import (
@@ -24,6 +25,7 @@ from ai_os.config import build_gateway_from_env, provider_from_spec
 
 __all__ = [
     "OpenAIProvider", "AnthropicProvider", "CloudflareProvider",
+    "OllamaProvider",
     "ModelGateway", "Ledger", "MODEL_PRICES", "cost_of", "CallRecord",
     "Usage", "Completion", "Embedding",
     "ProviderError", "RateLimitError", "ProviderTimeout", "NetworkError",

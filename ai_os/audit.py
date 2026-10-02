@@ -67,9 +67,9 @@ DEFAULT_AUDIT_PATH = Path(__file__).resolve().parent.parent / "data" / "audit.js
 #     in the approval pipeline, and Day 25's prohibition on laundering untrusted
 #     text into a trusted artifact applies to an audit chain most directly of all.
 PERMITTED_KEYS = frozenset({
-    "seq", "ts", "run_id", "trace_id", "principal", "tool", "effect", "data",
-    "decision", "code", "args_hash", "args_shape", "result_shape", "latency_ms",
-    "redacted", "prev_hash", "hash", "digest", "reversibility",
+    "seq", "ts", "run_id", "trace_id", "principal", "tenant", "tool", "effect",
+    "data", "decision", "code", "args_hash", "args_shape", "result_shape",
+    "latency_ms", "redacted", "prev_hash", "hash", "digest", "reversibility",
 })
 
 # Refused **by name**, so the refusal says which rule was broken rather than
@@ -189,6 +189,8 @@ class AuditEntry:
     redacted: list[str] = field(default_factory=list)
     digest: str | None = None
     reversibility: str | None = None
+    # WS1 — the acting principal's tenant (read-scoping, not a secret).
+    tenant: str = "default"
     prev_hash: str = ""
     hash: str = ""
 
@@ -203,6 +205,7 @@ class AuditEntry:
             "result_shape": self.result_shape, "latency_ms": int(self.latency_ms),
             "redacted": list(self.redacted), "prev_hash": self.prev_hash,
             "digest": self.digest, "reversibility": self.reversibility,
+            "tenant": self.tenant,
         }
         return out
 
@@ -281,6 +284,7 @@ class AuditLog:
             latency_ms=int(fields.get("latency_ms") or 0),
             redacted=list(fields.get("redacted") or []),
             digest=fields.get("digest"), reversibility=fields.get("reversibility"),
+            tenant=str(fields.get("tenant") or "default"),
             prev_hash=self._last_hash)
         record = entry.as_dict()
         record["hash"] = entry_hash(entry.body())
@@ -291,11 +295,15 @@ class AuditLog:
 
     # ------------------------------------------------------------------ read
     def entries(self, *, principal: str | None = None, tool: str | None = None,
-                decision: str | None = None) -> list[dict[str, Any]]:
-        """The bounded inspection surface: filter by principal / tool / decision."""
+                decision: str | None = None,
+                tenant: str | None = None) -> list[dict[str, Any]]:
+        """The bounded inspection surface: filter by principal / tool / decision /
+        tenant. Entries written before WS1 carry `tenant: "default"`."""
         out = []
         for e in self._entries:
             if principal is not None and e.get("principal") != principal:
+                continue
+            if tenant is not None and e.get("tenant", "default") != tenant:
                 continue
             if tool is not None and e.get("tool") != tool:
                 continue
@@ -343,6 +351,66 @@ class AuditLog:
             prev = stored if isinstance(stored, str) else ""
         return {"ok": chain_ok, "entries": len(rows), "chain_ok": chain_ok,
                 "first_broken_seq": first_broken}
+
+
+# ------------------------------------------------- WS9 — external seal (anchor)
+# `verify()` is blind to tail truncation (a file that simply ends looks clean).
+# The seal closes that gap: `seal()` writes `{seq, head_hash}` — the head of
+# the chain at sealing time — to a *second* location (`AUDIT_SEAL_PATH`,
+# a KMS-backed object in staging, a second disk offline). `verify_seal()`
+# replays the log past the sealed seq: a truncated tail (fewer entries than
+# sealed) or a rewritten head (different hash at the sealed seq) is refused
+# by name. Rotation: re-seal after every verified backup (the DR drill does).
+SEAL_PATH_ENV = "AUDIT_SEAL_PATH"
+
+
+def seal_path_from_env() -> "Path":
+    import os as _os
+    from pathlib import Path as _Path
+    raw = _os.getenv(SEAL_PATH_ENV, "").strip()
+    if raw:
+        return _Path(raw)
+    return audit_path_from_env().with_suffix(".seal")
+
+
+def seal_audit(log: "AuditLog | None" = None, *, path: "Path | None" = None) -> dict:
+    """Seal the current chain head. Returns `{seq, head_hash, sealed_at}`."""
+    import time as _time
+    target = log if log is not None else default_audit_log()
+    rows = target.entries()
+    head = rows[-1] if rows else None
+    seal = {"seq": head.get("seq", 0) if head else 0,
+            "head_hash": head.get("hash", "") if head else "",
+            "entries": len(rows), "sealed_at": _time.time()}
+    dest = path or seal_path_from_env()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(seal, indent=2), encoding="utf-8")
+    return seal
+
+
+def verify_seal(log: "AuditLog | None" = None, *, path: "Path | None" = None) -> dict:
+    """Check the log against its seal: truncation and head-rewrite detected."""
+    import json as _json
+    dest = path or seal_path_from_env()
+    if not dest.exists():
+        return {"sealed": False, "ok": True, "note": "no seal yet — seal after backup"}
+    try:
+        seal = _json.loads(dest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"sealed": True, "ok": False, "reason": "seal_unreadable"}
+    target = log if log is not None else default_audit_log()
+    verdict = target.verify()
+    rows = target.entries()
+    if len(rows) < int(seal.get("entries", 0)):
+        return {"sealed": True, "ok": False, "reason": "tail_truncated",
+                "sealed_entries": seal.get("entries"), "log_entries": len(rows),
+                "chain_ok": verdict["chain_ok"]}
+    at = next((r for r in rows if r.get("seq") == seal.get("seq")), None)
+    if seal.get("seq") and (at is None or at.get("hash") != seal.get("head_hash")):
+        return {"sealed": True, "ok": False, "reason": "head_rewritten",
+                "chain_ok": verdict["chain_ok"]}
+    return {"sealed": True, "ok": bool(verdict["chain_ok"]),
+            "chain_ok": verdict["chain_ok"], "entries": len(rows)}
 
 
 class NullAuditLog:

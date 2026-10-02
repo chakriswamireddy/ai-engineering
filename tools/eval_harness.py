@@ -284,6 +284,45 @@ def _fmt(value, width: int = 6) -> str:
     return str(value if value is not None else "—")
 
 
+def join_semantic_column(rows: list[dict], verdicts: list[dict],
+                         traces: dict[str, dict]) -> None:
+    """WS6 — join L2 to the scorecard (S1/S2/S3/S4 get a semantic column).
+
+    Green L1 + red L2 = `pending`, never `pass`. Mutates verdicts in place,
+    adding `semantic_l2` + `scorecard` (the joined verdict).
+    """
+    from ai_os import semantic_judge as _sem
+    from ai_os import semantic_thresholds as _thr
+    for row in rows:
+        x = next((v for v in verdicts if v["id"] == row["id"]), None)
+        if x is None:
+            continue
+        trace = traces.get(row["id"]) or {}
+        run = trace.get("run") or trace
+        answer = trace.get("answer", run.get("answer") or "")
+        claims = list((row.get("expected_answer") or {}).get("claims") or [])
+        must_not = list((row.get("expected_answer") or {}).get("must_not_assert") or [])
+        ev = trace.get("evidence", run.get("evidence") or []) or []
+        ctx_texts = [e if isinstance(e, str) else str(e.get("text", e)) for e in ev]
+        # WS6 honesty: harness traces carry evidence *ids*, not text. L2 grades
+        # meaning, so without evidence text the cell is undecided (n/a, owned)
+        # — never a silent pass, never a false fail of a grounded stub row.
+        # Real evidence prose carries spaces; an id (`doc#heading`) never does.
+        has_text = any(" " in t and len(t.split()) > 3 for t in ctx_texts)
+        if (claims or must_not) and not has_text:
+            x["semantic_l2"] = "n/a"
+            x["scorecard"] = _thr.join_verdict(
+                x.get("deterministic_verdict") or x.get("verdict"), "n/a")
+            continue
+        sem = _sem.grade_claims(answer=answer, claims=claims,
+                                must_not_assert=must_not,
+                                context_texts=ctx_texts,
+                                citations=list(trace.get("citations", run.get("citations") or [])))
+        l2, _owner = _thr.l2_verdict({**sem, "claims_expected": bool(claims or must_not)})
+        x["semantic_l2"] = l2
+        x["scorecard"] = _thr.join_verdict(x.get("deterministic_verdict") or x.get("verdict"), l2)
+
+
 def render_table(rows: list[dict], verdicts: list[dict]) -> None:
     v = {x["id"]: x for x in verdicts}
     print("\n" + "=" * 132)
@@ -292,7 +331,7 @@ def render_table(rows: list[dict], verdicts: list[dict]) -> None:
     print("=" * 132)
     header = (f"{'id':<5}{'family':<34}{'exp⊆ret':<9}{'cited⊆ret':<10}"
               f"{'concl⊆ev':<9}{'tool':<6}{'refusal':<8}{'failure':<8}"
-              f"{'verdict':<8}{'owner':<12}")
+              f"{'verdict':<8}{'sem':<6}{'owner':<12}")
     print(header)
     print("-" * 132)
     for r in rows:
@@ -307,10 +346,11 @@ def render_table(rows: list[dict], verdicts: list[dict]) -> None:
                 return "—"
             return "ok" if chk["ok"] else "FAIL"
 
+        sem = x.get("semantic_l2", x.get("semantic", "pending"))
         print(f"{x['id']:<5}{str(r.get('family'))[:32]:<34}{mark('evidence_membership'):<9}"
               f"{mark('cited_subset_retrieved'):<10}{mark('conclusion_subset_evidence'):<9}"
               f"{mark('tool_match'):<6}{mark('refusal_expected'):<8}"
-              f"{mark('failure_category'):<8}{x['verdict']:<8}{_fmt(x['owner'], 12):<12}")
+              f"{mark('failure_category'):<8}{x['verdict']:<8}{str(sem)[:5]:<6}{_fmt(x['owner'], 12):<12}")
     print("-" * 132)
     green = sum(1 for r in rows if v.get(r["id"], {}).get("verdict") == expected_verdict(r))
     print(f"rows green (agent pass / judge-hunting rejected): {green}/{len(rows)}   "
@@ -753,7 +793,16 @@ def main() -> None:
                     help="exit≠0 if any row's verdict drifts from its expected shape")
     ap.add_argument("--fixtures", action="store_true",
                     help="run the Day 20 §8 evaluation set (V1–V9) and exit")
+    # WS6 — nightly live sampling: --live (= --real) + --sample N (L3 sampled
+    # runs only, off by default). Thresholds published in
+    # ai_os/semantic_thresholds.py.
+    ap.add_argument("--live", action="store_true",
+                    help="WS6 alias for --real (nightly eval_harness.py --live --sample)")
+    ap.add_argument("--sample", type=int, default=0,
+                    help="WS6: grade only the first N golden rows (sampled run)")
     args = ap.parse_args()
+    if args.live:
+        args.real = True
 
     if args.fixtures:
         # V5 shells out to tools/regress_all.py; EVAL_REGRESS=fast skips the
@@ -780,6 +829,11 @@ def main() -> None:
           f"registered={data['registered_at']}  mode={mode}  judge={config['judge']}")
 
     # 2) present every question to production (V9: the harness changes nothing).
+    # WS6 --sample: nightly sampled run (first N rows only; full set when 0).
+    if args.sample and args.sample > 0:
+        data = dict(data)
+        data["rows"] = list(data["rows"])[:args.sample]
+        print(f"sample: first {len(data['rows'])} rows (WS6 nightly sampling)")
     if mode == "real":
         reg, _gw, _corpus = build_real_env()
     else:
@@ -789,6 +843,11 @@ def main() -> None:
     # 3) grade — layer 1 deterministic (0 chats); layer 3 only if flagged.
     gateway = ScriptedGateway(data["rows"][0]) if config["judge"] == "model" else None
     verdicts = judge_all(data["rows"], traces, kind=config["judge"], gateway=gateway)
+    # WS6 — L2 join (deterministic, 0 chats): green L1 + red L2 = pending.
+    try:
+        join_semantic_column(data["rows"], verdicts, traces)
+    except Exception as exc:  # join never breaks grading; it annotates
+        print(f"semantic join skipped: {exc}")
 
     render_table(data["rows"], verdicts)
     wrong = [x["id"] for x in verdicts

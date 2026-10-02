@@ -122,7 +122,13 @@ def main() -> None:
     ap.add_argument("--no-docs", action="store_true",
                     help="skip the doc-corpus regression table")
     ap.add_argument("--report", default=None, metavar="PATH")
+    ap.add_argument("--live", action="store_true",
+                    help="WS5: alias for real-store mode (no --stub); labels "
+                         "S2 latency cold (first query incl. store load) vs "
+                         "warm (steady state)")
     args = ap.parse_args()
+    import time as _time
+    _t_cold0 = _time.perf_counter()
 
     if args.stub:
         gw_code = _cd.HashEmbedGateway()
@@ -148,10 +154,21 @@ def main() -> None:
         print(f"code store: {len(code_store)} symbols · {code_store.embedding_model}"
               f" / dim {code_store.dimension}   tau={tau}")
 
+    import time as _time2
     rows = run_code_all(gw_code, code_store, tau=tau)
+    _cold_ms = (_time2.perf_counter() - _t_cold0) * 1000.0
+    # WS5 S2 — cold vs warm: the first row paid store load + first embed;
+    # re-time one warm query over the loaded store for the honest comparison.
+    _w0 = _time2.perf_counter()
+    _pipe = code_pipeline(gw_code, code_store)
+    _pipe.run(rows[0]["question"] if rows else "checkout",
+              expected=[], must_refuse=False, tau=tau)
+    _warm_ms = (_time2.perf_counter() - _w0) * 1000.0
     print("\n" + "=" * 96)
     print("   DAY 10 — CODE-RAG (symbol fixtures; MECH under the stub gateway)")
     print("=" * 96)
+    print(f"S2 latency: cold={_cold_ms:.1f}ms (store load + first query) "
+          f"warm={_warm_ms:.1f}ms (steady state)")
     render_code(rows)
     green = sum(1 for r in rows if r["ok"])
     print("-" * 96)

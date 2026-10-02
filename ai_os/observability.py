@@ -702,19 +702,44 @@ _NULL = NullTrace()
 
 # --------------------------------------------------------------- trace store
 
+class _SinkTraceView:
+    """A rehydrated trace read back from the durable sink (WS7).
+
+    The in-process `Trace` is gone after a restart; this view carries its
+    sanitized `as_dict()` rendering so `GET /traces/{id}` keeps working.
+    """
+
+    recording = True
+    closed = True
+
+    def __init__(self, doc: dict) -> None:
+        self._doc = dict(doc)
+        self.trace_id = self._doc.get("trace_id")
+
+    def as_dict(self) -> dict:
+        return dict(self._doc)
+
+
 class TraceStore:
     """A bounded, thread-safe, oldest-first-evicting local store.
 
     Deliberately not a database or an exporter: Day 23 needs `GET
     /traces/{id}` to work in-process, and nothing more. A later day may swap in
     a real backend behind the same schema.
+
+    WS7 — the later day is today: an optional durable `sink` (see
+    `ai_os/trace_sink.py`) sits behind the same schema. `put` writes through
+    to the sink (best-effort, fail-open); `get` falls back to the sink, so a
+    trace survives a restart. The 256 cap now bounds only the *local*
+    fallback ring — the sink is bounded by retention, not eviction.
     """
 
-    def __init__(self, max_traces: int = 256) -> None:
+    def __init__(self, max_traces: int = 256, sink: Any = None) -> None:
         self.max_traces = max(1, int(max_traces))
         self._lock = threading.Lock()
         self._traces: "OrderedDict[str, Trace]" = OrderedDict()
         self.evictions = 0
+        self.sink = sink
 
     def put(self, trace: "Trace | NullTrace") -> None:
         tid = getattr(trace, "trace_id", None)
@@ -726,10 +751,25 @@ class TraceStore:
             while len(self._traces) > self.max_traces:
                 self._traces.popitem(last=False)
                 self.evictions += 1
+        if self.sink is not None and getattr(trace, "recording", True):
+            try:
+                self.sink.put(tid, trace.as_dict())
+            except Exception:                               # noqa: BLE001
+                pass            # sink is fail-open; the local ring is the fact
 
     def get(self, trace_id: str) -> "Trace | NullTrace | None":
         with self._lock:
-            return self._traces.get(trace_id)
+            hit = self._traces.get(trace_id)
+        if hit is not None:
+            return hit
+        if self.sink is not None:
+            try:
+                doc = self.sink.get(trace_id)
+            except Exception:                               # noqa: BLE001
+                doc = None
+            if isinstance(doc, dict) and doc.get("trace_id"):
+                return _SinkTraceView(doc)
+        return None
 
     def ids(self) -> list[str]:
         with self._lock:

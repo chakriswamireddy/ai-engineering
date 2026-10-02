@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -22,6 +23,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
 from ai_os import observability as obs
+from ai_os import identity as identity_mod
 from ai_os.config import build_gateway_from_env
 from ai_os.contract import (
     ProviderError, RateLimitError, InvalidKeyError, BadRequestError, ProviderTimeout,
@@ -59,6 +61,116 @@ except Exception as e:  # keep /health informative instead of a hard 500
 
 app = FastAPI(title="AI OS — Day 4 Model Gateway", version="0.2.0")
 
+# WS7 — attach the durable trace sink to the default store at boot, but only
+# when `TRACE_SINK` is explicitly configured: importing the server in offline
+# suites must not create sink files as a side effect.
+if os.getenv("TRACE_SINK", "").strip():
+    try:
+        from ai_os.trace_sink import get_sink as _get_sink
+        _boot_sink = _get_sink()
+        if _boot_sink is not None:
+            obs.default_store().sink = _boot_sink
+    except Exception:                                       # noqa: BLE001
+        pass                    # sink is fail-open; the local ring is the fact
+
+
+# ==================================================== WS1 — request identity
+# OIDC JWT → Principal{id, tenant, roles}. The middleware stamps every request
+# (`request.state.principal/tenant/roles/auth`) and never refuses — probes and
+# public reads stay reachable. `_AUTH_PREFIXES` is the guarded surface:
+# anonymous + `ALLOW_ANON=0` is a 401 there, enforced both in the middleware
+# (so WS2's `/agent` and `/sql` inherit it by existing under a prefix) and at
+# each endpoint (so the guard is directly testable without a running server).
+# WS2 (amended) — the guarded surface: everything that spends money, reads
+# data, or exposes operational state. The probes (`/health`, `/healthz`,
+# `/readyz`) stay open — an LB that cannot read them cannot route. Prefix
+# match, so `/chat` covers `/chat/stream` and `/traces` covers `/traces/{id}`.
+_AUTH_PREFIXES = (
+    "/chat", "/rag", "/ledger",                  # money surface
+    "/metrics", "/logs", "/traces", "/audit",    # operational surface
+    "/attacks", "/approvals", "/ingest/span",    # WS2's original set
+    "/agent", "/sql",
+)
+
+
+@app.middleware("http")
+async def _identity_middleware(request: Request, call_next):
+    import time as _time
+    principal = identity_mod.request_principal(request)
+    request.state.principal = principal
+    request.state.tenant = principal.tenant
+    request.state.roles = list(principal.roles)
+    request.state.auth = principal.auth
+    if request.url.path.startswith(_AUTH_PREFIXES):
+        try:
+            identity_mod.require_auth(request, route=request.url.path)
+        except identity_mod.AuthError as exc:
+            return JSONResponse({"error": exc.reason}, status_code=exc.status)
+        # WS9 — per-tenant/principal quota (Redis when REDIS_URL is set,
+        # memory fallback otherwise). Disabled by default (RATE_LIMIT=none),
+        # so offline suites never see a 429 they did not ask for.
+        try:
+            from ai_os import rate as _rate
+            _qm = _rate.quota_manager()
+            if _qm.enabled:
+                _decision = _qm.check(principal.tenant, principal.id)
+                if not _decision.allowed:
+                    return JSONResponse(
+                        {"error": "rate limit exceeded", "retry_after_s": round(
+                            _decision.retry_after, 2)},
+                        status_code=429,
+                        headers={"Retry-After": str(max(1, int(_decision.retry_after + 0.5)))})
+        except Exception:                                       # noqa: BLE001
+            pass                    # quotas are fail-open; never break a request
+    # WS7 — per-route latency histogram, fired at response close so metrics
+    # and traces agree about the window. Route templates only (never ids).
+    _t0 = _time.perf_counter()
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        try:
+            from ai_os import metrics as _metrics
+            route = request.url.path.rsplit("/", 1)[0] if request.url.path.startswith("/approvals/") else request.url.path
+            _metrics.observe_route(route,
+                                   (_time.perf_counter() - _t0) * 1000.0)
+        except Exception:                                   # noqa: BLE001
+            pass                # metrics are fail-open; never break a response
+
+
+def _auth_guard(request: Request | None) -> JSONResponse | None:
+    """Endpoint-level guard for the `_AUTH_PREFIXES` surface. Returns a 401
+    response for anonymous callers when `ALLOW_ANON=0`, else `None`.
+
+    `request=None` (direct library calls, offline suites) resolves as
+    anonymous — identical to a headerless request."""
+    if request is None:
+        request = _bare_request()
+    try:
+        identity_mod.require_auth(request, route=request.url.path)
+    except identity_mod.AuthError as exc:
+        return JSONResponse({"error": exc.reason}, status_code=exc.status)
+    return None
+
+
+def _bare_request() -> Request:
+    """A headerless request for direct (non-HTTP) endpoint calls."""
+    return Request({"type": "http", "method": "GET", "path": "/",
+                    "headers": []})
+
+
+def _caller_tenant(request: Request | None) -> str | None:
+    """The caller's tenant for read-scoping, or `None` for direct library calls.
+
+    Library/offline callers predate tenancy and stay unscoped (pre-WS1
+    behavior, byte-for-byte); every HTTP request — anonymous included — is
+    scoped to its tenant, so cross-tenant denial holds at the seam real
+    traffic crosses."""
+    if request is None:
+        return None
+    tenant = getattr(getattr(request, "state", None), "tenant", None)
+    return str(tenant or identity_mod.DEFAULT_TENANT)
+
 
 def _headers_of(request: Request) -> dict[str, str]:
     """Lowercased inbound headers — what `obs.extract` expects."""
@@ -91,6 +203,23 @@ def _error_response(err: ProviderError) -> dict[str, Any]:
     elif isinstance(err, ProviderTimeout):
         status = 504
     return {"error": str(err), "provider": err.provider, "retryable": err.retryable, "status": status}
+
+
+def _error_json(err: ProviderError,
+                headers: dict[str, str] | None = None) -> JSONResponse:
+    """`_error_response` with its `status` promoted onto the HTTP status line.
+
+    Without this a provider failure returns `{"status": 502}` under HTTP 200 —
+    a client, a load balancer and an uptime check all read that as success."""
+    body = _error_response(err)
+    return JSONResponse(body, status_code=int(body.get("status", 502)),
+                        headers=headers)
+
+
+def _unavailable(detail: str) -> JSONResponse:
+    """A server-side configuration fault: not 200 (it is not success) and not
+    4xx (the caller cannot fix it)."""
+    return JSONResponse({"error": detail}, status_code=503)
 
 
 @app.get("/health")
@@ -158,7 +287,7 @@ def readyz() -> dict[str, Any]:
 @app.post("/chat")
 def chat_endpoint(req: ChatRequest, request: Request):
     if gateway is None:
-        return {"error": _build_error}
+        return _unavailable(_build_error)
     # Day 24 §7 — the inbound edge. A valid `traceparent` is *continued* (same
     # trace id, fresh span id, remote parent); absent/malformed/all-zero/unknown-
     # version mints a fresh root with the reason recorded. A bad header never
@@ -173,7 +302,7 @@ def chat_endpoint(req: ChatRequest, request: Request):
     except ProviderError as e:
         obs.finish_trace(trace, status=obs.status_for_error(e),
                          error=obs.error_fact(e))
-        return JSONResponse(_error_response(e), headers=headers)
+        return _error_json(e, headers)
     obs.add_final_answer_event(trace, ans=completion.text,
                                citations=0, refusal=False)
     obs.finish_trace(trace)
@@ -198,7 +327,7 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request) -> StreamingR
     if gateway is None:
         return StreamingResponse(
             iter([f"data: {json.dumps({'error': _build_error})}\n\n"]),
-            media_type="text/event-stream")
+            media_type="text/event-stream", status_code=503)
 
     # Day 23 §8 — the trace id rides in a response *header*, so the SSE chunk
     # bytes are unchanged and TTFT is untouched; the stream's spans (including
@@ -231,9 +360,22 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request) -> StreamingR
 
 @app.get("/traces/{trace_id}")
 def trace_endpoint(trace_id: str):
-    """Day 23 §7 — the sanitized trace for one request. 404 on an unknown id."""
+    """Day 23 §7 — the sanitized trace for one request. 404 on an unknown id.
+
+    WS7 — the durable sink is the fallback: a trace that aged out of the
+    256 local ring (or was written before a restart) still resolves, so
+    `GET /traces/{id}` works after restart and S6's window query has rows.
+    """
     trace = obs.default_store().get(trace_id)
     if trace is None:
+        try:
+            from ai_os.trace_sink import get_sink
+            sink = get_sink()
+            doc = sink.get(trace_id) if sink is not None else None
+        except Exception:                                   # noqa: BLE001
+            doc = None
+        if isinstance(doc, dict) and doc.get("trace_id"):
+            return doc
         return JSONResponse({"error": f"unknown trace {trace_id}"}, status_code=404)
     return trace.as_dict()
 
@@ -244,9 +386,9 @@ def traces_index() -> dict[str, Any]:
 
 
 @app.get("/ledger")
-def ledger_endpoint() -> dict[str, Any]:
+def ledger_endpoint():
     if gateway is None:
-        return {"error": _build_error}
+        return _unavailable(_build_error)
     return gateway.ledger.summary()
 
 
@@ -278,14 +420,16 @@ def rag_endpoint(req: RagRequest, request: Request):
     provider) share one identity across the wire.
     """
     if gateway is None:
-        return {"error": _build_error}
+        return _unavailable(_build_error)
     store = _rag_store(req.corpus)
     if store is None:
         which = (code_store_path_from_env() if req.corpus == "code"
                  else store_path_from_env())
-        return {"error": f"no RAG store at {which}",
-                "hint": "run `python tools/build_rag_store.py` (docs) or "
-                        "`python tools/build_code_store.py` (code) first"}
+        return JSONResponse(
+            {"error": f"no RAG store at {which}",
+             "hint": "run `python tools/build_rag_store.py` (docs) or "
+                     "`python tools/build_code_store.py` (code) first"},
+            status_code=503)
     trace, extract = obs.start_server_trace("rag", _headers_of(request), attributes={
         "route": "/rag", "component": "api", "corpus": req.corpus,
         "question_sha256": obs.sha256_text(req.question)})
@@ -296,13 +440,13 @@ def rag_endpoint(req: RagRequest, request: Request):
                          max_tokens=req.max_tokens)
     except ProviderError as e:
         obs.finish_trace(trace, status=obs.status_for_error(e), error=obs.error_fact(e))
-        return JSONResponse(_error_response(e), headers=headers)
+        return _error_json(e, headers)
     except DimensionMismatch as e:
         obs.finish_trace(trace, status=obs.STATUS_ERROR)
-        return JSONResponse({"error": str(e)}, headers=headers)
+        return JSONResponse({"error": str(e)}, status_code=500, headers=headers)
     except ValueError as e:
         obs.finish_trace(trace, status=obs.STATUS_ERROR)
-        return JSONResponse({"error": str(e)}, headers=headers)
+        return JSONResponse({"error": str(e)}, status_code=400, headers=headers)
     if getattr(trace, "recording", False):
         trace.add_event("response_sent", ok=True)
         result["continuation_reason"] = extract.reason
@@ -354,7 +498,9 @@ def attacks_endpoint(trace_id: str | None = None):
 
 
 @app.get("/audit")
-def audit_endpoint(principal: str | None = None, tool: str | None = None,
+def audit_endpoint(request: Request = None,  # FastAPI injects; None = direct library call
+                   principal: str | None = None,
+                   tool: str | None = None,
                    decision: str | None = None) -> dict[str, Any]:
     """Day 26 §8 — the decision log, read-only.
 
@@ -370,7 +516,12 @@ def audit_endpoint(principal: str | None = None, tool: str | None = None,
     """
     from ai_os import audit as audit_mod
     log = audit_mod.default_audit_log()
-    rows = log.entries(principal=principal, tool=tool, decision=decision)
+    # WS1 — tenant-scoped reads: a caller sees its own tenant's entries only,
+    # so `GET /audit?principal=<oidc-sub>` shows the resolved `sub` without
+    # leaking another tenant's rows. Pre-WS1 entries carry tenant "default".
+    tenant = _caller_tenant(request)
+    rows = log.entries(principal=principal, tool=tool, decision=decision,
+                       tenant=tenant)
     return {"count": len(rows), "total": len(log), "entries": rows}
 
 
@@ -390,25 +541,29 @@ def audit_verify_endpoint() -> dict[str, Any]:
 
 # ==================================================== Day 27 §8 — the approvals
 # Three facts a reader six months from now needs, recorded **at the registration
-# site** rather than in a changelog:
+# site** rather than in a changelog. Day 27 stated them; WS1 and WS4 amended
+# two of them, and the amendments are dated here so the history survives:
 #
-#   1. this repository has no authentication, no session, no agent route and no
-#      `principal` header — `principal` is a caller-supplied string. Day 26 called
-#      that *authorization without authentication*; today the same string could be
-#      the person who signs off on an irreversible action.
-#   2. **there is deliberately no decision route.** `POST /approvals/{id}/decide`
-#      does not exist and must not be added here: it would place the single most
-#      valuable call in the system behind the least protected surface in the
-#      system. The decision surface is `tools/approvals.py` — a shell command whose
-#      operator already has the repository, and whose ordinary shell history, git
-#      author and filesystem ACL make today's approvals attributable *by accident*.
-#      That accident is a real property and it is worth more than a convenient API.
-#   3. the owner of the authenticated surface is **Day 29**, and when it adds the
-#      route it will have to re-earn the attribute this absence provides for free.
+#   1. [Day 27] this repository had no authentication, no session, no agent
+#      route and no `principal` header — `principal` was a caller-supplied
+#      string. Day 26 called that *authorization without authentication*.
+#      AMENDED by WS1: the identity middleware verifies the JWT and sets
+#      `request.state.principal`; the string fallback survives only behind
+#      `ALLOW_ANON=1` for offline tests.
+#   2. [Day 27] **there was deliberately no decision route.** `POST
+#      /approvals/{id}/decide` did not exist: it would have placed the single
+#      most valuable call behind the least protected surface. AMENDED by WS4 —
+#      see "WS4 — decide + apply" below: the route exists now and re-earned
+#      the attribute the absence provided for free (auth required, tenant
+#      scoped, actor = authenticated principal, never a body field).
+#   3. [Day 27] the owner of the authenticated surface was **Day 29**. Delivered
+#      as WS1 (identity) + WS4 (decide/apply); Day 29's `?reveal=1` reading
+#      surface remains as documented below.
 #
-# `?reveal=1` discloses argument **values** on a surface with no identity. It is
-# documented as an argument for Day 29's authentication work, not as a feature: the
-# default is masked exactly as Day 26's metadata-safe rule requires.
+# `?reveal=1` discloses argument **values**; with WS1's identity in front of the
+# GET routes it is no longer unauthenticated — the note on the route below states
+# which of the two it is at runtime (`ALLOW_ANON`), and the default is masked
+# exactly as Day 26's metadata-safe rule requires.
 
 def _approval_desk():
     """The read-only desk, or `None` when approvals are switched off."""
@@ -419,7 +574,9 @@ def _approval_desk():
 
 
 @app.get("/approvals")
-def approvals_endpoint(state: str | None = None, tool: str | None = None,
+def approvals_endpoint(request: Request = None,  # injected when served; None = library call
+                       state: str | None = None,
+                       tool: str | None = None,
                        principal: str | None = None, reveal: int = 0
                        ) -> dict[str, Any]:
     """Day 27 §8 — the queue, read-only: `{count, records}` with values masked.
@@ -430,11 +587,17 @@ def approvals_endpoint(state: str | None = None, tool: str | None = None,
     unless `?reveal=1` is passed.
     """
     from ai_os import approval as approval_mod
+    denied = _auth_guard(request)
+    if denied is not None:
+        return denied
     desk = _approval_desk()
     if desk is None:
         return {"count": 0, "records": [],
                 "note": "APPROVALS=none — the gate is off, so no request was opened"}
+    tenant = _caller_tenant(request)
     rows = desk.all_records()
+    if tenant is not None:
+        rows = [r for r in rows if r.tenant == tenant]
     if state is not None:
         rows = [r for r in rows if r.state == state]
     if tool is not None:
@@ -447,13 +610,19 @@ def approvals_endpoint(state: str | None = None, tool: str | None = None,
             "reveal": bool(reveal),
             "records": [approval_mod.approval_view(r, reveal=bool(reveal))
                         for r in rows],
-            "note": ("values masked by default; ?reveal=1 is unauthenticated and is "
-                     "therefore the strongest argument for Day 29's authentication "
-                     "work rather than a feature")}
+            "note": ("values masked by default; "
+                     + ("?reveal=1 is unauthenticated (ALLOW_ANON=1), which is the "
+                        "strongest argument for the identity work, not a feature"
+                        if identity_mod.allow_anon()
+                        else "?reveal=1 is auth-required and attributed to the "
+                             "caller (ALLOW_ANON=0)"))}
 
 
 @app.get("/approvals/{request_id}")
-def approval_endpoint(request_id: str, reveal: int = 0):
+# `request` trails (not leads) so direct library calls
+# (`approval_endpoint("id")`, Day 27 style) keep working with no Request.
+def approval_endpoint(request_id: str, reveal: int = 0,
+                      request: Request = None):  # injected; None = library call
     """Day 27 §8 — one record, read-only, 404 on an unknown id.
 
     The full canonical rendering is deliberately *not* served here: this route
@@ -462,6 +631,9 @@ def approval_endpoint(request_id: str, reveal: int = 0):
     is the approver rather than an unauthenticated canvas of arbitrary callers.
     """
     from ai_os import approval as approval_mod
+    denied = _auth_guard(request)
+    if denied is not None:
+        return denied
     desk = _approval_desk()
     if desk is None:
         return JSONResponse({"error": "APPROVALS=none — no desk to read"},
@@ -470,7 +642,262 @@ def approval_endpoint(request_id: str, reveal: int = 0):
     if rec is None:
         return JSONResponse({"error": f"unknown approval {request_id}"},
                             status_code=404)
+    tenant = _caller_tenant(request)
+    if tenant is not None and rec.tenant != tenant:
+        return JSONResponse({"error": f"unknown approval {request_id}"},
+                            status_code=404)
     return approval_mod.approval_view(rec, reveal=bool(reveal))
+
+
+# ==================================================== WS4 — decide + apply
+# Day 27 deliberately omitted these routes ("the least protected surface");
+# WS1's identity earns them back: both require auth, both scope to the
+# caller's tenant, and the actor is the authenticated principal — never a
+# body field (a caller-supplied decider would be Day 26's confused deputy
+# wearing a workflow).
+
+class DecideRequest(BaseModel):
+    decision: str                       # approve | reject
+    reason: str | None = None
+    digest: str | None = None           # optional: what the decider saw
+
+
+_REFUSAL_STATUS = {
+    "approval_duplicate": 409,
+    "approval_invalid_state": 409,
+    "approval_expired": 410,
+    "approval_role_not_permitted": 403,
+    "approval_self_approved": 403,
+    "approval_digest_mismatch": 409,
+    "approval_run_limit": 409,
+}
+
+
+def _refusal_response(request_id: str, exc: Exception) -> JSONResponse:
+    code = getattr(exc, "code", None) or "approval_refused"
+    status = _REFUSAL_STATUS.get(str(code), 409)
+    return JSONResponse({"error": str(exc), "code": code,
+                         "request_id": request_id},
+                        status_code=status)
+
+
+def _route_actor(request: Request | None) -> str:
+    state_principal = getattr(getattr(request, "state", None), "principal", None)
+    pid = getattr(state_principal, "id", None)
+    if pid:
+        return str(pid)
+    return "anonymous"
+
+
+@app.post("/approvals/{request_id}/decide")
+def approval_decide_endpoint(request_id: str, body: DecideRequest,
+                             request: Request = None):
+    """WS4 — decide an approval request. Auth required, idempotent, attributed.
+
+    Replaying the decided outcome returns the record (200); deciding the other
+    way conflicts (409). An optional `digest` lets the decider confirm what
+    they reviewed — a mismatch is a 409 before anything is written.
+    """
+    from ai_os import approval as approval_mod
+    denied = _auth_guard(request)
+    if denied is not None:
+        return denied
+    desk = _approval_desk()
+    if desk is None:
+        return JSONResponse({"error": "APPROVALS=none — no desk to decide"},
+                            status_code=404)
+    rec = desk.get(request_id)
+    if rec is None:
+        return JSONResponse({"error": f"unknown approval {request_id}"},
+                            status_code=404)
+    tenant = _caller_tenant(request)
+    if tenant is not None and rec.tenant != tenant:
+        return JSONResponse({"error": f"unknown approval {request_id}"},
+                            status_code=404)
+    want = (body.decision or "").strip().lower()
+    if want not in ("approve", "reject"):
+        return JSONResponse({"error": "decision must be 'approve' or 'reject'"},
+                            status_code=400)
+    target = (approval_mod.STATE_APPROVED if want == "approve"
+              else approval_mod.STATE_REJECTED)
+    if rec.state == target:
+        return approval_mod.approval_view(rec, reveal=False)
+    if rec.state in approval_mod.DECIDED_STATES:
+        return JSONResponse({"error": f"request {request_id} is already "
+                                      f"{rec.state}; a decision is final",
+                             "code": "approval_duplicate",
+                             "request_id": request_id},
+                            status_code=409)
+    if (body.digest or "").strip() and body.digest.strip() != rec.digest:
+        return JSONResponse({"error": "digest mismatch: the reviewed action is "
+                                      "not the requested action",
+                             "code": "approval_digest_mismatch",
+                             "request_id": request_id},
+                            status_code=409)
+    try:
+        decided = desk.decide(request_id, decided_by=_route_actor(request),
+                              approve=(want == "approve"),
+                              reason=body.reason)
+    except approval_mod.ApprovalRefusal as exc:
+        # Refusals first: ApprovalRefusal subclasses ValueError, so a plain
+        # `except ValueError` would flatten every coded refusal into a 400.
+        return _refusal_response(request_id, exc)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc), "request_id": request_id},
+                            status_code=400)
+    except Exception as exc:                                    # noqa: BLE001
+        return _refusal_response(request_id, exc)
+    return approval_mod.approval_view(decided, reveal=False)
+
+
+# The only tool the apply route executes: approved SQL through the WS3 path.
+_APPLY_TOOL = "run_saleor_sql"
+_PK_WHERE_RE = re.compile(r"where\s+id\s*=\s*('([^']*)'|(\d+))",
+                          re.IGNORECASE)
+
+
+def _pk_literal(sql: str) -> str | None:
+    """`WHERE id = <literal>` from an approved write, or `None`."""
+    match = _PK_WHERE_RE.search(sql or "")
+    if not match:
+        return None
+    if match.group(2) is not None:
+        return "'" + match.group(2).replace("'", "''") + "'"
+    return str(match.group(3))
+
+
+def _literal_of(value: Any) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _reverse_sql(head: str, table: str, pre_rows: list[dict]) -> str | None:
+    """The undo for a PK-addressed write from its pre-image, or `None` when
+    not derivable (INSERT needs the new row's id — a documented residual)."""
+    if not pre_rows:
+        return None
+    if head == "update":
+        sets = ", ".join(f"{col} = {_literal_of(val)}"
+                         for col, val in pre_rows[0].items() if col != "id")
+        if not sets:
+            return None
+        where = f"id = {_literal_of(pre_rows[0].get('id'))}"
+        return f"UPDATE {table} SET {sets} WHERE {where}"
+    if head == "delete":
+        cols = ", ".join(pre_rows[0].keys())
+        vals = ", ".join(_literal_of(v) for v in pre_rows[0].values())
+        return f"INSERT INTO {table} ({cols}) VALUES ({vals})"
+    return None
+
+
+@app.post("/approvals/{request_id}/apply")
+def approval_apply_endpoint(request_id: str, request: Request = None):
+    """WS4 — apply an approved request: validate → execute → record outcome.
+
+    Idempotent: replaying an applied request returns its stored outcome
+    without re-executing (double-application is the failure this guards).
+    The mutation runs through `DataAgent.run_write` (WS3) with the approval
+    id; a compensation record (`reverse_sql` / saga step) lands on the state
+    shelf beside the outcome.
+    """
+    from ai_os import approval as approval_mod
+    from ai_os.data import DataAgent, make_data_store
+    from ai_os.sql_safety import load_policy
+    denied = _auth_guard(request)
+    if denied is not None:
+        return denied
+    desk = _approval_desk()
+    if desk is None:
+        return JSONResponse({"error": "APPROVALS=none — no desk to apply"},
+                            status_code=404)
+    rec = desk.get(request_id)
+    if rec is None:
+        return JSONResponse({"error": f"unknown approval {request_id}"},
+                            status_code=404)
+    tenant = _caller_tenant(request)
+    if tenant is not None and rec.tenant != tenant:
+        return JSONResponse({"error": f"unknown approval {request_id}"},
+                            status_code=404)
+    actor = _route_actor(request)
+    if rec.state == approval_mod.STATE_APPLIED:
+        return {"applied": True, "rows_changed": rec.applied_rows_changed,
+                "compensated": False, "replayed": True,
+                "record": approval_mod.approval_view(rec, reveal=False)}
+    if rec.tool != _APPLY_TOOL:
+        return JSONResponse({"error": f"tool {rec.tool!r} is not executable via "
+                                      "apply (only approved SQL runs here)",
+                             "code": "approval_invalid_state",
+                             "request_id": request_id},
+                            status_code=409)
+    sql = rec.args.get("sql") if isinstance(rec.args, dict) else None
+    if not isinstance(sql, str) or not sql.strip():
+        return JSONResponse({"error": "the approved record carries no SQL to run",
+                             "code": "approval_invalid_state",
+                             "request_id": request_id},
+                            status_code=409)
+    try:
+        applied = desk.apply(request_id, applied_by=actor)
+    except Exception as exc:                                    # noqa: BLE001
+        return _refusal_response(request_id, exc)
+    policy = load_policy()
+    agent = DataAgent(make_data_store(), policy=policy)
+    head = (sql.strip().split(None, 1) + [""])[0].lower()
+    # The target table comes from the same policy check the write itself must
+    # pass — one parse, two uses — so the pre-image can only ever name a table
+    # the write is allowed to touch.
+    probe = policy.check_write(sql, approval_id=request_id,
+                               granted_tables=policy.write_tables_allow)
+    target = (probe.shape.tables[0] if probe.ok and probe.shape
+              and probe.shape.tables else None)
+    pre_rows: list[dict] = []
+    pk = _pk_literal(sql)
+    if pk is not None and target and head in ("update", "delete"):
+        try:
+            snap = agent.store.query(f"SELECT * FROM {target} WHERE id = {pk}")
+            if snap.ok:
+                pre_rows = [dict(zip(snap.columns, row)) for row in snap.rows]
+        except Exception:                                       # noqa: BLE001
+            pre_rows = []       # pre-image is best-effort; the write decides
+    wrote = agent.run_write(sql, principal=actor, approval_id=request_id,
+                            granted_tables=policy.write_tables_allow)
+    if not wrote.ok:
+        desk.record_outcome(request_id, rows_changed=0, recorded_by=actor)
+        return JSONResponse({"applied": True, "rows_changed": 0,
+                             "compensated": False,
+                             "execution_error": wrote.error,
+                             "error_kind": wrote.error_kind,
+                             "record": approval_mod.approval_view(
+                                 desk.get(request_id), reveal=False)},
+                            status_code=502)
+    desk.record_outcome(request_id, rows_changed=wrote.rows_changed,
+                        recorded_by=actor)
+    reverse = _reverse_sql(head, target or "", pre_rows)
+    try:
+        shelf = approval_mod.state_store_for_approvals()
+        shelf.put(actor, "compensation", f"compensation/{request_id}", {
+            "approval_id": request_id, "tool": applied.tool,
+            "digest": applied.digest,
+            "forward_sql_sha256": obs.sha256_text(sql),
+            "reverse_sql": reverse,
+            "reverse_derivable": reverse is not None,
+            "rows_changed": wrote.rows_changed, "applied_by": actor,
+            "note": ("undo captured from pre-image"
+                     if reverse is not None else
+                     "reverse not derivable (INSERT needs the new row id)"),
+        }, created_by={"run_id": request_id, "step": "compensated",
+                       "source": "executor"})
+    except Exception:                                           # noqa: BLE001
+        pass                    # the outcome above is the fact; the saga step
+                                # is the companion, never the gate
+    return {"applied": True, "rows_changed": wrote.rows_changed,
+            "compensated": False,
+            "record": approval_mod.approval_view(desk.get(request_id),
+                                                 reveal=False)}
 
 
 def _ingest_enabled() -> bool:
@@ -479,13 +906,16 @@ def _ingest_enabled() -> bool:
 
 
 @app.post("/ingest/span")
-def ingest_span_endpoint(payload: dict):
+def ingest_span_endpoint(request: Request, payload: dict):
     """Day 24 §6 — the loopback-only span report route, **off by default**.
 
     Unauthenticated ingest is a Day-26 boundary: enabling this binds a collector
     that accepts writes from anywhere without a credential, so it ships disabled
     and says so rather than pretending a local route is a service.
     """
+    denied = _auth_guard(request)
+    if denied is not None:
+        return denied
     if not _ingest_enabled():
         return JSONResponse(
             {"error": "trace ingest disabled; set TRACE_INGEST=1 to enable "

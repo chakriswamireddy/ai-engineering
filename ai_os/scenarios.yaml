@@ -68,13 +68,16 @@ scenarios:
     name: engineering_investigation
     question: "Why is this test failing?"
     route:
-      kind: none
+      kind: library
+      call: sandbox.run_tests
     expect:
-      tools: []
-      invariant: null
+      tools: [run_tests]
+      invariant: sandboxed_pass_fail
+      labels: {result_shape: "{passed, failed, log_sha256, log_excerpt}", approval: "support_lead grants, executor applies"}
+      refusal_on: ["destructive payload -> refused before execution", "absolute/.. target -> refused", "timeout -> killed"]
     cost: {embeds: 0, chats: 0, sql: 0, rows: 0, writes: 0}
-    finding: "no test-runner tool exists; registry.names() = 7 reads, 0 executors"
-    pending: ["a run_tests tool (owner: a future ingestion+sandbox day)"]
+    finding: "run_tests executes pytest inside the WS8 sandbox (effect: execute, confirm: human); returns pass/fail + log sha, never the full log"
+    pending: ["docker-backend hardening with a pinned sandbox image (owner: WS8 residual)"]
 
   - id: S6
     name: operational_investigation
@@ -94,12 +97,13 @@ scenarios:
     name: controlled_action
     question: "Perform an approved operation."
     route:
-      kind: library
-      call: approval_workflow
+      kind: http
+      method: POST
+      path: /approvals/{request_id}/apply
     expect:
       tools: []
       invariant: decision_digest_and_refusal
-      labels: {saleor_rows_changed: 0, wrote: false}
-      refusal_on: ["no write path", "no effect:write grant"]
-    cost: {embeds: 0, chats: 0, sql: 0, rows: 0, writes: 0}
-    pending: ["approval workflow (day27 designed not built)", "write path (no owner, deliberately - day27 judgment)"]
+      labels: {saleor_rows_changed: "measured", wrote: "grant+approval-gated", applied: true, compensated: false}
+      refusal_on: ["unapproved write", "ungranted table", "digest mismatch", "double apply"]
+    cost: {embeds: 0, chats: 0, sql: 1, rows: 1, writes: 1}
+    pending: ["INSERT reverse derivation (needs the new row id — owner: WS4 residual)"]

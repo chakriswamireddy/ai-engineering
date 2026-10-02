@@ -769,6 +769,12 @@ PLAN_TERMINATIONS: dict[str, str] = {
     "plan_exhausted": "the evidence was insufficient (or a step failed) and no "
                       "replan was available — the answer says what was checked and "
                       "asserts no cause the plan never observed",
+    # WS4 — paused on a human decision, not stopped: the run resumes after the
+    # approval is decided (and, for a mutation, applied) — never by retrying.
+    "awaiting_approval": "a step requires human approval and the permission "
+                         "layer opened a durable request for it — the run paused "
+                         "with a checkpoint (resumable), nothing was applied, and "
+                         "no rung was climbed",
 }
 
 

@@ -55,6 +55,10 @@ def check(label: str, cond: bool, detail: str = "") -> bool:
     global FAILS
     if not cond:
         FAILS += 1
+        # gate_prod leg 3 is `pytest -q`: a failed check must fail the run
+        # there, while as a script this keeps printing and reports at the end.
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            raise AssertionError(label + (f"  ({detail})" if detail else ""))
     print(f"[{'OK  ' if cond else 'FAIL'}] {label}" + (f"  ({detail})" if detail else ""))
     return bool(cond)
 
@@ -371,10 +375,12 @@ def test_loader_refusals() -> None:
                               principals={"default": [EXPORT]}, name=EXPORT))
           == "ValueError:ValueError")
     shipped = perms.default_permission_set()
-    check("the shipped file parses, declares one harness-only client, and assigns it "
-          "to nobody",
-          shipped.harness_only_tools() == (EXPORT,)
-          and all(EXPORT not in shipped.granted_tools(p) for p in shipped.principals))
+    check("the shipped file parses, declares its harness-only clients, and assigns "
+          "none of them to anybody (WS8 added run_tests)",
+          shipped.harness_only_tools() == (EXPORT, "run_tests")
+          and all(EXPORT not in shipped.granted_tools(p)
+                  and "run_tests" not in shipped.granted_tools(p)
+                  for p in shipped.principals))
     check("every shipped grant declares a class, and the file's maximum authority is "
           "still a read",
           all(g.reversibility for g in shipped.tools.values())
@@ -623,7 +629,7 @@ def test_cli(tmp: Path) -> None:
 # --------------------------------------------------------------- the server views
 
 def test_server_routes(tmp: Path) -> None:
-    print("\n== the read-only routes: two GETs, masked by default, no decision route")
+    print("\n== the read-only routes: two GETs, masked by default, decide only as POST")
     from ai_os import server
     src = (ROOT / "ai_os" / "server.py").read_text(encoding="utf-8")
     routes = {(str(getattr(r, "path", "")), tuple(sorted(getattr(r, "methods", ()) or ())))
@@ -631,11 +637,13 @@ def test_server_routes(tmp: Path) -> None:
     check("`/approvals` and `/approvals/{request_id}` are registered as GET",
           ("/approvals", ("GET",)) in routes
           and ("/approvals/{request_id}", ("GET",)) in routes)
-    check("no POST decision route exists anywhere, and the omission is recorded at "
-          "the registration site with its owner",
-          not [p for p, m in routes if "decide" in p and "POST" in m]
+    check("the decision route exists only as POST, guarded and attributed at the "
+          "registration site (WS4 re-earned Day 27's absence; the history stays)",
+          [m for p, m in routes if "decide" in p] == [("POST",)]
           and "deliberately no decision route" in src
-          and "Day 29" in src and "no authentication" in src)
+          and "WS4 — decide + apply" in src
+          and "_auth_guard(request)" in src and "_route_actor" in src
+          and "AMENDED by WS4" in src)
 
     path = tmp / "server.json"
     store = StateStore(path=path, default_ttl=86400.0, autosave=True)

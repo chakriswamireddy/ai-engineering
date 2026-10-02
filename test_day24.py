@@ -18,6 +18,7 @@ the arithmetic underneath them —
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -33,6 +34,10 @@ def check(label: str, cond: bool, detail: str = "") -> bool:
     global FAILS
     if not cond:
         FAILS += 1
+        # gate_prod leg 3 is `pytest -q`: a failed check must fail the run
+        # there, while as a script this keeps printing and reports at the end.
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            raise AssertionError(label + (f"  ({detail})" if detail else ""))
     print(f"[{'OK  ' if cond else 'FAIL'}] {label}" + (f"  ({detail})" if detail else ""))
     return bool(cond)
 

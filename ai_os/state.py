@@ -34,7 +34,9 @@ from typing import Any
 
 from ai_os.planner import Plan
 
-STEP_STATUSES = frozenset({"pending", "running", "done", "failed", "skipped"})
+STEP_STATUSES = frozenset({"pending", "running", "done", "failed", "skipped",
+                           # WS4 — paused on a human decision, resumable (not failed).
+                           "awaiting_approval"})
 
 
 @dataclass
@@ -56,6 +58,9 @@ class StepRecord:
     rung: str | None = None
     diverged: bool = False
     observation: dict[str, Any] | None = None
+    # WS4 — the approval request this step waits on (set with the
+    # `awaiting_approval` status; read back on resume to find the decision).
+    approval_request_id: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -63,6 +68,7 @@ class StepRecord:
             "tool": self.tool, "evidence": list(self.evidence), "error": self.error,
             "rung": self.rung, "diverged": self.diverged,
             "observation": self.observation,
+            "approval_request_id": self.approval_request_id,
         }
 
     @classmethod
@@ -73,7 +79,8 @@ class StepRecord:
                    evidence=list(raw.get("evidence") or []),
                    error=raw.get("error"), rung=raw.get("rung"),
                    diverged=bool(raw.get("diverged")),
-                   observation=raw.get("observation"))
+                   observation=raw.get("observation"),
+                   approval_request_id=raw.get("approval_request_id"))
 
 
 @dataclass
@@ -625,6 +632,86 @@ def acquire_single_writer_lock(state_path: str | os.PathLike) -> SingleWriter:
     This is the function called at process startup to enforce the one-writer rule.
     """
     return SingleWriter(state_path)
+
+
+# ------------------------------------------------- WS9 — distributed writer lock
+# One file lock cannot span replicas: two pods on two nodes each hold their own
+# `flock` and both write. WS9 replaces the file lock with a Postgres advisory
+# lock when `STATE_ADVISORY_DSN` is set (`pg_advisory_lock` on a fixed key —
+# crash-safe: the lock dies with the session, so a killed replica cannot wedge
+# the writer). Without a DSN (offline, single node) the file lock stands — the
+# honest default, and the chaos drill's premise (kill 1 replica, zero data
+# loss) holds because only the advisory holder writes.
+ADVISORY_LOCK_KEY = 841731
+
+
+def acquire_distributed_writer_lock(
+    state_path: str | os.PathLike,
+    *, dsn: str | None = None,
+) -> Any:
+    """WS9 — advisory lock when a DSN is configured, file lock otherwise.
+
+    Returns a lock object with `.release()`; raises `SecondWriter` when the
+    advisory lock is taken (same refusal, now replica-wide). Without `psycopg`
+    or without a DSN, returns `acquire_single_writer_lock(state_path)` — the
+    single-node behavior is byte-identical to Day 29.
+    """
+    import os as _os
+    dsn = dsn or _os.getenv("STATE_ADVISORY_DSN", "").strip()
+    if not dsn:
+        return acquire_single_writer_lock(state_path)
+    try:
+        import psycopg  # type: ignore
+    except ImportError:
+        return acquire_single_writer_lock(state_path)  # no driver: file lock
+    try:
+        conn = psycopg.connect(dsn, autocommit=True)
+    except Exception:
+        return acquire_single_writer_lock(state_path)  # DB down: file lock
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (ADVISORY_LOCK_KEY,))
+            row = cur.fetchone()
+    except Exception:
+        conn.close()
+        return acquire_single_writer_lock(state_path)  # query failed: file lock
+    if not row or not row[0]:
+        holder = _advisory_holder(conn)
+        conn.close()
+        raise SecondWriter(holder, str(state_path))
+    return _AdvisoryWriterLock(conn, str(state_path))
+
+
+def _advisory_holder(conn: Any) -> int:
+    return -1  # Postgres names no holder pid; the refusal names the key
+
+
+class _AdvisoryWriterLock:
+    """A held `pg_advisory_lock` session. Dies with the connection (crash-safe)."""
+
+    def __init__(self, conn: Any, path: str) -> None:
+        self._conn = conn
+        self.path = path
+
+    def release(self) -> None:
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (ADVISORY_LOCK_KEY,))
+        except Exception:                                       # noqa: BLE001
+            pass
+        try:
+            self._conn.close()
+        except Exception:                                       # noqa: BLE001
+            pass
+
+    def __enter__(self) -> "_AdvisoryWriterLock":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.release()
+
+    def __del__(self) -> None:
+        self.release()
 
 
 class StateStore:

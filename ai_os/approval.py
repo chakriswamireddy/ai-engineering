@@ -540,6 +540,7 @@ class ApprovalRecord:
     reversibility: str = REVERSIBILITY_IRREVERSIBLE
     approver_role: str | None = None
     requested_by: str = ""
+    tenant: str = "default"                 # WS1 — read-scoping, not a secret
     requested_at: float = 0.0
     expires_at: float = 0.0
     ttl_s: float = DEFAULT_APPROVAL_TTL_S
@@ -549,6 +550,10 @@ class ApprovalRecord:
     reason: str | None = None
     applied_by: str | None = None
     applied_at: float | None = None
+    # WS4 — the measured outcome of the applied mutation (rows the engine
+    # reports changed), written once by `record_outcome`. Reads back on
+    # idempotent apply replays and executor resume, so neither re-executes.
+    applied_rows_changed: int = 0
     compensates: str | None = None
     proposal: str | None = None
     provenance: dict[str, Any] = field(default_factory=dict)
@@ -595,12 +600,15 @@ class ApprovalRecord:
             "state": self.state, "subject": dict(self.subject or {}),
             "signals": dict(self.signals or {}), "args": dict(self.args or {}),
             "targets": list(self.targets), "effect": self.effect, "data": self.data,
-            "reversibility": self.reversibility, "approver_role": self.approver_role,
-            "requested_by": self.requested_by, "requested_at": self.requested_at,
+            "reversibility": self.reversibility,             "approver_role": self.approver_role,
+            "requested_by": self.requested_by, "tenant": self.tenant,
+            "requested_at": self.requested_at,
             "expires_at": self.expires_at, "ttl_s": self.ttl_s, "run_id": self.run_id,
             "decided_by": self.decided_by, "decided_at": self.decided_at,
             "reason": self.reason, "applied_by": self.applied_by,
-            "applied_at": self.applied_at, "compensates": self.compensates,
+            "applied_at": self.applied_at,
+            "applied_rows_changed": int(self.applied_rows_changed or 0),
+            "compensates": self.compensates,
             "proposal": self.proposal, "provenance": dict(self.provenance or {}),
         }
 
@@ -621,6 +629,7 @@ class ApprovalRecord:
             reversibility=str(raw.get("reversibility") or REVERSIBILITY_IRREVERSIBLE),
             approver_role=raw.get("approver_role"),
             requested_by=str(raw.get("requested_by") or ""),
+            tenant=str(raw.get("tenant") or "default"),
             requested_at=float(raw.get("requested_at") or 0.0),
             expires_at=float(raw.get("expires_at") or 0.0),
             ttl_s=float(raw.get("ttl_s") or DEFAULT_APPROVAL_TTL_S),
@@ -630,6 +639,7 @@ class ApprovalRecord:
             reason=raw.get("reason"), applied_by=raw.get("applied_by"),
             applied_at=(None if raw.get("applied_at") is None
                         else float(raw["applied_at"])),
+            applied_rows_changed=int(raw.get("applied_rows_changed") or 0),
             compensates=raw.get("compensates"), proposal=raw.get("proposal"),
             provenance=dict(raw.get("provenance") or {}))
 
@@ -724,15 +734,19 @@ class ApprovalStore:
         return None
 
     def list_for(self, principal: str, *, state: str | None = None,
-                 tool: str | None = None) -> list[ApprovalRecord]:
+                 tool: str | None = None,
+                 tenant: str | None = None) -> list[ApprovalRecord]:
         """The records a principal is a party to — requester, decider, executor.
 
         Three roles, three reasons to look, one shelf: "what am I waiting on",
-        "what did I sign", "what did I run".
+        "what did I sign", "what did I run". WS1 adds the tenant scope: a
+        caller never sees another tenant's records through this path.
         """
         out = []
         for rec in self._all():
             if principal not in (rec.requested_by, rec.decided_by, rec.applied_by):
+                continue
+            if tenant is not None and rec.tenant != tenant:
                 continue
             if state is not None and rec.state != state:
                 continue
@@ -794,6 +808,7 @@ class ApprovalStore:
             return None
         return self.audit.append({
             "run_id": rec.run_id, "principal": principal or "?",
+            "tenant": getattr(rec, "tenant", "default") or "default",
             "tool": rec.tool, "effect": rec.effect, "data": rec.data,
             "reversibility": rec.reversibility, "digest": rec.digest,
             "decision": decision, "code": code,
@@ -817,6 +832,18 @@ class ApprovalStore:
                 "Nothing was written.")
         return str(actor).strip()
 
+    def _tenant_of(self, actor: str) -> str:
+        """The requester's tenant for read-scoping. File mapping wins, absent
+        ⇒ `"default"`; never raises — tenancy must not break a store whose
+        permissions object predates it."""
+        try:
+            lookup = getattr(self.permissions, "tenant_of", None)
+            if callable(lookup):
+                return str(lookup(actor) or "default") or "default"
+        except Exception:                                       # noqa: BLE001
+            pass
+        return "default"
+
     def _refuse(self, rec: ApprovalRecord, code: str, message: str, *,
                 principal: str | None = None, event: str = EVENT_REQUESTED,
                 args: Any = None) -> None:
@@ -838,6 +865,7 @@ class ApprovalStore:
                reversibility: str, requested_by: str, targets: Iterable[str] | None = None,
                approver_role: str | None = None, signals: Any = None,
                run_id: str | None = None, proposal: str | None = None,
+               tenant: str | None = None,
                ttl_s: float | None = None, request_id: str | None = None,
                supersedes: str | None = None) -> ApprovalRecord:
         """Open a request. **The layer calls this; the model cannot.**
@@ -890,6 +918,7 @@ class ApprovalStore:
             targets=[str(t) for t in target_list], effect=str(effect),
             data=str(data), reversibility=str(reversibility),
             approver_role=approver_role, requested_by=actor, requested_at=now,
+            tenant=(str(tenant) if tenant else self._tenant_of(actor)),
             expires_at=now + window, ttl_s=window, run_id=run_id,
             proposal=proposal,
             provenance={"source": state_mod.APPROVAL_AUTHOR_SOURCE,
@@ -1021,6 +1050,33 @@ class ApprovalStore:
         self._write(new)
         self._record(new, event=EVENT_APPLIED, code=EVENT_APPLIED,
                      decision="allow", principal=actor, args=about_to_run)
+        return new
+
+    # ------------------------------------------------------- WS4 — the outcome
+    def record_outcome(self, request_id: str, *, rows_changed: int,
+                       recorded_by: str | None = None) -> ApprovalRecord:
+        """Attach the measured mutation outcome to an APPLIED record.
+
+        Called once by the apply route after the mutation commits — never by
+        the store transitions themselves, so the state machine stays pure and
+        the measurement stays with the execution seam that observed it.
+        Idempotent: re-recording returns the record unchanged.
+        """
+        rec = self.get(str(request_id))
+        if rec is None:
+            raise ApprovalRefusal(REFUSAL_INVALID_STATE,
+                                  f"no approval record {request_id!r} exists",
+                                  request_id=str(request_id))
+        if rec.state != STATE_APPLIED:
+            raise ApprovalRefusal(REFUSAL_INVALID_STATE,
+                                  f"request {rec.request_id} is {rec.state}, not "
+                                  f"{STATE_APPLIED} — outcomes attach to applied "
+                                  "records only",
+                                  request_id=rec.request_id, state=rec.state)
+        if rec.applied_rows_changed == int(rows_changed or 0):
+            return rec
+        new = rec._replace(applied_rows_changed=int(rows_changed or 0))
+        self._write(new)
         return new
 
     # --------------------------------------------------------------- compensate

@@ -87,6 +87,8 @@ def z1_registry_is_demo() -> tuple[bool, str]:
                 elif call == "approval_workflow":
                     # Day 27 designed not built - this is expected to not exist yet
                     pass
+                elif call == "sandbox.run_tests":
+                    from ai_os.sandbox import run_tests  # noqa: F401
                 else:
                     return False, f"scenario {sc['id']}: unknown library call {call}"
         elif route["kind"] == "none":
@@ -192,32 +194,41 @@ def z4_customer() -> tuple[bool, str]:
 # --------------------------------------------------------------------------- #
 
 def z5_engineering_absence() -> tuple[bool, str]:
-    """S5 asserts no test-runner tool; no ai_os/ module spawns subprocess/shell;
-    neither corpus holds test outcome; pending names owner with categorical reason."""
+    """S5 (WS8): the absence fixture inverted — run_tests executes pytest in
+    the sandbox and returns a measured {passed, failed, log_sha256,
+    log_excerpt}; refusals (destructive/escape/timeout) are typed, never
+    silent. Proves the mechanism live on a generated green suite."""
+    from pathlib import Path as _Path
     scenarios = load_scenarios()
     s5 = next(s for s in scenarios if s["id"] == "S5")
 
-    if s5["route"]["kind"] != "none":
-        return False, "S5: route.kind should be 'none'"
+    if s5["route"].get("call") != "sandbox.run_tests":
+        return False, "S5: route.call should be sandbox.run_tests"
 
-    if s5["expect"]["tools"] != []:
-        return False, "S5: tools should be empty list"
+    if s5["expect"]["tools"] != ["run_tests"]:
+        return False, "S5: tools should be [run_tests]"
 
-    if s5["expect"]["invariant"] is not None:
-        return False, "S5: invariant should be null"
+    if s5["expect"]["invariant"] != "sandboxed_pass_fail":
+        return False, "S5: invariant should be sandboxed_pass_fail"
 
     finding = s5.get("finding", "")
-    if "no test-runner tool" not in finding:
-        return False, "S5: finding does not mention missing test-runner tool"
+    if "run_tests" not in finding or "sandbox" not in finding.lower():
+        return False, "S5: finding must name the run_tests tool + sandbox"
 
     pending = s5.get("pending", [])
-    if not any("run_tests" in p for p in pending):
-        return False, "S5: pending does not name run_tests tool owner"
+    if not any("sandbox" in p.lower() or "docker" in p.lower() for p in pending):
+        return False, "S5: pending must name the residual hardening owner"
 
-    if not any("sandbox" in p.lower() or "execution" in p.lower() for p in pending):
-        return False, "S5: pending does not mention sandbox/execution authority"
+    from ai_os import sandbox as _sandbox
+    with tempfile.TemporaryDirectory(prefix="z5-") as tmp:
+        suite = _Path(tmp) / "test_z5_green.py"
+        suite.write_text("def test_z5_green():\n    assert 1 + 1 == 2\n",
+                         encoding="utf-8")
+        out = _sandbox.run_tests(suite.name, repo=_Path(tmp), timeout_s=60)
+    if not out.get("passed") or len(out.get("log_sha256") or "") != 64:
+        return False, f"S5: live sandboxed run did not pass cleanly: {out}"
 
-    return True, "S5 absence fixture: enumerated tool registry, no subprocess, no test outcome, owner with categorical reason"
+    return True, "S5 sandboxed pass/fail: measured outcome + sha, refusals typed, residual owner named"
 
 
 # --------------------------------------------------------------------------- #
@@ -247,30 +258,40 @@ def z6_operational() -> tuple[bool, str]:
 # --------------------------------------------------------------------------- #
 
 def z7_controlled_absence() -> tuple[bool, str]:
-    """S7 asserts no effect:write grant; statement_allow=[select,with]; one
-    query method per store, no mutation; Postgres session read-only."""
+    """S7 asserts the controlled write: grant + approval gated, measured rows.
+
+    WS3 built the write path, WS4 the decide/apply workflow — so the absence
+    fixture inverted into a gate fixture: writes are *possible* only with an
+    `effect: write` grant and an approval id (`tools/write_smoke.py` proves
+    the mechanism, `tools/apply_smoke.py` the workflow); the shipped policy
+    still grants no write head/table, so the default posture stays closed.
+    """
+    from ai_os.sql_safety import load_policy
     scenarios = load_scenarios()
     s7 = next(s for s in scenarios if s["id"] == "S7")
 
+    route = s7.get("route", {})
+    if route.get("kind") != "http" or route.get("path") != "/approvals/{request_id}/apply":
+        return False, "S7: route must be POST /approvals/{request_id}/apply"
     labels = s7["expect"].get("labels", {})
-    if labels.get("saleor_rows_changed") != 0:
-        return False, f"S7: saleor_rows_changed is {labels.get('saleor_rows_changed')}, expected 0"
-    if labels.get("wrote") is not False:
-        return False, f"S7: wrote is {labels.get('wrote')}, expected false"
-
+    if labels.get("applied") is not True:
+        return False, f"S7: applied label is {labels.get('applied')}, expected true"
+    if labels.get("compensated") is not False:
+        return False, "S7: compensated label must be false (success path)"
     refusal = s7["expect"].get("refusal_on", [])
-    if not any("write path" in r for r in refusal):
-        return False, "S7: missing refusal_on for no write path"
-    if not any("effect:write" in r for r in refusal):
-        return False, "S7: missing refusal_on for no effect:write grant"
+    for needed in ("unapproved write", "digest mismatch", "double apply"):
+        if not any(needed in r for r in refusal):
+            return False, f"S7: missing refusal_on for {needed!r}"
 
-    pending = s7.get("pending", [])
-    if not any("approval workflow" in p.lower() for p in pending):
-        return False, "S7: pending does not mention approval workflow"
-    if not any("write path" in p.lower() for p in pending):
-        return False, "S7: pending does not mention write path"
-
-    return True, "S7 absence fixture: no write grant, statement_allow=[select,with], no mutation methods, read-only session"
+    # The shipped default stays closed: heads and tables empty, approval on.
+    policy = load_policy()
+    if policy.statement_allow_write or policy.write_tables_allow:
+        return False, ("S7: shipped policy grants writes — the default posture "
+                       "must stay closed")
+    if not policy.require_approval:
+        return False, "S7: require_approval must stay on"
+    return True, ("S7 gate fixture: grant+approval-gated writes measured, "
+                  "shipped default closed, decide/apply/idempotency in F-suite")
 
 
 # --------------------------------------------------------------------------- #
@@ -289,7 +310,7 @@ def z8_scorecard() -> tuple[bool, str]:
         "S2": ["bench_rag (R1-R9)", "retrieval_day10 (stub)", "eval_harness (golden)"],
         "S3": ["data_smoke (Q1-Q8)", "sql_attack_smoke (X1-X11)"],
         "S4": ["plan_smoke (P1-P9)", "bench_agent (AB1-AB9)"],
-        "S5": ["absence fixture (no harness)"],
+        "S5": ["sandbox_smoke (B1-B6)"],
         "S6": ["trace_smoke (O1-O9)", "distributed_smoke (D1-D9)"],
         "S7": ["approval_smoke (H1-H9)", "absence fixture"],
     }
@@ -356,7 +377,7 @@ Z_FIXTURES = [
     ("Z2", "knowledge and code", z2_knowledge_code),
     ("Z3", "data", z3_data),
     ("Z4", "customer investigation", z4_customer),
-    ("Z5", "engineering investigation (absence)", z5_engineering_absence),
+    ("Z5", "engineering investigation (sandboxed)", z5_engineering_absence),
     ("Z6", "operational investigation", z6_operational),
     ("Z7", "controlled action (absence)", z7_controlled_absence),
     ("Z8", "scorecard", z8_scorecard),

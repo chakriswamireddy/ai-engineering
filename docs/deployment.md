@@ -154,20 +154,24 @@ that under-declares memory is a crash loop with a cause nobody can see.
 
 ## Residual Register (PENDING with owners)
 
-| item | trigger | owner |
-|------|---------|-------|
-| rate limiter attachment | TLS + identity + ALB land | WS1 (identity day) |
-| TLS, reverse proxy, service unit, compose file | orchestration story earned | WS9 (K8s/service-unit; staging covered by Phase 0-A Compose+Nginx) |
-| external anchor for audit chain | KMS + append-only store | WS9 (KMS anchor) |
-| connection pool + read replica | two processes (delayed by single-writer lock) | WS7/WS9 (pool + PgBouncer) |
-| trace sink + retention | sink exists | WS7 (trace sink) |
-| ANN / real vector store | corpus × 10 | WS5 (real code store) |
-| object storage (S3) | corpus refresh slower than deploy | WS7 (S3 object storage) |
+| item | trigger | owner | status (WS9 close-out) |
+|------|---------|-------|------------------------|
+| rate limiter attachment | TLS + identity + ALB land | WS1 (identity day) | **landed (WS9)** — per-tenant/principal quotas in the identity middleware, 429 + `Retry-After` (`ai_os/rate.py`); Redis shared when `REDIS_URL` set, memory otherwise, off by default offline |
+| TLS, reverse proxy, service unit, compose file | orchestration story earned | WS9 (K8s/service-unit; staging covered by Phase 0-A Compose+Nginx) | **manifests landed** (`k8s/`: Deployment rolling update, HPA 2–10, PDB, External Secrets) — in-repo TLS terminator still staging-owned (edge terminates TLS) |
+| external anchor for audit chain | KMS + append-only store | WS9 (KMS anchor) | **landed** — `seal_audit`/`verify_seal` (`AUDIT_SEAL_PATH`, KMS object in staging); detects tail truncation and head rewrites that `verify()` cannot see (survive R8) |
+| connection pool + read replica | two processes (delayed by single-writer lock) | WS7/WS9 (pool + PgBouncer) | **landed** — `saleor-platform/pgbouncer.ini` (reader/writer pools) + table-scoped `saleor_writer` role; one-writer across replicas via Postgres advisory lock (`STATE_ADVISORY_DSN`) |
+| trace sink + retention | sink exists | WS7 (trace sink) | **landed (WS7)** — file/Postgres sinks, 30d raw / 90d aggregates |
+| ANN / real vector store | corpus × 10 | WS5 (real code store) | **embeddings landed (WS5)** — self-hosted Ollama bge-base 768-d; ANN index for ×10 growth still open |
+| object storage (S3) | corpus refresh slower than deploy | WS7 (S3 object storage) | **open** — file + Postgres sinks shipped; S3 not |
 
 ## Clean Claims (carried forward)
 
-- `Wrote? = no` (unchanged; second reason: no write path, so nothing to scale and no migration to run)
-- `Saleor rows changed: 0` (Day 27's lifecycle number; `SALEOR_READONLY_DB_URL` is a *read-only* URL)
+- `Wrote? = no` on every read route (WS3 added a write path: writes now require
+  an approval + digest, so the *unapproved* write count stays 0 by construction —
+  S7 measures `rows_changed=1` only after support_lead approves and executor applies)
+- `Saleor rows changed: 0` against **real** Saleor (the URL is still read-only;
+  S7's measured row lives on the `SEED_SQL` stub backend — `SALEOR_WRITER_DB_URL`
+  to real Saleor remains unexercised and named)
 - `0 chats` for every `MECH` fixture in this series (why 29 days were affordable)
 
 ## Run Command (documented, pasteable)

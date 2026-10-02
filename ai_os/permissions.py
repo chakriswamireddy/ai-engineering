@@ -84,7 +84,12 @@ from ai_os.sql_safety import Policy, load_policy
 EFFECT_READ = "read"
 EFFECT_WRITE = "write"
 EFFECT_NONE = "none"
-EFFECTS = frozenset({EFFECT_READ, EFFECT_WRITE, EFFECT_NONE})
+# WS8 — the first executing tool: `run_tests` runs code (neither a read nor a
+# write of data), so it declares `effect: execute`. Like `write`, `execute`
+# requires `confirm: human` at load time — executing without an approval is a
+# boot error, not a runtime surprise.
+EFFECT_EXECUTE = "execute"
+EFFECTS = frozenset({EFFECT_READ, EFFECT_WRITE, EFFECT_NONE, EFFECT_EXECUTE})
 
 DATA_PUBLIC = "public"
 DATA_INTERNAL = "internal"
@@ -420,6 +425,12 @@ class Grant:
                              "an explicit confirm — a write states `confirm: human` "
                              "(irreversible) or `confirm: none` (reversible, an "
                              "acknowledged downgrade) in the file itself")
+        if effect == EFFECT_EXECUTE and "confirm" not in raw:
+            # WS8 — executing code is never ungated by omission: an `execute`
+            # grant states its confirm in the file, like a write.
+            raise ValueError(f"{source}: tools.{tool} declares effect: execute without "
+                             "an explicit confirm — execution states "
+                             "`confirm: human` in the file itself")
         if reversibility == REVERSIBILITY_IRREVERSIBLE and confirm != CONFIRM_HUMAN:
             # Day 26's rule, re-expressed as the *derived case*: with reversibility
             # as the axis, `effect: write ⇒ confirm: human` is the instance
@@ -616,6 +627,11 @@ class PermissionSet:
     # file, and the two roles the approval workflow resolves (`approver_role` per
     # grant, and `executor`) both live here.
     approver_roles: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # WS1 — `principal → tenant` (reads scope to one tenant; absent ⇒ "default")
+    # and `role → members` (route-level roles for WS2; a grant supplement, never
+    # a grant replacement — deny-by-default is unchanged).
+    tenants: dict[str, str] = field(default_factory=dict)
+    role_bindings: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     # ------------------------------------------------------------------ loaders
     @classmethod
@@ -624,7 +640,8 @@ class PermissionSet:
                   policy: Policy | None = None) -> "PermissionSet":
         if not isinstance(raw, dict):
             raise ValueError(f"{source}: permissions must be a mapping")
-        allowed_top = {"version", "principals", "tools", "approver_roles"}
+        allowed_top = {"version", "principals", "tools", "approver_roles",
+                       "tenants", "role_bindings"}
         unknown_top = [k for k in raw if k not in allowed_top]
         if unknown_top:
             raise ValueError(f"{source}: unknown key(s) {unknown_top} "
@@ -674,10 +691,14 @@ class PermissionSet:
                              f"{DEFAULT_PRINCIPAL!r} set (the strict fallback)")
 
         approver_roles = cls._approver_roles(raw.get("approver_roles"), principals,
-                                             source=source)
+                                              source=source)
+        tenants = cls._tenants(raw.get("tenants"), principals, source=source)
+        role_bindings = cls._role_bindings(raw.get("role_bindings"), principals,
+                                           source=source)
         ps = cls(principals=principals, tools=grants,
                  policy=policy if policy is not None else load_policy(), source=source,
-                 approver_roles=approver_roles)
+                 approver_roles=approver_roles, tenants=tenants,
+                 role_bindings=role_bindings)
         ps._cross_check()
         ps._check_roles()
         return ps
@@ -704,6 +725,54 @@ class PermissionSet:
                 raise ValueError(f"{source}: approver_roles.{role} names undeclared "
                                  f"principal(s) {unknown} — a role held by nobody the "
                                  "file knows is a role nobody can ever hold")
+            out[str(role).strip()] = tuple(str(m) for m in members)
+        return out
+
+    @staticmethod
+    def _tenants(raw: Any, principals: dict[str, Principal], *,
+                 source: str) -> dict[str, str]:
+        """`principal → tenant`. Absent ⇒ `"default"`; unknown principal ⇒ load
+        error (a tenant for a caller the file does not know scopes nothing)."""
+        if raw is None:
+            return {}
+        if not isinstance(raw, dict):
+            raise ValueError(f"{source}: tenants must be a mapping of principal → "
+                              "tenant")
+        out: dict[str, str] = {}
+        for name, tenant in raw.items():
+            if name not in principals:
+                raise ValueError(f"{source}: tenants.{name} names an undeclared "
+                                  "principal — a tenant for an unknown caller "
+                                  "scopes nothing")
+            if not isinstance(tenant, str) or not tenant.strip():
+                raise ValueError(f"{source}: tenants.{name} must be a non-empty "
+                                  "tenant name")
+            out[str(name)] = str(tenant).strip()
+        return out
+
+    @staticmethod
+    def _role_bindings(raw: Any, principals: dict[str, Principal], *,
+                       source: str) -> dict[str, tuple[str, ...]]:
+        """`role → members`, the route-level bindings WS2 enforces. Members must
+        be declared principals; a binding grants no tool by itself."""
+        if raw is None:
+            return {}
+        if not isinstance(raw, dict):
+            raise ValueError(f"{source}: role_bindings must be a mapping of role → "
+                              "principals")
+        out: dict[str, tuple[str, ...]] = {}
+        for role, members in raw.items():
+            if not isinstance(role, str) or not role.strip():
+                raise ValueError(f"{source}: role_bindings keys must be non-empty "
+                                  "role names")
+            if not isinstance(members, list) or not all(isinstance(m, str)
+                                                       for m in members):
+                raise ValueError(f"{source}: role_bindings.{role} must be a list "
+                                  "of principal names")
+            unknown = [m for m in members if m not in principals]
+            if unknown:
+                raise ValueError(f"{source}: role_bindings.{role} names undeclared "
+                                  f"principal(s) {unknown}")
             out[str(role).strip()] = tuple(str(m) for m in members)
         return out
 
@@ -810,6 +879,21 @@ class PermissionSet:
     def role_holders(self, role: str) -> tuple[str, ...]:
         return tuple(self.approver_roles.get(str(role), ()))
 
+    # ------------------------------------------------------------ WS1 tenancy
+    def tenant_of(self, name: str | None) -> str:
+        """The caller's tenant for read-scoping. Unknown ⇒ `"default"` — the
+        same fallback direction as the grants (less privilege, never more)."""
+        if name is None:
+            return "default"
+        return self.tenants.get(str(name), "default")
+
+    def roles_of(self, name: str | None) -> tuple[str, ...]:
+        """Route-level roles held via `role_bindings` (WS2 enforces them)."""
+        if name is None:
+            return ()
+        return tuple(r for r, members in self.role_bindings.items()
+                     if str(name) in members)
+
     def holds_approver_role(self, principal: str | None, role: str | None) -> bool:
         """Does this principal **hold** this role, as a grant?
 
@@ -840,6 +924,9 @@ class PermissionSet:
         return {"source": self.source,
                 "principals": {n: p.as_dict() for n, p in self.principals.items()},
                 "approver_roles": {r: list(m) for r, m in self.approver_roles.items()},
+                "tenants": dict(self.tenants),
+                "role_bindings": {r: list(m)
+                                  for r, m in self.role_bindings.items()},
                 "tools": {t: g.as_dict() for t, g in self.tools.items()}}
 
 

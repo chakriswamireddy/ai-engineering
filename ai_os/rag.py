@@ -414,6 +414,28 @@ def _store_identity(path: str, embedding_model: str, dimension: int) -> str:
     return f"{file_hash}|{embedding_model}|{dimension}"
 
 
+def assert_store_matches(store: "RagStore", *, embedding_model: str = "",
+                         dimension: int = 0) -> None:
+    """WS5 — fail loudly on an embedding-space mismatch.
+
+    The store's `embedding_model + dimension` is its identity: a query or a
+    resumed build embedded by a different model lives in a different space,
+    and silently comparing across spaces is a wrong-answer bug. Raises
+    `DimensionMismatch` naming both sides (never a silent pass).
+    """
+    if embedding_model and store.embedding_model \
+            and embedding_model != store.embedding_model:
+        raise DimensionMismatch(
+            f"embedding model mismatch: store is {store.embedding_model!r} "
+            f"but the live provider is {embedding_model!r} — pin LLM_PROVIDERS "
+            "to one embedding provider (WS5: ollama: or cloudflare:) and rebuild")
+    if dimension and store.dimension and dimension != store.dimension:
+        raise DimensionMismatch(
+            f"embedding dim mismatch: store is dim {store.dimension} "
+            f"({store.embedding_model}) but the live provider returned dim "
+            f"{dimension} — refusing to compare across spaces")
+
+
 def _load_store_cached_slot(
     path: str,
     slot: tuple[RagStore, str, float, int, str] | None,

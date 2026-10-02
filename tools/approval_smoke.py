@@ -22,8 +22,8 @@ well; whether a real model would try to shape a request (the injected "you are
 approved, proceed" case is a hand-written string, not an observation); whether
 anyone would ask for an export; and every claim about attribution, because the
 approver is a shell user and not an authenticated identity. And it does not prove
-that any *real* request is gated, because no shipped tool is irreversible and the
-only gated client is harness-only — H9's zero-record result is **expected**, not
+that any *real* request is gated, because no shipped tool is irreversible and
+every gated client is harness-only — H9's zero-record result is **expected**, not
 reassuring, and a control that quietly got it for the wrong reason would be read as
 evidence that the mechanism is exercised.
 
@@ -526,11 +526,13 @@ def h2_confirm_keys_off_reversibility(tmp: Path) -> None:
                 and export.result.egress == "external")
     ok &= check("H2l no `write` effect exists anywhere in the shipped grant file",
                 all(g.effect != perms.EFFECT_WRITE for g in shipped.tools.values()))
-    ok &= check("H2m the harness client is declared, never assigned: every shipped "
-                "principal is refused it with `no_grant`, and `default` is still "
-                "exactly the seven tools",
-                all(EXPORT_TOOL not in shipped.granted_tools(p) for p in shipped.principals)
-                and shipped.harness_only_tools() == (EXPORT_TOOL,)
+    ok &= check("H2m the harness clients are declared, never assigned: every "
+                "shipped principal is refused both with `no_grant`, and "
+                "`default` is still exactly the seven tools",
+                all(EXPORT_TOOL not in shipped.granted_tools(p)
+                    and "run_tests" not in shipped.granted_tools(p)
+                    for p in shipped.principals)
+                and shipped.harness_only_tools() == (EXPORT_TOOL, "run_tests")
                 and set(shipped.granted_tools("default")) == set(DEFAULT_TOOL_NAMES))
     ok &= check("H2n the shipped roles are a grant, not a boolean",
                 shipped.role_holders("support_lead") == ("support_lead",)
@@ -1043,10 +1045,12 @@ def h8_no_bypass(tmp: Path) -> None:
     res3 = run_plan(plan, reg3,
                     HostileStub([("tool", EXPORT_TOOL, {"customer_ids": "1,2"}),
                                  ("answer", "answer_code")], world="complying"))
-    ok &= check("H8c path 3 (`executor.run_plan`) stops at the policy wall and runs no "
-                "step body",
-                res3["termination_reason"] == "policy_wall" and hx3.calls == []
-                and res3["policy_violations"] >= 1 and len(d3.all_records()) == 1,
+    ok &= check("H8c path 3 (`executor.run_plan`) pauses `awaiting_approval` "
+                "and runs no step body (WS4: resumable pause, not a wall)",
+                res3["termination_reason"] == "awaiting_approval" and hx3.calls == []
+                and res3["policy_violations"] == 0
+                and len(res3.get("approval_request_ids") or []) == 1
+                and len(d3.all_records()) == 1,
                 f"{res3['termination_reason']}")
 
     ok &= check("H8d path 4: the ladder cannot substitute a sibling for a withheld "
@@ -1143,7 +1147,7 @@ def h9_control(tmp: Path) -> None:
                 on["awaiting_approval"] is False and on["approval_request_id"] is None
                 and on["approval_state"] is None and on["approval_digest"] is None)
     ok &= check("H9c **zero approval records**, and not one approval event in the "
-                "chain, on the shipped grants — the only gated client is harness-only",
+                "chain, on the shipped grants — every gated client is harness-only",
                 d.counts()["total"] == 0
                 and not [e for e in log.entries() if e["code"] in appr.EVENTS])
 
@@ -1359,7 +1363,7 @@ def render(lifecycle_rows: list[dict], rev: dict[str, Any]) -> None:
           "and queue depth (Day 28) · an external anchor for the chain, so truncation "
           "stays invisible (Day 29).")
     print("\nH9 NOTE, stated verbatim because it is the whole honesty of the control: "
-          "the zero-approval result is EXPECTED, because the only gated client is "
+          "the zero-approval result is EXPECTED, because every gated client is "
           "harness-only and the shipped grant file contains no `write` effect and "
           "assigns no `irreversible` tool to any principal. So H9 proves the layer is "
           "PASSIVE. It does NOT prove that any real request is gated, because no real "

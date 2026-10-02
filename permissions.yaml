@@ -81,6 +81,22 @@ approver_roles:
   support_lead: [support_lead]
   executor:     [executor]
 
+# WS1 — tenancy and route roles. `tenants` scopes reads (audit + approvals
+# surfaces filter to the caller's tenant; absent ⇒ "default"). `role_bindings`
+# names route-level roles WS2 enforces; a binding grants no tool by itself, so
+# deny-by-default is unchanged.
+tenants:
+  analyst: acme
+  support: acme
+  support_lead: acme
+  executor: acme
+
+role_bindings:
+  reader:   [default, analyst, support]
+  operator: [analyst, support_lead]
+  approver: [support_lead]
+  runner:   [executor]
+
 # Per-tool declarations. `effect: read` everywhere — the file's maximum authority
 # is a read, and a `write` may only be added with `confirm: human` (which no tool in
 # this repository implements yet; the C3 fixture proves the refusal).
@@ -181,3 +197,24 @@ tools:
     args: {customer_ids: {maxLength: 2048, pattern: "^[A-Za-z0-9_,-]{1,2048}$"}}
     result: {columns: [id, email, orders, currency], max_rows: 500,
              egress: external}               # where the result goes is part of the contract
+
+  # WS8 §5 — the first executing tool. `effect: execute` (neither a read nor a
+  # write of data): running a test file runs arbitrary code, so the grant
+  # carries `confirm: human` (support_lead approves, executor applies) and is
+  # `harness_only` — fixtures and the S5 demo register it from their own
+  # PermissionSet, while the shipped seven-tool registry refuses it for every
+  # principal with `no_grant`. The Day-25 firewall scans `targets` (a
+  # model-supplied string crossing into execution); the sandbox caps the log
+  # (excerpt + sha, never the full log).
+  run_tests:
+    effect: execute
+    data: internal
+    reversibility: reversible               # a sandboxed run changes no external world
+    compensation: *read_none                # rerun to confirm; nothing to put back
+    confirm: human                           # execution without an approval is a boot error
+    approver_role: support_lead
+    harness_only: true
+    args:
+      targets: {maxLength: 2048, pattern: "^[A-Za-z0-9_./\\- ]{1,2048}$"}
+      timeout_s: {minimum: 1, maximum: 600}
+    result: {columns: [passed, failed, log_sha256, log_excerpt], max_rows: 1}

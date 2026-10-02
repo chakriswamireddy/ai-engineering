@@ -19,6 +19,14 @@
 # so self-correction must not help it find a workaround).
 statement_allow: [select, with]
 
+# WS3 — the write path. Both empty by default: no write head is permitted
+# (`statement_allow_write`) on no table (`write_tables_allow`) until a human
+# grants them, and every write requires an approval id (`require_approval`).
+# Enabling writes is a reviewed file change stating heads + tables together.
+statement_allow_write: []
+write_tables_allow: []
+require_approval: true
+
 # The allow-listed schema — Day 14's SCHEMA_CARD, verbatim. A table outside it
 # is invisible: rejected *before* the database, as a policy decision the layer
 # owns (not an unknown-table error the engine happens to return).

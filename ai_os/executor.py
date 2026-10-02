@@ -36,7 +36,10 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:                                   # WS1 — annotation only
+    from ai_os.identity import Principal
 
 from ai_os.agent import (
     SIBLING_TOOLS,
@@ -76,6 +79,8 @@ from ai_os.state import (
     persist_task_state,
     task_key,
 )
+# WS4 — the resume path reads the approval desk, never the network.
+from ai_os.approval import STATE_APPLIED
 from ai_os.tools import (
     ERROR_TIMEOUT,
     REJECTION_KINDS,
@@ -139,6 +144,17 @@ PLAN_TERMINATION_NOTE: dict[str, str] = {
         "The run's budget ended the plan before it finished. Answer strictly from "
         "the observations already in this transcript and say that the budget "
         "stopped it. Do NOT invent evidence."
+    ),
+    # WS4 — the human pause: name the request, say nothing was applied, and do
+    # not retry, rephrase, or work around — a person decides this, not you.
+    "awaiting_approval": (
+        "The run paused because a step requires human approval and the permission "
+        "layer opened a durable approval request for it (its id is in the step "
+        "observation). Nothing was applied. State that the action requires human "
+        "approval, name the request id, and say it is pending a person. Do NOT "
+        "attempt the call again, do NOT rephrase it, and do NOT look for a "
+        "workaround. Answer only from the observations already in this "
+        "transcript. Do NOT invent evidence."
     ),
 }
 
@@ -221,6 +237,28 @@ def _execute_step_call(call, vr, step: Step, *, registry: ToolRegistry,
             clock=clock, decision=vr.decision)
     else:
         result = vr
+
+    # WS4 — the human pause, before the wall and before every rung: an
+    # `approval_required` result carries the opened request on
+    # `result.approval`. It is `policy`-classed by construction, so this check
+    # must precede the wall — otherwise a resolvable human pause degrades into
+    # an unresumable wall. No retry, no repair, no fallback touches it (a rung
+    # that "fixed" an approval refusal would be a bypass).
+    approval = getattr(result, "approval", None)
+    approval_request_id = (approval.get("request_id")
+                           if isinstance(approval, dict) else None)
+    if result.error_kind == "approval_required":
+        msg, clamped = _tool_message(call, result, budget_chars)
+        row = _call_row(call, vr, result, clamped, elapsed_ms=elapsed_ms,
+                        fp=fingerprint(call))
+        row["awaiting_approval"] = True
+        row["approval_request_id"] = approval_request_id
+        return {"call": call, "result": result, "row": row, "msg": msg,
+                "ledger_row": _ledger_row(call, result, clamped), "policy": False,
+                "awaiting": True, "approval_request_id": approval_request_id,
+                "failed": False, "rung": None, "elapsed_ms": elapsed_ms,
+                "retries": 0, "repairs": 0, "fallbacks": 0, "timeouts": 0,
+                "error": _call_error(call, result)}
 
     # The wall comes first: nothing below may touch a policy refusal.
     if result.rejection_class == POLICY_CLASS:
@@ -312,6 +350,40 @@ def _execute_step_call(call, vr, step: Step, *, registry: ToolRegistry,
 
 
 # ------------------------------------------------------------ default rungs
+def _resumed_application(registry: ToolRegistry, st: ExecutionState,
+                         sid: str) -> dict[str, Any] | None:
+    """The desk half of resume: is the awaited request APPLIED since the pause?
+
+    Returns the satisfaction observation without executing anything (the action
+    already happened — re-executing would double-apply), or `None` when the
+    step must run (and pause) again. Reads the registry's own desk, so an
+    executor without a desk always re-runs.
+    """
+    try:
+        rec = st.record(sid)
+    except Exception:                                           # noqa: BLE001
+        return None
+    request_id = getattr(rec, "approval_request_id", None)
+    desk = getattr(registry, "_approvals", None)
+    if not request_id or desk is None or not hasattr(desk, "get"):
+        return None
+    try:
+        approved = desk.get(str(request_id))
+    except Exception:                                           # noqa: BLE001
+        return None
+    if approved is None or getattr(approved, "state", None) != STATE_APPLIED:
+        return None
+    observation = {"applied": True, "request_id": approved.request_id,
+                   "tool": approved.tool, "digest": approved.digest,
+                   "rows_changed": getattr(approved, "applied_rows_changed", 0),
+                   "applied_by": approved.applied_by,
+                   "resumed_without_reexecution": True}
+    row = {"result_ok": True, "awaiting_resumed": True,
+           "request_id": approved.request_id,
+           "observation": observation}
+    return {"observation": observation, "row": row}
+
+
 def _default_repair(gateway) -> Callable[[Step, dict[str, Any]], dict | None]:
     def fn(step: Step, error: dict[str, Any]) -> dict[str, Any] | None:
         return repair_args(step, error, gateway)
@@ -343,7 +415,7 @@ def run_plan(plan: Plan, registry: ToolRegistry, gateway, *,
              state: ExecutionState | None = None,
              resume: bool = False,
              state_store=None,
-             principal: str | None = None,
+             principal: "Principal | str | None" = None,
              task_id: str | None = None,
              run_id: str | None = None,
              resume_from_store: bool = False,
@@ -389,8 +461,14 @@ def run_plan(plan: Plan, registry: ToolRegistry, gateway, *,
     # Day 17 §5 — resolve the store, then load the checkpoint it holds. The task is
     # keyed by `task_id`; a fresh process resumes because the *file* survived.
     store_on = state_store is not None
+    # WS1 — same identity seam as `run_agent`: a `Principal` passes
+    # through, a string keeps its meaning, `None`/"" falls back to the store.
+    from ai_os import identity as _identity
+
+    if store_on and not principal:
+        principal = state_store.principal
+    principal = _identity.coerce(principal).id
     if store_on:
-        principal = principal or state_store.principal
         run_id = run_id or _new_run_id()
         task_id = task_id or f"task-{run_id}"
     resumed_from_store = False
@@ -439,7 +517,23 @@ def run_plan(plan: Plan, registry: ToolRegistry, gateway, *,
             sid = queue.pop(0)
             step = plan.step(sid)
             if step is None or sid in done:
-                continue                       # resumed: a completed step is not re-run
+                continue                   # resumed: a completed step is not re-run
+
+            # WS4 — the resume half of `awaiting_approval`: a step paused on a
+            # human decision checks the desk before re-executing. An APPLIED
+            # request means the action already happened out-of-band (e.g. the
+            # `/approvals/{id}/apply` route) — the step is satisfied WITHOUT
+            # re-executing, which is what makes resume safe against
+            # double-application. Anything else re-runs and pauses again.
+            if resume and st.status(sid) == "awaiting_approval":
+                applied = _resumed_application(registry, st, sid)
+                if applied is not None:
+                    st.set_status(sid, "done", diverged=False,
+                                  error=None, observation=applied["observation"])
+                    st.checkpoint(sid)
+                    flush(sid)
+                    step_rows.append(applied["row"])
+                    continue
 
             unmet = [d for d in step.depends_on if d not in st.done_ids()]
             if unmet:
@@ -503,6 +597,20 @@ def run_plan(plan: Plan, registry: ToolRegistry, gateway, *,
             rec.tool = ", ".join(c.name for c in calls)
             rec.evidence = list(row_trace["retrieved"])
             rec.observation = rows[0] if rows else None
+
+            # WS4 — the pause half: an approval-withheld step checkpoints as
+            # `awaiting_approval` (resumable) instead of `policy_wall` (terminal).
+            # The checkpoint is flushed, so the pause survives the process.
+            awaiting = [r for r in rows if r.get("awaiting_approval")]
+            if awaiting:
+                req_id = awaiting[0].get("approval_request_id")
+                st.set_status(sid, "awaiting_approval",
+                              error="awaiting human approval",
+                              approval_request_id=req_id)
+                st.checkpoint(sid)
+                flush(sid)
+                termination = "awaiting_approval"
+                break
 
             if step_policy:
                 policy_hits += 1
@@ -611,6 +719,13 @@ def run_plan(plan: Plan, registry: ToolRegistry, gateway, *,
         "replans": st.replans,
         "policy_walls": state_dict["policy_walls"],
         "policy_violations": policy_hits,
+        # WS4 — the human-pause columns: which requests the run waits on.
+        "awaiting_approval": termination == "awaiting_approval",
+        "approval_request_ids": [
+            str(rec.get("approval_request_id") or "")
+            for rec in state_dict["steps"]
+            if rec.get("status") == "awaiting_approval"
+            and rec.get("approval_request_id")],
         "deps_respected": not any(
             str(rec.get("error") or "").startswith("unmet dependency")
             for rec in state_dict["steps"]),

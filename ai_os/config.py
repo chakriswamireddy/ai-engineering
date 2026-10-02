@@ -60,6 +60,8 @@ def provider_from_spec(provider: str, model: str):
     api_key = os.getenv(f"{provider.upper()}_API_KEY", "").strip() or os.getenv("OPENAI_API_KEY", "").strip()
     base_url = (os.getenv(f"{provider.upper()}_BASE_URL", "").strip()
                 or (default_url or "https://api.openai.com/v1"))
+    # WS5 — ollama is self-hosted (no key): an empty key is valid, and the
+    # daemon URL comes from OLLAMA_BASE_URL (default 127.0.0.1:11434).
     kwargs = {}
     if hasattr(cls, "DEFAULT_EMBED_MODEL"):
         kwargs["embedding_model"] = (os.getenv(f"{provider.upper()}_EMBEDDING_MODEL", "").strip()
@@ -77,13 +79,18 @@ def build_gateway_from_env() -> ModelGateway:
     specs = _provider_specs()
     if not specs:
         specs = [("openai", "gpt-4o-mini")]
-    providers = [
-        provider_from_spec(p, m)
-        for p, m in specs
-        if os.getenv(f"{p.upper()}_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
-    ]
-    missing = [p for p, _ in specs
-               if not (os.getenv(f"{p.upper()}_API_KEY", "") or os.getenv("OPENAI_API_KEY", ""))]
+    # WS5 — providers that need no key (self-hosted daemons like ollama).
+    _NO_KEY = {"ollama"}
+    providers = []
+    for p, m in specs:
+        key = os.getenv(f"{p.upper()}_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
+        if p in _NO_KEY or key:
+            providers.append(provider_from_spec(p, m))
+    missing = []
+    for p, _m in specs:
+        key = os.getenv(f"{p.upper()}_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
+        if p not in _NO_KEY and not key:
+            missing.append(p)
     if missing:
         raise ValueError(
             f"missing API key(s) for providers: {', '.join(missing)} — "

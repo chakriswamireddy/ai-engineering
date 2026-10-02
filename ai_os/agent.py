@@ -49,7 +49,10 @@ import json
 import os
 import re
 import time
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:                                   # WS1 — annotation only
+    from ai_os.identity import Principal
 
 from ai_os import observability as obs
 from ai_os import injection
@@ -611,9 +614,9 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
               fallbacks: int | None = None,
               clock=time.monotonic,
               temperature: float = 0.0, max_tokens: int = 2048,
-              plan=None,
-              state=None, principal: str | None = None,
-              session_id: str | None = None, task_id: str | None = None,
+               plan=None,
+               state=None, principal: "Principal | str | None" = None,
+               session_id: str | None = None, task_id: str | None = None,
               run_id: str | None = None,
               memory_store=None,
               routed_to: str | None = None,
@@ -684,7 +687,16 @@ def run_agent(request: str, registry: ToolRegistry, gateway, *,
         raise ValueError("request must not be empty")
 
     store_on = state is not None
-    principal = principal or (state.principal if state is not None else None)
+    # WS1 — the request identity replaces the caller-supplied string. A
+    # `Principal` passes through; a string keeps its exact historical meaning;
+    # `None` is the historical default caller. Downstream seams keep taking the
+    # name (`.id`), so state keys, grants and audit rows are unchanged.
+    from ai_os import identity as _identity
+
+    req_principal = _identity.coerce(
+        principal if principal
+        else (state.principal if state is not None else None))
+    principal = req_principal.id
     run_id = run_id or _new_run_id()
 
     if plan is not None:

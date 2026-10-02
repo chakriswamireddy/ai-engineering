@@ -271,6 +271,23 @@ obs.register_span_hook(_on_span)
 obs.register_trace_hook(_on_trace)
 
 
+def observe_route(route: str, latency_ms: float, *,
+                  status: str = "ok") -> None:
+    """WS7 — per-route latency histogram (`route_latency_ms{route=...}`).
+
+    `route` is on the label allow-list (a fixed route template, never an id);
+    increments fire at response close (the server middleware calls this), so
+    metrics and traces cannot disagree about the window. Prometheus export
+    renders `_sum`/`_count` per route — the p95 alert reads this series.
+    """
+    if not metrics_enabled():
+        return
+    _REGISTRY.histogram("route_latency_ms", route=route,
+                        status=status).observe(max(0.0, float(latency_ms)))
+    _REGISTRY.counter("route_requests_total", route=route,
+                      status=status).inc()
+
+
 def derive_from_trace(trace: Any) -> dict[str, Any]:
     """Span totals for one trace — what the registry must agree with (D7)."""
     totals = trace.totals()

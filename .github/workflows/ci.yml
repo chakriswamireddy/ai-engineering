@@ -19,7 +19,7 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements-dev.txt
       - run: ruff check .
-      - run: ruff check ai_os tools/gate_prod.py tools/sbom.py conftest.py --select F,E9 --isolated --target-version py312
+      - run: ruff check ai_os tools/gate_prod.py tools/sbom.py tools/auth_smoke.py tools/write_smoke.py tools/apply_smoke.py conftest.py --select F,E9 --isolated --target-version py312
 
   typecheck:
     runs-on: ubuntu-latest

@@ -57,11 +57,15 @@ USER ai-os
 EXPOSE 8000
 
 # HEALTHCHECK calls the contract endpoint, not a bespoke command.
+# WS9: uses the interpreter that exists in the image — `curl` is NOT in
+# python:3.12-slim, so the old curl check failed exec forever and Docker
+# marked healthy containers unhealthy (a healthcheck that always fails is
+# worse than none: it masks real failures behind a known one).
 # Interval >= 10s because a probe that loads a 705 MB store must not be polled
 # like a ping. The liveness probe (/healthz) is shallow; readiness (/readyz) is
 # the one that pays the store load cost.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/healthz || exit 1
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=8).status == 200 else 1)"
 
 # Bind to 0.0.0.0 — measured load-bearing. uvicorn defaults to 127.0.0.1 which
 # is unreachable from the host when published via docker run -p.
