@@ -334,10 +334,16 @@ class ModelGateway:
                     self._log_failure(provider, attempt, perr, latency_ms)
                     # Any chunks already handed to the caller are theirs; a
                     # mid-stream cut can't be transparently retried.
-                    if delivered > 0 or not perr.retryable:
+                    if delivered > 0:
                         raise perr
-                    if attempt == self.max_attempts:
-                        break            # exhausted this provider -> fallback
+                    # Semantic errors (embeddings-only provider, 401, bad
+                    # request) are never retried *on this provider* — but the
+                    # fallback chain still moves to the next one, exactly as
+                    # `_chat` does. Raising here instead would surface
+                    # "embeddings-only" from a provider list whose next entry
+                    # is chat-capable (LLM_PROVIDERS=cloudflare:,openai:...).
+                    if not perr.retryable or attempt == self.max_attempts:
+                        break            # next provider
                     delay = _backoff(attempt, perr, self.base_delay, self.max_delay)
                     self._retry_event(lspan, attempt, delay, perr)
                     time.sleep(delay)

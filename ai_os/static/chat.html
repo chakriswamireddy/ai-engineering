@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ai-engineering — chat</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #161a22; --panel2: #1b202a; --border: #2a2f3a;
+    --text: #d7dce5; --muted: #8b93a7; --accent: #6ea8fe; --ok: #7ee787;
+    --warn: #f0b429; --bad: #ff7b72; --user: #20304a;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
+    flex-wrap: wrap;
+  }
+  .brand { font-weight: 650; letter-spacing: .2px; }
+  .brand .sub { color: var(--muted); font-weight: 400; }
+  .pills { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pill {
+    font-size: 12px; padding: 2px 9px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--muted); background: var(--panel2);
+    white-space: nowrap;
+  }
+  .pill.ok   { color: var(--ok);   border-color: #234d2f; }
+  .pill.warn { color: var(--warn); border-color: #5a4a1c; }
+  .pill.bad  { color: var(--bad);  border-color: #5c2620; }
+  .banner {
+    margin: 10px 16px 0; padding: 10px 12px; border-radius: 8px;
+    background: #2a2113; border: 1px solid #5a4a1c; color: var(--warn);
+    font-size: 13.5px;
+  }
+  .banner.hidden { display: none; }
+  .banner code {
+    display: block; margin-top: 6px; padding: 8px 10px; border-radius: 6px;
+    background: #12151c; color: var(--text); border: 1px solid var(--border);
+    white-space: pre-wrap; word-break: break-all; font-size: 12.5px;
+  }
+  .banner button { margin-top: 6px; }
+  .tabs {
+    display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+    border-bottom: 1px solid var(--border); flex-wrap: wrap;
+  }
+  .tab {
+    background: transparent; color: var(--muted); border: 1px solid var(--border);
+    border-radius: 7px; padding: 5px 14px; font-size: 14px; cursor: pointer;
+  }
+  .tab.active { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; }
+  .spacer { flex: 1; }
+  .tok { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+  .tok input {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 7px; padding: 5px 8px; font-size: 13px; width: min(340px, 46vw);
+  }
+  button.ghost {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 7px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+  }
+  button.ghost:hover { border-color: var(--accent); }
+  button.ghost:disabled { opacity: .5; cursor: default; }
+  main { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+  .hidden { display: none !important; }
+  .pane { flex: 1; overflow-y: auto; padding: 16px; }
+  /* ---- chat log ---- */
+  #log { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+  .msg { display: flex; flex-direction: column; max-width: 86%; }
+  .msg.user { align-self: flex-end; align-items: flex-end; }
+  .who { font-size: 11.5px; color: var(--muted); margin: 0 4px 3px; text-transform: uppercase; letter-spacing: .6px; }
+  .bubble {
+    padding: 9px 13px; border-radius: 12px; white-space: pre-wrap; word-break: break-word;
+    background: var(--panel2); border: 1px solid var(--border);
+  }
+  .msg.user .bubble { background: var(--user); border-color: #2c405f; }
+  .bubble.err { border-color: #5c2620; color: var(--bad); }
+  .meta {
+    display: flex; gap: 10px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted);
+    margin: 4px 4px 0;
+  }
+  .meta a { color: var(--accent); text-decoration: none; }
+  .meta a:hover { text-decoration: underline; }
+  .meta .chip { background: var(--panel2); border: 1px solid var(--border); border-radius: 5px; padding: 0 6px; }
+  .caret::after { content: "▍"; color: var(--accent); animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  /* ---- composer ---- */
+  .composer { border-top: 1px solid var(--border); background: var(--panel); padding: 12px 16px; }
+  .composer .inner { max-width: 900px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-end; }
+  textarea {
+    flex: 1; resize: none; min-height: 44px; max-height: 180px;
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 9px; padding: 10px 12px; font: inherit; line-height: 1.45;
+  }
+  textarea:focus, .tok input:focus { outline: none; border-color: var(--accent); }
+  button.primary {
+    background: var(--accent); color: #0b1220; border: none; border-radius: 9px;
+    padding: 10px 18px; font-size: 14.5px; font-weight: 650; cursor: pointer;
+  }
+  button.primary:disabled { opacity: .55; cursor: default; }
+  .hint { max-width: 900px; margin: 6px auto 0; font-size: 11.5px; color: var(--muted); }
+  /* ---- rag ---- */
+  .ragbar { max-width: 900px; margin: 0 auto; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .ragbar input[type=text] {
+    flex: 1 1 320px; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; font: inherit;
+  }
+  select {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 9px; padding: 9px 10px; font-size: 14px;
+  }
+  #rag-result { max-width: 900px; margin: 16px auto 0; display: flex; flex-direction: column; gap: 12px; }
+  .answer { background: var(--panel2); border: 1px solid var(--border); border-radius: 12px; padding: 12px 15px; white-space: pre-wrap; word-break: break-word; }
+  .answer.err { border-color: #5c2620; color: var(--bad); }
+  .refused { display: inline-block; font-size: 12px; color: var(--warn); border: 1px solid #5a4a1c; background: #2a2113; border-radius: 5px; padding: 0 7px; margin-bottom: 6px; }
+  .cite-h { font-size: 13px; color: var(--muted); margin: 2px 0 0; }
+  .cites { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+  .cite {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 9px;
+    padding: 9px 11px; font-size: 13px; position: relative; overflow: hidden;
+  }
+  .cite .src { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
+  .cite .head { color: var(--text); margin-top: 2px; }
+  .cite .score { color: var(--muted); font-size: 11.5px; margin-top: 3px; }
+  .cite .bar { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--accent); opacity: .8; }
+  details { background: var(--panel); border: 1px solid var(--border); border-radius: 9px; padding: 8px 12px; }
+  details summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+  details pre { margin: 8px 0 2px; font-size: 12px; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+  .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--muted); border-top-color: var(--accent); border-radius: 50%; animation: sp .7s linear infinite; vertical-align: -2px; margin-right: 6px; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">ai-engineering <span class="sub">/ ai-layer</span></div>
+  <div class="pills">
+    <span id="pill-health" class="pill">health …</span>
+    <span id="pill-ready" class="pill">ready …</span>
+    <span id="pill-auth" class="pill">auth …</span>
+  </div>
+</header>
+
+<div id="mint-banner" class="banner hidden">
+  No bearer token — guarded routes (/chat, /rag, /metrics, …) return 401.
+  Mint one on the host and paste it above:
+  <code>docker compose exec -T ai-layer python tools/mint_token.py --sub you --ttl 3600 | tr -d '\r'</code>
+  <button class="ghost" id="btn-copy-mint">Copy command</button>
+</div>
+
+<div class="tabs">
+  <button class="tab active" data-mode="chat">Chat</button>
+  <button class="tab" data-mode="rag">RAG</button>
+  <div class="spacer"></div>
+  <button class="ghost" id="btn-clear">Clear</button>
+  <label class="tok">token
+    <input id="token" type="password" placeholder="paste bearer token (localStorage)" autocomplete="off">
+    <button class="ghost" id="btn-token">Use</button>
+  </label>
+</div>
+
+<main>
+  <section id="pane-chat" class="pane">
+    <div id="log"></div>
+  </section>
+
+  <section id="pane-rag" class="pane hidden">
+    <div class="ragbar">
+      <input id="rag-q" type="text" placeholder="Ask the corpus — e.g. Where is bearer auth enforced?">
+      <select id="rag-corpus">
+        <option value="docs">docs — project docs store</option>
+        <option value="code">code — 190 MB, 5 domains</option>
+      </select>
+      <button class="primary" id="btn-rag">Retrieve</button>
+    </div>
+    <div id="rag-result"></div>
+  </section>
+</main>
+
+<div class="composer" id="composer">
+  <div class="inner">
+    <textarea id="input" rows="2" placeholder="Message — Enter sends, Shift+Enter newlines"></textarea>
+    <button class="primary" id="btn-send">Send</button>
+  </div>
+  <div class="hint">POST /chat/stream (SSE) · responses carry <code>trace_id</code> → <code>/traces/&lt;id&gt;</code></div>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const MINT_CMD = "docker compose exec -T ai-layer python tools/mint_token.py --sub you --ttl 3600 | tr -d '\\r'";
+const STORE_TOKEN = "ai_ui_token", STORE_LOG = "ai_ui_log";
+
+const state = {
+  token: localStorage.getItem(STORE_TOKEN) || "",
+  messages: JSON.parse(localStorage.getItem(STORE_LOG) || "[]"),
+  mode: "chat",
+  busy: false,
+};
+
+/* ---------------- helpers ---------------- */
+function authHeaders(json = true) {
+  const h = {};
+  if (json) h["Content-Type"] = "application/json";
+  if (state.token) h["Authorization"] = "Bearer " + state.token;
+  return h;
+}
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+function pill(id, text, cls) {
+  const p = $(id);
+  p.textContent = text;
+  p.className = "pill" + (cls ? " " + cls : "");
+}
+function scrollLog() {
+  const p = $("pane-chat");
+  p.scrollTop = p.scrollHeight;
+}
+function saveLog() {
+  localStorage.setItem(STORE_LOG, JSON.stringify(state.messages.slice(-60)));
+}
+function showMintHint(show = true) {
+  $("mint-banner").classList.toggle("hidden", !show);
+}
+
+async function probe() {
+  try {
+    const r = await fetch("/healthz");
+    pill("pill-health", r.ok ? "health ok" : "health " + r.status, r.ok ? "ok" : "bad");
+  } catch { pill("pill-health", "health ✗ unreachable", "bad"); }
+  try {
+    const r = await fetch("/readyz");
+    pill("pill-ready", r.ok ? "ready" : "not ready " + r.status, r.ok ? "ok" : "warn");
+  } catch { pill("pill-ready", "ready ✗", "bad"); }
+  try {
+    const r = await fetch("/traces", { headers: authHeaders(false) });
+    if (r.ok) pill("pill-auth", state.token ? "token ok" : "open (ALLOW_ANON=1)", "ok");
+    else if (r.status === 401) { pill("pill-auth", "401 — token missing/expired", "bad"); showMintHint(true); }
+    else pill("pill-auth", "auth " + r.status, "warn");
+  } catch { pill("pill-auth", "auth ✗", "bad"); }
+}
+
+function errText(status, body) {
+  let msg = "HTTP " + status;
+  if (body) {
+    if (typeof body === "string") msg = body;
+    else if (body.error) msg = body.error + (body.hint ? "\n" + body.hint : "");
+    else if (body.detail) msg = String(body.detail);
+    else if (body.message) msg = String(body.message);
+  }
+  return msg;
+}
+async function readError(res) {
+  let body = null;
+  try { body = await res.json(); } catch { /* non-JSON edge */ }
+  let msg = errText(res.status, body);
+  if (res.status === 401) showMintHint(true);
+  if (res.status === 429) {
+    const ra = res.headers.get("Retry-After");
+    if (ra) msg += "\nretry after " + ra + "s";
+  }
+  return msg;
+}
+
+/* ---------------- chat ---------------- */
+function renderLog() {
+  const log = $("log");
+  log.textContent = "";
+  for (const m of state.messages) log.appendChild(msgNode(m.role, m.content, m.meta));
+  scrollLog();
+}
+function msgNode(role, text, meta) {
+  const wrap = el("div", "msg " + role);
+  wrap.appendChild(el("div", "who", role === "user" ? "you" : "assistant"));
+  wrap.appendChild(el("div", "bubble", text));
+  if (meta) wrap.appendChild(metaNode(meta));
+  return wrap;
+}
+function metaNode(meta) {
+  const m = el("div", "meta");
+  const add = (label, value, href) => {
+    if (value == null || value === "") return;
+    const chip = el("span", "chip");
+    if (href) {
+      const a = el("a", null, label + " " + value);
+      a.href = href; a.target = "_blank"; a.rel = "noopener";
+      chip.appendChild(a);
+    } else chip.textContent = label + " " + value;
+    m.appendChild(chip);
+  };
+  add("", meta.model);
+  add("", meta.provider);
+  if (meta.ttft_ms != null) add("ttft", Math.round(meta.ttft_ms) + "ms");
+  if (meta.latency_ms != null) add("lat", Math.round(meta.latency_ms) + "ms");
+  if (meta.cost_usd != null) add("$", meta.cost_usd);
+  if (meta.output_tokens != null) add("out", meta.output_tokens + "tok");
+  add("trace", meta.trace_id, meta.trace_id ? "/traces/" + meta.trace_id : null);
+  if (m.childNodes.length === 0) return null;
+  return m;
+}
+
+async function sendMessage() {
+  if (state.busy) return;
+  const input = $("input");
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = "";
+  state.messages.push({ role: "user", content: text });
+  renderLog(); saveLog();
+
+  const node = msgNode("assistant", "", null);
+  node.querySelector(".bubble").classList.add("caret");
+  $("log").appendChild(node);
+  scrollLog();
+  setBusy(true);
+
+  const history = state.messages.slice(-12).map(({ role, content }) => ({ role, content }));
+  let acc = "", meta = {}, errMsg = null, traceId = null;
+  try {
+    const res = await fetch("/chat/stream", {
+      method: "POST", headers: authHeaders(), body: JSON.stringify({ messages: history }),
+    });
+    traceId = res.headers.get("X-Trace-Id");
+    if (!res.ok) { errMsg = await readError(res); }
+    else {
+      const reader = res.body.getReader(), dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf("\n\n")) >= 0) {
+          const frame = buf.slice(0, idx); buf = buf.slice(idx + 2);
+          for (const line of frame.split("\n")) {
+            if (!line.startsWith("data: ")) continue;
+            const payload = line.slice(6);
+            if (payload === "[DONE]") continue;
+            let d; try { d = JSON.parse(payload); } catch { continue; }
+            if (d.error) { errMsg = errText(502, d); break; }
+            if (d.delta) { acc += d.delta; }
+            if (d.ttft_ms != null) meta.ttft_ms = d.ttft_ms;
+            if (d.provider) meta.provider = d.provider;
+            if (d.model) meta.model = d.model;
+            if (d.usage && d.usage.output_tokens != null) {
+              meta.output_tokens = d.usage.output_tokens;
+              if (d.usage.cost_usd != null) meta.cost_usd = d.usage.cost_usd;
+            }
+            if (d.cost_usd != null) meta.cost_usd = d.cost_usd;
+            if (d.finish_reason) meta.finish = d.finish_reason;
+          }
+          const bubble = node.querySelector(".bubble");
+          if (errMsg) break;
+          bubble.textContent = acc || bubble.textContent;
+          scrollLog();
+        }
+        if (errMsg) break;
+      }
+    }
+  } catch (e) { errMsg = String(e && e.message || e); }
+
+  const bubble = node.querySelector(".bubble");
+  bubble.classList.remove("caret");
+  if (errMsg) {
+    bubble.textContent = "⚠ " + errMsg;
+    bubble.classList.add("err");
+  } else if (!acc) {
+    bubble.textContent = "(empty response — check provider key / logs)";
+    bubble.classList.add("err");
+  } else {
+    state.messages.push({ role: "assistant", content: acc, meta: { ...meta, trace_id: traceId } });
+    saveLog();
+    const mn = metaNode({ ...meta, trace_id: traceId });
+    if (mn) node.appendChild(mn);
+  }
+  setBusy(false);
+  scrollLog();
+}
+
+function setBusy(b) {
+  state.busy = b;
+  $("btn-send").disabled = b;
+  $("btn-rag").disabled = b;
+}
+
+/* ---------------- RAG ---------------- */
+async function askRag() {
+  if (state.busy) return;
+  const q = $("rag-q").value.trim();
+  if (!q) return;
+  const corpus = $("rag-corpus").value;
+  const out = $("rag-result");
+  out.textContent = "";
+  const loading = el("div", "answer");
+  loading.appendChild(el("span", "spin"));
+  loading.appendChild(document.createTextNode("retrieving from " + corpus + " …"));
+  out.appendChild(loading);
+  setBusy(true);
+
+  let data = null, errMsg = null, traceId = null;
+  try {
+    const res = await fetch("/rag", {
+      method: "POST", headers: authHeaders(),
+      body: JSON.stringify({ question: q, corpus: corpus }),
+    });
+    traceId = res.headers.get("X-Trace-Id");
+    if (!res.ok) errMsg = await readError(res);
+    else data = await res.json();
+  } catch (e) { errMsg = String(e && e.message || e); }
+
+  out.textContent = "";
+  if (errMsg) {
+    const e = el("div", "answer err", "⚠ " + errMsg);
+    out.appendChild(e);
+    setBusy(false);
+    return;
+  }
+
+  const ans = el("div", "answer");
+  if (data.refused) ans.appendChild(el("span", "refused", "not covered by the corpus"));
+  ans.appendChild(document.createTextNode(data.answer || "(empty)"));
+  out.appendChild(ans);
+
+  const gen = data.generation || {};
+  const m = {
+    model: gen.model, provider: gen.provider, latency_ms: gen.latency_ms,
+    cost_usd: gen.cost_usd, output_tokens: gen.output_tokens, trace_id: traceId,
+  };
+  const mn = metaNode(m);
+  if (mn) out.appendChild(mn);
+
+  const cites = data.citations || [];
+  if (cites.length) {
+    out.appendChild(el("div", "cite-h", cites.length + " retrieved chunk" + (cites.length === 1 ? "" : "s") + " (cited ⊆ retrieved)"));
+    const grid = el("div", "cites");
+    for (const c of cites) {
+      const card = el("div", "cite");
+      card.appendChild(el("div", "src", c.symbol ? c.symbol : (c.source || c.doc_id || "?")));
+      if (c.heading) card.appendChild(el("div", "head", c.heading));
+      else if (c.source && c.symbol) card.appendChild(el("div", "head", c.source));
+      const score = c.score != null ? "score " + c.score.toFixed(4) : "";
+      const kind = c.kind ? " · " + c.kind : "";
+      card.appendChild(el("div", "score", score + kind + (c.position != null ? " · pos " + c.position : "")));
+      if (c.score != null) {
+        const bar = el("div", "bar");
+        bar.style.width = Math.max(2, Math.min(100, c.score * 100)) + "%";
+        card.appendChild(bar);
+      }
+      grid.appendChild(card);
+    }
+    out.appendChild(grid);
+  }
+
+  const det = document.createElement("details");
+  det.appendChild(el("summary", null, "accounting — retrieval + generation"));
+  det.appendChild(el("pre", null, JSON.stringify({ retrieval: data.retrieval, generation: data.generation }, null, 2)));
+  out.appendChild(det);
+  setBusy(false);
+}
+
+/* ---------------- wiring ---------------- */
+function setMode(mode) {
+  state.mode = mode;
+  document.querySelectorAll(".tab").forEach(t =>
+    t.classList.toggle("active", t.dataset.mode === mode));
+  $("pane-chat").classList.toggle("hidden", mode !== "chat");
+  $("pane-rag").classList.toggle("hidden", mode !== "rag");
+  $("composer").classList.toggle("hidden", mode !== "chat");
+}
+
+document.querySelectorAll(".tab").forEach(t =>
+  t.addEventListener("click", () => setMode(t.dataset.mode)));
+
+$("btn-send").addEventListener("click", sendMessage);
+$("input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+$("rag-q").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); askRag(); }
+});
+$("btn-rag").addEventListener("click", askRag);
+
+$("btn-token").addEventListener("click", () => {
+  state.token = $("token").value.trim();
+  if (state.token) localStorage.setItem(STORE_TOKEN, state.token);
+  else localStorage.removeItem(STORE_TOKEN);
+  showMintHint(false);
+  probe();
+});
+$("token").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") $("btn-token").click();
+});
+$("btn-copy-mint").addEventListener("click", () => {
+  navigator.clipboard && navigator.clipboard.writeText(MINT_CMD);
+  $("btn-copy-mint").textContent = "Copied!";
+  setTimeout(() => { $("btn-copy-mint").textContent = "Copy command"; }, 1200);
+});
+$("btn-clear").addEventListener("click", () => {
+  state.messages = [];
+  saveLog(); renderLog();
+  $("rag-result").textContent = "";
+});
+
+$("token").value = state.token;
+renderLog();
+setMode("chat");
+probe();
+setInterval(probe, 30000);
+if (!state.token) showMintHint(true);
+</script>
+</body>
+</html>

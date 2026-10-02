@@ -20,7 +20,7 @@ import re
 from typing import Any
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
 from ai_os import observability as obs
@@ -359,6 +359,30 @@ def readyz() -> dict[str, Any]:
         state_path=state_path,
     )
     return JSONResponse(body, status_code=status)
+
+
+_CHAT_UI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "static", "chat.html")
+
+
+@app.get("/ui")
+def chat_ui() -> HTMLResponse:
+    """The operator's chat shell — one static HTML file, no data of its own.
+
+    Public by design, like /healthz: every call the page makes (POST
+    /chat/stream, POST /rag, GET /traces) is on the guarded surface, so the
+    auth posture is exercised rather than bypassed — a browser without a
+    token sees the 401s rendered in the page, exactly like curl does.
+    """
+    try:
+        with open(_CHAT_UI_PATH, encoding="utf-8") as fh:
+            html = fh.read()
+    except OSError:
+        return HTMLResponse(
+            "<h1>chat UI not installed</h1>"
+            "<p>ai_os/static/chat.html is missing from this image.</p>",
+            status_code=404)
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/chat")
