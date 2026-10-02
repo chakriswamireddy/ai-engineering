@@ -3,23 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ai-engineering — chat</title>
+<title>ai-engineering — ai-layer developer console</title>
 <style>
   :root {
     --bg: #0f1115; --panel: #161a22; --panel2: #1b202a; --border: #2a2f3a;
     --text: #d7dce5; --muted: #8b93a7; --accent: #6ea8fe; --ok: #7ee787;
-    --warn: #f0b429; --bad: #ff7b72; --user: #20304a;
+    --warn: #f0b429; --bad: #ff7b72; --user: #20304a; --purple: #d2a8ff;
+    --cyan: #76e3ea; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
-    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font: 14.5px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     display: flex; flex-direction: column;
   }
   header {
     display: flex; align-items: center; justify-content: space-between; gap: 12px;
-    padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
+    padding: 9px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
     flex-wrap: wrap;
   }
   .brand { font-weight: 650; letter-spacing: .2px; }
@@ -28,7 +29,7 @@
   .pill {
     font-size: 12px; padding: 2px 9px; border-radius: 999px;
     border: 1px solid var(--border); color: var(--muted); background: var(--panel2);
-    white-space: nowrap;
+    white-space: nowrap; font-family: var(--mono);
   }
   .pill.ok   { color: var(--ok);   border-color: #234d2f; }
   .pill.warn { color: var(--warn); border-color: #5a4a1c; }
@@ -46,12 +47,12 @@
   }
   .banner button { margin-top: 6px; }
   .tabs {
-    display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+    display: flex; align-items: center; gap: 8px; padding: 9px 16px;
     border-bottom: 1px solid var(--border); flex-wrap: wrap;
   }
   .tab {
     background: transparent; color: var(--muted); border: 1px solid var(--border);
-    border-radius: 7px; padding: 5px 14px; font-size: 14px; cursor: pointer;
+    border-radius: 7px; padding: 5px 14px; font-size: 13.5px; cursor: pointer;
   }
   .tab.active { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; }
   .spacer { flex: 1; }
@@ -59,14 +60,16 @@
   .tok input {
     background: var(--panel2); color: var(--text); border: 1px solid var(--border);
     border-radius: 7px; padding: 5px 8px; font-size: 13px; width: min(340px, 46vw);
+    font-family: var(--mono);
   }
   button.ghost {
     background: var(--panel2); color: var(--text); border: 1px solid var(--border);
-    border-radius: 7px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+    border-radius: 7px; padding: 5px 12px; font-size: 12.5px; cursor: pointer;
   }
   button.ghost:hover { border-color: var(--accent); }
   button.ghost:disabled { opacity: .5; cursor: default; }
-  main { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+  .shell { flex: 1; display: flex; overflow: hidden; }
+  main { flex: 1; overflow: hidden; display: flex; flex-direction: column; min-width: 0; }
   .hidden { display: none !important; }
   .pane { flex: 1; overflow-y: auto; padding: 16px; }
   /* ---- chat log ---- */
@@ -81,23 +84,26 @@
   .msg.user .bubble { background: var(--user); border-color: #2c405f; }
   .bubble.err { border-color: #5c2620; color: var(--bad); }
   .meta {
-    display: flex; gap: 10px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted);
+    display: flex; gap: 8px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted);
     margin: 4px 4px 0;
   }
   .meta a { color: var(--accent); text-decoration: none; }
   .meta a:hover { text-decoration: underline; }
-  .meta .chip { background: var(--panel2); border: 1px solid var(--border); border-radius: 5px; padding: 0 6px; }
+  .meta .chip, .chiprow .chip {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 5px;
+    padding: 0 6px; font-family: var(--mono);
+  }
   .caret::after { content: "▍"; color: var(--accent); animation: blink 1s steps(1) infinite; }
   @keyframes blink { 50% { opacity: 0; } }
   /* ---- composer ---- */
-  .composer { border-top: 1px solid var(--border); background: var(--panel); padding: 12px 16px; }
+  .composer { border-top: 1px solid var(--border); background: var(--panel); padding: 11px 16px; }
   .composer .inner { max-width: 900px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-end; }
   textarea {
     flex: 1; resize: none; min-height: 44px; max-height: 180px;
     background: var(--panel2); color: var(--text); border: 1px solid var(--border);
     border-radius: 9px; padding: 10px 12px; font: inherit; line-height: 1.45;
   }
-  textarea:focus, .tok input:focus { outline: none; border-color: var(--accent); }
+  textarea:focus, .tok input:focus, #rag-q:focus, #trace-sel:focus { outline: none; border-color: var(--accent); }
   button.primary {
     background: var(--accent); color: #0b1220; border: none; border-radius: 9px;
     padding: 10px 18px; font-size: 14.5px; font-weight: 650; cursor: pointer;
@@ -105,50 +111,132 @@
   button.primary:disabled { opacity: .55; cursor: default; }
   .hint { max-width: 900px; margin: 6px auto 0; font-size: 11.5px; color: var(--muted); }
   /* ---- rag ---- */
-  .ragbar { max-width: 900px; margin: 0 auto; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-  .ragbar input[type=text] {
+  .ragbar { max-width: 980px; margin: 0 auto; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  #rag-q {
     flex: 1 1 320px; background: var(--panel2); color: var(--text);
     border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; font: inherit;
   }
   select {
     background: var(--panel2); color: var(--text); border: 1px solid var(--border);
-    border-radius: 9px; padding: 9px 10px; font-size: 14px;
+    border-radius: 9px; padding: 9px 10px; font-size: 13.5px;
   }
-  #rag-result { max-width: 900px; margin: 16px auto 0; display: flex; flex-direction: column; gap: 12px; }
+  #rag-result, #trace-body { max-width: 980px; margin: 16px auto 0; display: flex; flex-direction: column; gap: 12px; }
   .answer { background: var(--panel2); border: 1px solid var(--border); border-radius: 12px; padding: 12px 15px; white-space: pre-wrap; word-break: break-word; }
   .answer.err { border-color: #5c2620; color: var(--bad); }
   .refused { display: inline-block; font-size: 12px; color: var(--warn); border: 1px solid #5a4a1c; background: #2a2113; border-radius: 5px; padding: 0 7px; margin-bottom: 6px; }
   .cite-h { font-size: 13px; color: var(--muted); margin: 2px 0 0; }
-  .cites { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+  .cites { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
   .cite {
     background: var(--panel); border: 1px solid var(--border); border-radius: 9px;
     padding: 9px 11px; font-size: 13px; position: relative; overflow: hidden;
   }
-  .cite .src { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
-  .cite .badge { display: inline-block; font-size: 10.5px; text-transform: uppercase; letter-spacing: .6px; color: var(--accent); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; margin-bottom: 4px; }
+  .cite.dropped { opacity: .55; border-style: dashed; }
+  .cite .src { color: var(--accent); font-family: var(--mono); font-size: 12px; word-break: break-all; }
+  .cite .badge {
+    display: inline-block; font-size: 10.5px; text-transform: uppercase; letter-spacing: .6px;
+    color: var(--accent); border: 1px solid var(--border); border-radius: 4px;
+    padding: 0 5px; margin-bottom: 4px; margin-right: 4px; font-family: var(--mono);
+  }
+  .cite .badge.kept { color: var(--ok); border-color: #234d2f; }
+  .cite .badge.drop { color: var(--muted); }
   .note { font-size: 12.5px; color: var(--warn); }
   .cite .head { color: var(--text); margin-top: 2px; }
-  .cite .score { color: var(--muted); font-size: 11.5px; margin-top: 3px; }
+  .cite .score { color: var(--muted); font-size: 11.5px; margin-top: 3px; font-family: var(--mono); }
   .cite .bar { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--accent); opacity: .8; }
   details { background: var(--panel); border: 1px solid var(--border); border-radius: 9px; padding: 8px 12px; }
   details summary { cursor: pointer; font-size: 13px; color: var(--muted); }
-  details pre { margin: 8px 0 2px; font-size: 12px; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+  details pre, pre.ev {
+    margin: 8px 0 2px; font-size: 12px; color: var(--text); white-space: pre-wrap;
+    word-break: break-word; font-family: var(--mono); line-height: 1.45;
+  }
+  pre.ev { background: #12151c; border: 1px solid var(--border); border-radius: 7px; padding: 9px 11px; max-height: 340px; overflow-y: auto; }
   .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--muted); border-top-color: var(--accent); border-radius: 50%; animation: sp .7s linear infinite; vertical-align: -2px; margin-right: 6px; }
   @keyframes sp { to { transform: rotate(360deg); } }
+  /* ---- right rail ---- */
+  #rail {
+    width: 402px; flex: none; border-left: 1px solid var(--border); background: var(--panel);
+    overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px;
+  }
+  #rail.hidden { display: none; }
+  .rail-h {
+    font-size: 11px; letter-spacing: .8px; text-transform: uppercase; color: var(--muted);
+    font-family: var(--mono); display: flex; justify-content: space-between; align-items: center;
+  }
+  .rail-h button { font-size: 11px; padding: 1px 8px; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; font-size: 12.5px; }
+  .kv .k { color: var(--muted); font-family: var(--mono); }
+  .kv .v { font-family: var(--mono); word-break: break-all; color: var(--text); }
+  .kv .v.good { color: var(--ok); }
+  .kv .v.bad { color: var(--bad); }
+  .kv .v.warnv { color: var(--warn); }
+  .stages { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
+  .stage { display: flex; gap: 8px; align-items: baseline; padding: 3px 6px; border-radius: 6px; background: var(--panel2); border: 1px solid transparent; }
+  .stage:hover { border-color: var(--border); }
+  .stage .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--muted); position: relative; top: 1px; }
+  .stage .dot.ok { background: var(--ok); }
+  .stage .dot.err { background: var(--bad); }
+  .stage .dot.pending { background: var(--warn); animation: sp 1.2s linear infinite; border: 1.5px solid transparent; border-top-color: var(--warn); background: transparent; }
+  .stage .sname { font-family: var(--mono); color: var(--text); flex: 1; min-width: 0; word-break: break-all; }
+  .stage .sdur { font-family: var(--mono); color: var(--muted); font-size: 11.5px; flex: none; }
+  .stage.client .sname { color: var(--cyan); }
+  .stage .sname a { color: var(--accent); text-decoration: none; }
+  .wire-line { font-family: var(--mono); font-size: 11.5px; color: var(--muted); word-break: break-all; }
+  .wire-line b { color: var(--cyan); font-weight: 600; }
+  .chiprow { display: flex; gap: 6px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+  /* ---- trace waterfall ---- */
+  .tr-head { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .tr-head select { flex: 1; min-width: 260px; font-family: var(--mono); font-size: 12.5px; }
+  .wf { display: flex; flex-direction: column; gap: 3px; }
+  .wf-row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; cursor: pointer; padding: 3px 6px; border-radius: 6px; }
+  .wf-row:hover { background: var(--panel2); }
+  .wf-name { width: 190px; flex: none; font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wf-name .kind { color: var(--muted); }
+  .wf-track { flex: 1; height: 14px; background: #12151c; border: 1px solid var(--border); border-radius: 4px; position: relative; min-width: 120px; }
+  .wf-bar { position: absolute; top: 2px; bottom: 2px; border-radius: 3px; background: var(--accent); min-width: 3px; }
+  .wf-bar.k-model { background: var(--purple); }
+  .wf-bar.k-retrieval { background: var(--ok); }
+  .wf-bar.k-request { background: var(--cyan); }
+  .wf-bar.st-err { background: var(--bad); }
+  .wf-dur { width: 76px; flex: none; text-align: right; font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  .wf-attrs { grid-column: 1 / -1; }
+  .evt { font-family: var(--mono); font-size: 11.5px; color: var(--muted); padding: 2px 0 2px 14px; border-left: 2px solid var(--border); margin-left: 6px; }
+  .evt b { color: var(--warn); font-weight: 600; }
+  /* ---- concepts ---- */
+  .concepts-intro { max-width: 1180px; margin: 0 auto 14px; color: var(--muted); font-size: 13.5px; }
+  .cgroup { max-width: 1180px; margin: 0 auto 18px; }
+  .cgroup > h2 {
+    font-size: 12px; letter-spacing: 1px; text-transform: uppercase; color: var(--accent);
+    font-family: var(--mono); margin: 0 0 8px; border-bottom: 1px solid var(--border); padding-bottom: 5px;
+  }
+  .cgrid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+  .card h3 { margin: 0; font-size: 14.5px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .card .day { font-size: 10.5px; font-family: var(--mono); color: var(--bg); background: var(--accent); border-radius: 4px; padding: 1px 6px; letter-spacing: .4px; }
+  .card .mech { font-size: 13px; color: var(--text); margin: 0; line-height: 1.5; }
+  .card .where { font-size: 11.5px; font-family: var(--mono); color: var(--muted); word-break: break-all; }
+  .card .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .card .ev-note { font-size: 12.5px; color: var(--warn); }
+  .card .ev-note.ok { color: var(--ok); }
+  @media (max-width: 1100px) {
+    .shell { flex-direction: column; }
+    #rail { width: auto; border-left: none; border-top: 1px solid var(--border); max-height: 45vh; }
+    .wf-name { width: 130px; }
+  }
 </style>
 </head>
 <body>
 <header>
-  <div class="brand">ai-engineering <span class="sub">/ ai-layer</span></div>
+  <div class="brand">ai-engineering <span class="sub">/ ai-layer · developer console</span></div>
   <div class="pills">
     <span id="pill-health" class="pill">health …</span>
     <span id="pill-ready" class="pill">ready …</span>
     <span id="pill-auth" class="pill">auth …</span>
+    <span id="pill-traces" class="pill">traces …</span>
   </div>
 </header>
 
 <div id="mint-banner" class="banner hidden">
-  No bearer token — guarded routes (/chat, /rag, /metrics, …) return 401.
+  No bearer token — guarded routes (/chat, /rag, /traces, /metrics, /audit, …) return 401.
   Mint one on the host and paste it above:
   <code>docker compose exec -T ai-layer python tools/mint_token.py --sub you --ttl 3600 | tr -d '\r'</code>
   <button class="ghost" id="btn-copy-mint">Copy command</button>
@@ -157,6 +245,8 @@
 <div class="tabs">
   <button class="tab active" data-mode="chat">Chat</button>
   <button class="tab" data-mode="rag">RAG</button>
+  <button class="tab" data-mode="trace">Trace</button>
+  <button class="tab" data-mode="concepts">Concepts</button>
   <div class="spacer"></div>
   <button class="ghost" id="btn-clear">Clear</button>
   <label class="tok">token
@@ -165,6 +255,7 @@
   </label>
 </div>
 
+<div class="shell">
 <main>
   <section id="pane-chat" class="pane">
     <div id="log"></div>
@@ -174,22 +265,67 @@
     <div class="ragbar">
       <input id="rag-q" type="text" placeholder="Ask the corpus — e.g. Where is bearer auth enforced?">
       <select id="rag-corpus">
-        <option value="auto" selected>auto — search docs + code, cite what fits</option>
-        <option value="docs">docs — project docs store</option>
-        <option value="code">code — 190 MB, 5 domains</option>
+        <option value="auto" selected>auto — docs + code, one embed, tagged citations</option>
+        <option value="docs">docs — 11,061 chunks, ~194 chars</option>
+        <option value="code">code — 7,434 chunks, ~1500 chars</option>
       </select>
       <button class="primary" id="btn-rag">Retrieve</button>
     </div>
     <div id="rag-result"></div>
   </section>
+
+  <section id="pane-trace" class="pane hidden">
+    <div class="tr-head">
+      <select id="trace-sel"><option>— refresh to load traces —</option></select>
+      <button class="ghost" id="btn-trace-refresh">Refresh</button>
+      <button class="ghost" id="btn-trace-json">Raw JSON</button>
+    </div>
+    <div id="trace-body"></div>
+  </section>
+
+  <section id="pane-concepts" class="pane hidden">
+    <div class="concepts-intro">
+      Every card below is implemented in this repository — the <b>prove</b> button calls the
+      real endpoint through nginx (no mocks, no fixture data) and renders the raw response.
+      Side effects are bounded: evidence calls use tiny <code>max_tokens</code>, the refusal
+      demo never reaches a model, and the body-cap demo is rejected at the edge.
+    </div>
+    <div id="concepts"></div>
+  </section>
 </main>
+
+<aside id="rail">
+  <div class="rail-h">identity (WS1 — verified server-side)</div>
+  <details open>
+    <summary>decoded bearer claims <span style="color:var(--muted)">— this panel only decodes; HS256 is verified in ai_os/identity.py</span></summary>
+    <div id="rail-identity" style="margin-top:8px"></div>
+  </details>
+
+  <div class="rail-h">last request — pipeline
+    <button class="ghost" id="btn-rail-refresh" title="re-fetch trace + ledger + metrics">refresh</button>
+  </div>
+  <div id="rail-stages" class="stages"><div class="stage"><span class="dot"></span><span class="sname">no request yet — send a chat or run a RAG query</span></div></div>
+
+  <div class="rail-h">sse wire (chat frames)</div>
+  <details id="rail-wire-details" open>
+    <summary id="rail-wire-sum">no stream yet</summary>
+    <div id="rail-wire" style="margin-top:6px"></div>
+  </details>
+
+  <div class="rail-h">ledger (ai_os/ledger.py)</div>
+  <details open><summary>model spend</summary><div id="rail-ledger" style="margin-top:8px"></div></details>
+
+  <div class="rail-h">metrics (/metrics snapshot)</div>
+  <details><summary>counters &amp; gauges</summary><div id="rail-metrics" style="margin-top:8px"></div></details>
+</aside>
+</div>
 
 <div class="composer" id="composer">
   <div class="inner">
     <textarea id="input" rows="2" placeholder="Message — Enter sends, Shift+Enter newlines"></textarea>
     <button class="primary" id="btn-send">Send</button>
   </div>
-  <div class="hint">POST /chat/stream (SSE) · responses carry <code>trace_id</code> → <code>/traces/&lt;id&gt;</code></div>
+  <div class="hint">POST /chat/stream (SSE) · <code>data:{delta,usage,model,ttft_ms,provider}</code> frames + <code>[DONE]</code> · X-Trace-Id → <code>/traces/&lt;id&gt;</code> (rail shows every backend span)</div>
 </div>
 
 <script>
@@ -203,6 +339,11 @@ const state = {
   messages: JSON.parse(localStorage.getItem(STORE_LOG) || "[]"),
   mode: "chat",
   busy: false,
+  last: null,
+  wire: null,
+  lastTraceId: null,
+  traceList: [],
+  currentTrace: null,
 };
 
 /* ---------------- helpers ---------------- */
@@ -233,7 +374,24 @@ function saveLog() {
 function showMintHint(show = true) {
   $("mint-banner").classList.toggle("hidden", !show);
 }
-
+function fmtMs(v) {
+  if (v == null) return "—";
+  return v >= 100 ? Math.round(v) + "ms" : v.toFixed(1) + "ms";
+}
+function fmtUsd(v) {
+  if (v == null) return "—";
+  return "$" + (Number(v) < 0.01 ? Number(v).toFixed(6) : Number(v).toFixed(4));
+}
+function kvRow(parent, k, v, cls) {
+  parent.appendChild(el("div", "k", k));
+  parent.appendChild(el("div", "v " + (cls || ""), v == null ? "—" : String(v)));
+}
+function decodeJwt(t) {
+  try {
+    const p = t.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    return JSON.parse(atob(p));
+  } catch { return null; }
+}
 async function probe() {
   try {
     const r = await fetch("/healthz");
@@ -245,10 +403,19 @@ async function probe() {
   } catch { pill("pill-ready", "ready ✗", "bad"); }
   try {
     const r = await fetch("/traces", { headers: authHeaders(false) });
-    if (r.ok) pill("pill-auth", state.token ? "token ok" : "open (ALLOW_ANON=1)", "ok");
-    else if (r.status === 401) { pill("pill-auth", "401 — token missing/expired", "bad"); showMintHint(true); }
-    else pill("pill-auth", "auth " + r.status, "warn");
+    if (r.ok) {
+      pill("pill-auth", state.token ? "token ok" : "open (ALLOW_ANON=1)", "ok");
+      try {
+        const d = await r.json();
+        pill("pill-traces", "ring " + d.count + " traces", d.count ? "ok" : "");
+      } catch { pill("pill-traces", "traces", ""); }
+    } else if (r.status === 401) {
+      pill("pill-auth", "401 — token missing/expired", "bad");
+      pill("pill-traces", "traces 401", "bad");
+      showMintHint(true);
+    } else { pill("pill-auth", "auth " + r.status, "warn"); }
   } catch { pill("pill-auth", "auth ✗", "bad"); }
+  renderIdentity();
 }
 
 function errText(status, body) {
@@ -272,6 +439,217 @@ async function readError(res) {
   }
   return msg;
 }
+async function jget(path, opt) {
+  const r = await fetch(path, Object.assign({ headers: authHeaders(false) }, opt || {}));
+  const text = await r.text();
+  let data = null;
+  try { data = JSON.parse(text); } catch { data = text; }
+  if (!r.ok) throw Object.assign(new Error(errText(r.status, data)), { status: r.status, data });
+  return data;
+}
+
+/* ---------------- rail: identity ---------------- */
+function renderIdentity() {
+  const box = $("rail-identity");
+  box.textContent = "";
+  const claims = decodeJwt(state.token);
+  const kv = el("div", "kv");
+  if (!state.token) {
+    kvRow(kv, "token", "none — mint & paste", "warnv");
+  } else if (!claims) {
+    kvRow(kv, "token", "present but not decodable (raw secret?)", "bad");
+  } else {
+    kvRow(kv, "sub", claims.sub);
+    kvRow(kv, "tenant", claims.tenant || "default");
+    kvRow(kv, "roles", Array.isArray(claims.roles) ? claims.roles.join(",") : (claims.roles || "—"));
+    kvRow(kv, "iss", claims.iss || "—");
+    if (claims.exp) {
+      const left = claims.exp * 1000 - Date.now();
+      const expStr = new Date(claims.exp * 1000).toISOString().replace(".000Z", "Z");
+      kvRow(kv, "exp", expStr + (left > 0 ? " (" + Math.round(left / 60000) + "m left)" : " EXPIRED"),
+            left > 0 ? "good" : "bad");
+    }
+    kvRow(kv, "alg", "HS256 — server-side verify");
+  }
+  box.appendChild(kv);
+}
+
+/* ---------------- rail: pipeline stages ---------------- */
+function setLast(kind, route) {
+  state.last = { kind, route, client: [], traceId: null, trace: null, t0: performance.now() };
+}
+function stageClient(name, status, note) {
+  state.last.client.push({ name, status, note });
+  renderStages();
+}
+function renderStages() {
+  const box = $("rail-stages");
+  box.textContent = "";
+  const L = state.last;
+  if (!L) {
+    box.appendChild(el("div", "stage", null)).appendChild(el("span", "sname", "no request yet"));
+    return;
+  }
+  const mk = (cls, name, dur, status) => {
+    const row = el("div", "stage " + (cls || ""));
+    row.appendChild(el("span", "dot " + (status || "")));
+    const n = el("span", "sname");
+    if (typeof name === "string") n.textContent = name; else n.appendChild(name);
+    row.appendChild(n);
+    if (dur) row.appendChild(el("span", "sdur", dur));
+    box.appendChild(row);
+    return row;
+  };
+  mk("client", "client → " + L.route, "", "ok");
+  for (const s of L.client) {
+    let name = s.name;
+    if (s.href) {
+      const a = el("a", null, s.name);
+      a.href = s.href; a.target = "_blank"; a.rel = "noopener";
+      name = a;
+    }
+    mk("client", name, s.note, s.status);
+  }
+  if (!L.traceId) {
+    mk("", "trace: no X-Trace-Id", "", "pending");
+    return;
+  }
+  if (!L.trace) {
+    mk("", "trace " + L.traceId + " — fetching…", "", "pending");
+    return;
+  }
+  const tr = L.trace;
+  mk("", "trace " + tr.trace_id + " · " + tr.operation + " · " + fmtMs(tr.duration_ms) + " · " + tr.status,
+     "", tr.status === "ok" ? "ok" : "err");
+  for (const sp of tr.spans || []) {
+    let label = sp.name;
+    const a = sp.attributes || {};
+    const bits = [];
+    if (sp.name === "retrieval") {
+      if (a.k != null) bits.push("k=" + a.k);
+      if (a.budget_chars != null) bits.push("budget=" + a.budget_chars);
+      if (a.candidates != null) bits.push("cand=" + a.candidates);
+      if (a.context_chars != null) bits.push("ctx=" + a.context_chars);
+      if (a.corpora) bits.push(a.corpora);
+    } else if (sp.name && sp.name.startsWith("model.")) {
+      if (a.provider) bits.push(a.provider);
+      if (a.attempt != null) bits.push("attempt " + a.attempt);
+      if (a.fallback_depth) bits.push("fallback " + a.fallback_depth);
+      if (a.latency_ms) bits.push(fmtMs(a.latency_ms));
+      if (a.error_kind) bits.push("error " + a.error_kind + (a.retryable ? " retryable" : ""));
+    } else if (sp.name === "request" || sp.kind === "request") {
+      const t = Object.assign({}, tr.attributes || {}, a);
+      if (t.route) bits.push(t.route);
+      if (t.corpus) bits.push("corpus " + t.corpus);
+    }
+    mk("", (bits.length ? label + "  " + bits.join(" · ") : label),
+       fmtMs(sp.duration_ms), sp.status === "ok" ? "ok" : "err");
+  }
+  const events = (tr.events || []).filter(e =>
+    ["gate_refused", "final_answer", "response_sent", "retry_scheduled"].includes(e.name));
+  for (const ev of events) {
+    const a = ev.attributes || {};
+    let note = "";
+    if (ev.name === "gate_refused") note = a.reason || "";
+    if (ev.name === "final_answer") note = (a.refused ? "REFUSED" : "answered") + (a.model ? " · " + a.model : "") + (a.citations != null ? " · " + a.citations + " citations" : "");
+    if (ev.name === "retry_scheduled") note = (a.provider || "") + " in " + (a.delay_ms != null ? a.delay_ms + "ms" : "");
+    if (ev.name === "response_sent") note = a.ok ? "200 flushed" : "error";
+    mk("", ev.name + "  " + note, "", ev.name === "gate_refused" ? "err" : "ok");
+  }
+}
+
+async function fetchTrace(id, tries) {
+  tries = tries == null ? 8 : tries;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetch("/traces/" + id, { headers: authHeaders(false) });
+      if (r.ok) {
+        const t = await r.json();
+        if (t.ended_at || i === tries - 1) return t;
+      } else if (r.status === 404) {
+        if (i >= 3) return null;
+      } else return null;
+    } catch { /* retry */ }
+    await new Promise(res => setTimeout(res, 350));
+  }
+  return null;
+}
+async function attachTrace() {
+  const L = state.last;
+  if (!L || !L.traceId) return;
+  L.trace = await fetchTrace(L.traceId);
+  if (L.trace) {
+    state.lastTraceId = L.traceId;
+    if (state.mode === "trace") selectTrace(L.traceId, true);
+    if (state.mode === "rag") markKept(L.trace);
+  }
+  renderStages();
+}
+
+/* ---------------- rail: wire + ledger + metrics ---------------- */
+function renderWire() {
+  const w = state.wire;
+  const sum = $("rail-wire-sum"), box = $("rail-wire");
+  box.textContent = "";
+  if (!w || !w.frames.length) { sum.textContent = "no stream yet"; return; }
+  sum.textContent = w.frames.length + " data frames · " + w.chars + " delta chars · " + w.tookMs + "ms · trace " + (w.traceId || "—");
+  for (const f of w.frames) {
+    const line = el("div", "wire-line");
+    line.innerHTML = "<b>#" + f.n + "</b> " + f.html;
+    box.appendChild(line);
+  }
+}
+async function renderLedger() {
+  const box = $("rail-ledger");
+  try {
+    const d = await jget("/ledger");
+    box.textContent = "";
+    const kv = el("div", "kv");
+    kvRow(kv, "records", d.records + " (" + d.ok + " ok, " + d.failed + " failed)",
+          d.failed ? "warnv" : "good");
+    kvRow(kv, "tokens", d.tokens);
+    kvRow(kv, "cost", fmtUsd(d.cost_usd));
+    box.appendChild(kv);
+    const models = Object.entries(d.by_model || {});
+    if (models.length) {
+      const det = document.createElement("details");
+      det.appendChild(el("summary", null, "by model (" + models.length + ")"));
+      const kv2 = el("div", "kv");
+      kv2.style.marginTop = "6px";
+      for (const [m, v] of models) kvRow(kv2, m.length > 28 ? m.slice(0, 25) + "…" : m,
+        v.calls + " calls · " + v.tokens + " tok · " + v.ok + " ok");
+      det.appendChild(kv2);
+      box.appendChild(det);
+    }
+  } catch (e) {
+    box.textContent = "";
+    box.appendChild(el("div", "wire-line", "⚠ " + (e.message || e)));
+  }
+}
+async function renderMetrics() {
+  const box = $("rail-metrics");
+  try {
+    const d = await jget("/metrics");
+    box.textContent = "";
+    const kv = el("div", "kv");
+    kvRow(kv, "series", d.series);
+    const denials = (d.counters || []).filter(c => c.name === "route_requests_denied_total");
+    const deniedSum = denials.reduce((s, c) => s + c.value, 0);
+    kvRow(kv, "denied (401s)", deniedSum, deniedSum ? "warnv" : "good");
+    const errs = (d.counters || []).filter(c => c.name === "span_errors_total");
+    kvRow(kv, "span errors", errs.reduce((s, c) => s + c.value, 0));
+    const rag = (d.counters || []).filter(c => c.name === "route_requests_total" && (c.labels.route === "/rag" || c.labels.route === "/chat"));
+    for (const c of rag) kvRow(kv, c.labels.route + " ok", c.value);
+    const evals = (d.gauges || []).filter(g => g.name.startsWith("eval_"));
+    for (const g of evals) kvRow(kv, g.name, g.value);
+    if (!evals.length) kvRow(kv, "eval gauges", "absent — nightly hasn't written data/eval_latest.json", "warnv");
+    box.appendChild(kv);
+  } catch (e) {
+    box.textContent = "";
+    box.appendChild(el("div", "wire-line", "⚠ " + (e.message || e)));
+  }
+}
+function refreshOps() { renderLedger(); renderMetrics(); }
 
 /* ---------------- chat ---------------- */
 function renderLog() {
@@ -304,9 +682,17 @@ function metaNode(meta) {
   if (meta.corpus) add("corpus", meta.corpus);
   if (meta.ttft_ms != null) add("ttft", Math.round(meta.ttft_ms) + "ms");
   if (meta.latency_ms != null) add("lat", Math.round(meta.latency_ms) + "ms");
+  if (meta.frames) add("frames", meta.frames);
   if (meta.cost_usd != null) add("$", meta.cost_usd);
   if (meta.output_tokens != null) add("out", meta.output_tokens + "tok");
   add("trace", meta.trace_id, meta.trace_id ? "/traces/" + meta.trace_id : null);
+  if (meta.trace_id) {
+    const chip = el("span", "chip");
+    const a = el("a", null, "waterfall →");
+    a.href = "#"; a.addEventListener("click", (e) => { e.preventDefault(); selectTrace(meta.trace_id, true); setMode("trace"); });
+    chip.appendChild(a);
+    m.appendChild(chip);
+  }
   if (m.childNodes.length === 0) return null;
   return m;
 }
@@ -325,14 +711,24 @@ async function sendMessage() {
   $("log").appendChild(node);
   scrollLog();
   setBusy(true);
+  setLast("chat", "POST /chat/stream");
 
   const history = state.messages.slice(-12).map(({ role, content }) => ({ role, content }));
   let acc = "", meta = {}, errMsg = null, traceId = null;
+  const wire = { frames: [], chars: 0, n: 0, started: performance.now(), traceId: null };
+  state.wire = wire;
   try {
     const res = await fetch("/chat/stream", {
       method: "POST", headers: authHeaders(), body: JSON.stringify({ messages: history }),
     });
     traceId = res.headers.get("X-Trace-Id");
+    wire.traceId = traceId;
+    if (traceId) {
+      state.last.traceId = traceId;
+      stageClient("HTTP " + res.status + " · X-Trace-Id " + traceId.slice(0, 12) + "…", "ok");
+    } else {
+      stageClient("HTTP " + res.status + " · no X-Trace-Id", res.ok ? "ok" : "err");
+    }
     if (!res.ok) { errMsg = await readError(res); }
     else {
       const reader = res.body.getReader(), dec = new TextDecoder();
@@ -347,11 +743,28 @@ async function sendMessage() {
           for (const line of frame.split("\n")) {
             if (!line.startsWith("data: ")) continue;
             const payload = line.slice(6);
-            if (payload === "[DONE]") continue;
+            if (payload === "[DONE]") {
+              if (!wire.doneAt) { wire.doneAt = performance.now(); stageClient("[DONE] — stream closed", "ok", fmtMs(wire.doneAt - wire.started)); }
+              continue;
+            }
             let d; try { d = JSON.parse(payload); } catch { continue; }
             if (d.error) { errMsg = errText(502, d); break; }
-            if (d.delta) { acc += d.delta; }
-            if (d.ttft_ms != null) meta.ttft_ms = d.ttft_ms;
+            wire.n++;
+            if (wire.frames.length < 80) {
+              const parts = [];
+              if (d.model) parts.push("model=" + d.model);
+              if (d.provider) parts.push("provider=" + d.provider);
+              if (d.ttft_ms != null) parts.push("ttft=" + Math.round(d.ttft_ms) + "ms");
+              if (d.delta) parts.push("delta=" + [...d.delta].length + "ch");
+              if (d.usage && d.usage.output_tokens != null) parts.push("usage=" + JSON.stringify(d.usage));
+              if (d.finish_reason) parts.push("finish=" + d.finish_reason);
+              wire.frames.push({ n: wire.n, html: parts.join("  ") || JSON.stringify(d).slice(0, 140) });
+            }
+            if (d.delta) { acc += d.delta; wire.chars += [...d.delta].length; }
+            if (d.ttft_ms != null && !wire.ttft) {
+              wire.ttft = d.ttft_ms;
+              stageClient("SSE first token (ttft)", "ok", fmtMs(d.ttft_ms));
+            }
             if (d.provider) meta.provider = d.provider;
             if (d.model) meta.model = d.model;
             if (d.usage && d.usage.output_tokens != null) {
@@ -361,6 +774,7 @@ async function sendMessage() {
             if (d.cost_usd != null) meta.cost_usd = d.cost_usd;
             if (d.finish_reason) meta.finish = d.finish_reason;
           }
+          renderWire();
           const bubble = node.querySelector(".bubble");
           if (errMsg) break;
           bubble.textContent = acc || bubble.textContent;
@@ -371,20 +785,31 @@ async function sendMessage() {
     }
   } catch (e) { errMsg = String(e && e.message || e); }
 
+  wire.tookMs = Math.round(performance.now() - wire.started);
+  if (wire.n) stageClient("frames × " + wire.n + " · " + wire.chars + " chars", "ok");
+  renderWire();
+
   const bubble = node.querySelector(".bubble");
   bubble.classList.remove("caret");
   if (errMsg) {
     bubble.textContent = "⚠ " + errMsg;
     bubble.classList.add("err");
+    if (state.last && state.last.client.length) {
+      const lastC = state.last.client[state.last.client.length - 1];
+      if (lastC.status === "ok" && !traceId) lastC.status = "err";
+    }
+    renderStages();
   } else if (!acc) {
     bubble.textContent = "(empty response — check provider key / logs)";
     bubble.classList.add("err");
   } else {
-    state.messages.push({ role: "assistant", content: acc, meta: { ...meta, trace_id: traceId } });
+    state.messages.push({ role: "assistant", content: acc, meta: { ...meta, trace_id: traceId, frames: wire.n } });
     saveLog();
-    const mn = metaNode({ ...meta, trace_id: traceId });
+    const mn = metaNode({ ...meta, trace_id: traceId, frames: wire.n });
     if (mn) node.appendChild(mn);
   }
+  renderStages();
+  attachTrace().then(refreshOps);
   setBusy(false);
   scrollLog();
 }
@@ -396,6 +821,28 @@ function setBusy(b) {
 }
 
 /* ---------------- RAG ---------------- */
+function ragStageSummary(data) {
+  const r = data.retrieval || {};
+  return r;
+}
+async function markKept(trace) {
+  if (!trace) return;
+  const keptMap = {};
+  for (const sp of trace.spans || []) {
+    for (const ev of sp.events || []) {
+      if (ev.name === "document" && ev.attributes && ev.attributes.chunk_id) {
+        keptMap[ev.attributes.chunk_id] = !!ev.attributes.kept;
+      }
+    }
+  }
+  document.querySelectorAll("#rag-result .cite[data-cid]").forEach(card => {
+    const kept = keptMap[card.dataset.cid];
+    if (kept === undefined) return;
+    card.classList.toggle("dropped", !kept);
+    const b = el("span", "badge " + (kept ? "kept" : "drop"), kept ? "in context" : "budget-dropped");
+    card.insertBefore(b, card.firstChild.nextSibling);
+  });
+}
 async function askRag() {
   if (state.busy) return;
   const q = $("rag-q").value.trim();
@@ -406,31 +853,39 @@ async function askRag() {
   const loading = el("div", "answer");
   loading.appendChild(el("span", "spin"));
   loading.appendChild(document.createTextNode(
-    "retrieving from " + (corpus === "auto" ? "docs + code" : corpus) + " …"));
+    "POST /rag corpus=" + corpus + " — embed → retrieve → budget → gate → generate …"));
   out.appendChild(loading);
   setBusy(true);
+  setLast("rag", "POST /rag corpus=" + corpus);
 
   let data = null, errMsg = null, traceId = null;
+  const t0 = performance.now();
   try {
     const res = await fetch("/rag", {
       method: "POST", headers: authHeaders(),
       body: JSON.stringify({ question: q, corpus: corpus }),
     });
     traceId = res.headers.get("X-Trace-Id");
+    stageClient("HTTP " + res.status + (traceId ? " · X-Trace-Id " + traceId.slice(0, 12) + "…" : ""),
+                res.ok ? "ok" : "err", fmtMs(performance.now() - t0));
+    if (traceId) state.last.traceId = traceId;
     if (!res.ok) errMsg = await readError(res);
     else data = await res.json();
   } catch (e) { errMsg = String(e && e.message || e); }
 
   out.textContent = "";
   if (errMsg) {
-    const e = el("div", "answer err", "⚠ " + errMsg);
-    out.appendChild(e);
+    out.appendChild(el("div", "answer err", "⚠ " + errMsg));
+    renderStages();
     setBusy(false);
     return;
   }
 
+  const r = ragStageSummary(data);
   const ans = el("div", "answer");
-  if (data.refused) ans.appendChild(el("span", "refused", "not covered by the corpus"));
+  if (data.refused) {
+    ans.appendChild(el("span", "refused", "GATE: not covered by the corpus — empty context after budget, model never called"));
+  }
   ans.appendChild(document.createTextNode(data.answer || "(empty)"));
   out.appendChild(ans);
 
@@ -443,6 +898,17 @@ async function askRag() {
   const mn = metaNode(m);
   if (mn) out.appendChild(mn);
 
+  const strip = el("div", "chiprow");
+  const chip = (txt) => strip.appendChild(el("span", "chip", txt));
+  chip("embed " + (r.model || "—") + " · " + (r.input_tokens != null ? r.input_tokens + " tok" : "") + " · " + fmtUsd(r.cost_usd));
+  chip("k=" + r.k + " · candidates=" + r.candidates + " · ctx=" + r.context_chars + "ch");
+  if (r.stores) {
+    for (const [name, s] of Object.entries(r.stores)) {
+      chip(name + ": k=" + s.k + " budget=" + s.budget_chars + " cand=" + s.candidates);
+    }
+  }
+  out.appendChild(strip);
+
   if (data.skipped && Object.keys(data.skipped).length) {
     out.appendChild(el("div", "note",
       "auto: skipped " + Object.keys(data.skipped).join(", ") +
@@ -451,10 +917,11 @@ async function askRag() {
 
   const cites = data.citations || [];
   if (cites.length) {
-    out.appendChild(el("div", "cite-h", cites.length + " retrieved chunk" + (cites.length === 1 ? "" : "s") + " (cited ⊆ retrieved)"));
+    out.appendChild(el("div", "cite-h", cites.length + " retrieved chunk" + (cites.length === 1 ? "" : "s") + " (cited ⊆ retrieved; kept/dropped marks come from the trace's document events)"));
     const grid = el("div", "cites");
     for (const c of cites) {
       const card = el("div", "cite");
+      if (c.chunk_id) card.dataset.cid = c.chunk_id;
       if (c.corpus) card.appendChild(el("div", "badge", c.corpus));
       card.appendChild(el("div", "src", c.symbol ? c.symbol : (c.source || c.doc_id || "?")));
       if (c.heading) card.appendChild(el("div", "head", c.heading));
@@ -473,10 +940,442 @@ async function askRag() {
   }
 
   const det = document.createElement("details");
-  det.appendChild(el("summary", null, "accounting — retrieval + generation"));
-  det.appendChild(el("pre", null, JSON.stringify({ retrieval: data.retrieval, generation: data.generation }, null, 2)));
+  det.appendChild(el("summary", null, "raw accounting — retrieval + generation"));
+  det.appendChild(el("pre", null, JSON.stringify({ retrieval: data.retrieval, generation: data.generation, refused: data.refused, corpus: data.corpus }, null, 2)));
   out.appendChild(det);
+
+  renderStages();
+  attachTrace().then(() => { markKept(state.last && state.last.trace); refreshOps(); });
   setBusy(false);
+}
+
+/* ---------------- trace waterfall ---------------- */
+async function refreshTraceList(preferId) {
+  try {
+    const d = await jget("/traces");
+    state.traceList = (d.ids || []).slice().reverse();
+  } catch { state.traceList = []; }
+  const sel = $("trace-sel");
+  sel.textContent = "";
+  if (!state.traceList.length) {
+    sel.appendChild(el("option", null, "— no traces in the ring yet —"));
+    return;
+  }
+  for (const id of state.traceList) {
+    const o = el("option", null, id);
+    o.value = id;
+    sel.appendChild(o);
+  }
+  const pick = preferId && state.traceList.includes(preferId) ? preferId : state.traceList[0];
+  sel.value = pick;
+  await selectTrace(pick, false);
+}
+async function selectTrace(id, updateSelect) {
+  if (!id) return;
+  if (updateSelect) $("trace-sel").value = id;
+  const body = $("trace-body");
+  body.textContent = "";
+  body.appendChild(el("div", "answer", null)).appendChild(el("span", "spin"));
+  body.lastChild.appendChild(document.createTextNode(" GET /traces/" + id));
+  const tr = await fetchTrace(id, 2);
+  body.textContent = "";
+  if (!tr) {
+    body.appendChild(el("div", "answer err", "trace " + id + " not found (aged out of the 256-ring and not in the sink)"));
+    return;
+  }
+  state.currentTrace = tr;
+  renderTrace(tr, body);
+}
+function renderTrace(tr, body) {
+  const head = el("div", "chiprow");
+  const chip = (t) => head.appendChild(el("span", "chip", t));
+  chip("operation " + tr.operation);
+  chip("status " + tr.status);
+  chip("duration " + fmtMs(tr.duration_ms));
+  chip("spans " + ((tr.spans || []).length));
+  chip("schema v" + tr.schema_version);
+  chip("trace_id " + tr.trace_id);
+  if (tr.totals) {
+    chip("tokens " + (tr.totals.tokens != null ? tr.totals.tokens : "—"));
+    chip("attempts " + (tr.totals.attempts != null ? tr.totals.attempts : "—"));
+    chip("cost " + fmtUsd(tr.totals.cost_usd));
+  }
+  body.appendChild(head);
+
+  if (tr.continuation) {
+    const c = tr.continuation;
+    const note = el("div", "note",
+      "traceparent continuation: " + (c.continued ? "continued inbound parent" : "fresh root") +
+      (c.reason ? " (reason: " + c.reason + ")" : "") +
+      (c.baggage_keys && c.baggage_keys.length ? " · baggage: " + c.baggage_keys.join(",") : ""));
+    body.appendChild(note);
+  }
+
+  const spans = (tr.spans || []).slice().sort((a, b) => a.started_at - b.started_at);
+  const byId = Object.fromEntries(spans.map(s => [s.span_id, s]));
+  const depth = (s) => (s.parent_span_id && byId[s.parent_span_id] ? 1 + depth(byId[s.parent_span_id]) : 0);
+  const t0 = Math.min(...spans.map(s => s.started_at));
+  const t1 = Math.max(...spans.map(s => (s.ended_at != null ? s.ended_at : s.started_at)));
+  const total = Math.max(1, (t1 - t0) * 1000);
+
+  const wf = el("div", "wf");
+  for (const sp of spans) {
+    const row = el("div", "wf-row");
+    const name = el("div", "wf-name");
+    name.style.paddingLeft = (depth(sp) * 14) + "px";
+    name.appendChild(el("span", "kind", sp.span_kind === "server" ? "▣ " : sp.span_kind === "client" ? "◈ " : "▫ "));
+    name.appendChild(document.createTextNode(sp.name));
+    if (sp.remote) name.appendChild(el("span", "kind", " ↗"));
+    row.appendChild(name);
+    const track = el("div", "wf-track");
+    const bar = el("div", "wf-bar k-" + (sp.kind || "model") + (sp.status !== "ok" ? " st-err" : ""));
+    bar.style.left = (((sp.started_at - t0) * 1000 / total) * 100) + "%";
+    bar.style.width = Math.max(0.6, (((sp.duration_ms || 0) / total) * 100)) + "%";
+    track.appendChild(bar);
+    row.appendChild(track);
+    row.appendChild(el("div", "wf-dur", fmtMs(sp.duration_ms)));
+    wf.appendChild(row);
+
+    const panel = el("div", "kv hidden");
+    panel.style.margin = "0 0 6px 208px";
+    const a = sp.attributes || {};
+    for (const [k, v] of Object.entries(a)) {
+      if (v == null) continue;
+      kvRow(panel, k, typeof v === "object" ? JSON.stringify(v) : v);
+    }
+    if (sp.error) kvRow(panel, "error", JSON.stringify(sp.error), "bad");
+    for (const ev of sp.events || []) {
+      const line = el("div", "evt");
+      const b = el("b", null, "evt " + ev.name + " ");
+      line.appendChild(b);
+      line.appendChild(document.createTextNode(JSON.stringify(ev.attributes || {})));
+      panel.appendChild(line);
+    }
+    row.addEventListener("click", () => panel.classList.toggle("hidden"));
+    wf.appendChild(panel);
+  }
+  body.appendChild(wf);
+
+  const raw = document.createElement("details");
+  raw.appendChild(el("summary", null, "raw trace JSON (sanitized — ids, counts, hashes; payloads never enter the trace)"));
+  raw.appendChild(el("pre", null, JSON.stringify(tr, null, 2)));
+  body.appendChild(raw);
+}
+
+/* ---------------- concepts (live evidence) ---------------- */
+const CONCEPTS = [
+  {
+    group: "Identity & access — WS1",
+    items: [
+      {
+        id: "jwt", day: "WS1 · identity.py",
+        title: "HS256 bearer → Principal, deny-by-default",
+        mech: "Signature is verified against OIDC_HS256_SECRET; sub/tenant/roles come from verified claims — never from a client string. _AUTH_PREFIXES guards the whole data surface (/chat*, /rag, /traces*, /metrics, /ledger, /audit*, /approvals*, /logs, /attacks) while /ui, /healthz, /readyz stay probe-open. Every 401 lands in route_requests_denied_total{route,status}.",
+        where: "ai_os/identity.py · ai_os/server.py:88-96 (_AUTH_PREFIXES) · tools/mint_token.py",
+        prove: async () => {
+          let unauth;
+          try {
+            const r = await fetch("/traces");
+            unauth = { status: r.status, body: (await r.text()).slice(0, 300) };
+          } catch (e) { unauth = { error: String(e) }; }
+          return {
+            note: unauth.status === 401
+              ? "unauthenticated GET /traces → 401 (deny-by-default is live in this deploy)"
+              : "GET /traces without a token returned " + unauth.status + " — this deploy runs ALLOW_ANON=1 (open mode)",
+            data: { unauthenticated_call: unauth, local_claim_decode: decodeJwt(state.token) },
+          };
+        },
+      },
+    ],
+  },
+  {
+    group: "Model gateway — Day 4 §4",
+    items: [
+      {
+        id: "fallback", day: "Day 4 · gateway.py",
+        title: "Retry + provider fallback, every attempt a span",
+        mech: "Retryable errors back off and retry; non-retryable errors break to the next provider in chain (same semantics in _chat and _stream). Each try is its own model.<op>.attempt span — provider, attempt, fallback_depth, remote_endpoint, retryable — nested under model.<op>, with a retry_scheduled event carrying delay_ms. Tokens and cost land in the ledger.",
+        where: "ai_os/gateway.py:117,295 (attempt spans) · ai_os/ledger.py",
+        prove: async () => {
+          const ledger = await jget("/ledger");
+          let attempts = null;
+          if (state.lastTraceId) {
+            const tr = await fetchTrace(state.lastTraceId, 2);
+            if (tr) attempts = (tr.spans || [])
+              .filter(s => s.name && s.name.includes(".attempt"))
+              .map(s => ({ name: s.name, status: s.status, duration_ms: s.duration_ms,
+                           provider: (s.attributes || {}).provider, attempt: (s.attributes || {}).attempt,
+                           fallback_depth: (s.attributes || {}).fallback_depth,
+                           remote_endpoint: s.remote_endpoint }));
+          }
+          return {
+            note: attempts === null
+              ? "ledger loaded; no trace in the ring yet — send a chat first to see attempt spans"
+              : "attempt spans from trace " + state.lastTraceId,
+            data: { ledger, attempt_spans: attempts },
+          };
+        },
+      },
+      {
+        id: "sse", day: "Day 9 · stream + fallback",
+        title: "SSE wire protocol, stream-time fallback",
+        mech: "POST /chat/stream emits data:{delta, finish_reason, usage, model, ttft_ms, provider} frames and terminates with data:[DONE]; X-Trace-Id ships before the first byte so the trace and the browser share one identity. A non-retryable error mid-stream breaks to the next provider instead of aborting the chain. nginx runs proxy_buffering off + 300s timeouts so the stream survives the edge.",
+        where: "ai_os/server.py:/chat/stream · ai_os/gateway.py:338 (_stream break) · nginx ip.conf.template:46-48",
+        prove: async () => {
+          const w = state.wire;
+          if (!w || !w.frames.length) {
+            return { note: "no stream captured in this browser session yet — send a chat message, then prove again", data: { captured: null } };
+          }
+          return {
+            note: w.frames.length + " frames captured live on the wire (" + w.chars + " chars, ttft " + fmtMs(w.ttft) + ")",
+            data: { trace_id: w.traceId, ttft_ms: w.ttft, total_frames: w.n, delta_chars: w.chars, stream_ms: w.tookMs, first_frames: w.frames.slice(0, 8) },
+          };
+        },
+      },
+    ],
+  },
+  {
+    group: "RAG — Day 6 §6 · Day 10 · Day 28",
+    items: [
+      {
+        id: "pipeline", day: "Day 6 §6 · rag.py",
+        title: "embed → k=f(budget) → budget → gate → generate → cite",
+        mech: "One embed (bge-base-en-v1.5, 768-d, identity-locked to the store); k = min(budget // avg_chunk_len, n) — k is a budget decision, not a quality knob; context is built in rank order under the budget floor; an empty context refuses BY CODE (NOT_COVERED with generation: null — the model is never called, the bill never starts). Citations are the retrieved set with scores, so cited ⊆ retrieved is plain set membership.",
+        where: "ai_os/rag.py:k_from_budget,build_context,run_rag · ai_os/server.py:/rag",
+        prove: async () => {
+          const res = await fetch("/rag", {
+            method: "POST", headers: authHeaders(),
+            body: JSON.stringify({ question: "smallest corpus slice possible", budget_chars: 1 }),
+          });
+          const data = await res.json();
+          return {
+            note: res.ok && data.refused
+              ? "budget_chars=1 → k=0 → empty context → refusal by code; generation is null — one embed, zero model chats"
+              : "unexpected: HTTP " + res.status,
+            data: { status: res.status, refused: data.refused, generation: data.generation, retrieval: data.retrieval, answer: data.answer },
+          };
+        },
+      },
+      {
+        id: "auto", day: "Day 10 + auto mode",
+        title: "Dual corpus, auto: one embed, per-corpus budgets",
+        mech: "docs (11,061 chunks ≈194 chars) and code (7,434 ≈1500 chars) are one store shape in two files. corpus=auto queries BOTH in one pipeline: one embed, per-store k under per-corpus budgets (docs 1200 / code 4000 — the same pair tools.py uses), per-store context slices so 1500-char code bodies can't be crowded out by doc paragraphs, ONE generation, citations tagged corpus=docs|code, and retrieval.stores discloses k/candidates/budget per store. No router LLM call — the evidence decides.",
+        where: "ai_os/rag.py:CORPUS_BUDGETS,run_rag_multi · ai_os/server.py:/rag corpus=auto",
+        prove: async () => {
+          const res = await fetch("/rag", {
+            method: "POST", headers: authHeaders(),
+            body: JSON.stringify({ question: "Where is bearer auth enforced?", corpus: "auto", max_tokens: 64 }),
+          });
+          const data = await res.json();
+          const labels = [...new Set((data.citations || []).map(c => c.corpus))];
+          return {
+            note: res.ok ? "auto: citations from [" + labels.join(", ") + "] · one embed, one chat" : "HTTP " + res.status,
+            data: { corpus: data.corpus, refused: data.refused, retrieval: data.retrieval,
+                    citation_labels: labels, generation: data.generation && { model: data.generation.model, output_tokens: data.generation.output_tokens, cost_usd: data.generation.cost_usd } },
+          };
+        },
+      },
+    ],
+  },
+  {
+    group: "Observability — Day 23 §7 · Day 24 §7-8 · WS7/WS9",
+    items: [
+      {
+        id: "trace", day: "Day 23 §7 · observability.py",
+        title: "Trace tree, sanitized by construction",
+        mech: "Every request opens a root server span; an inbound traceparent continues it (malformed → fresh root with continuation.reason, never a 500). Children: model.embed, model.chat(.attempt), retrieval — with events: request, document(rank/score/kept/drop_reason), gate_refused, final_answer, response_sent. Text never enters the trace: ids, counts, sizes, sha256 only. A 256-entry ring serves the hot path; the durable Postgres sink answers GET /traces/{id} after restart.",
+        where: "ai_os/observability.py · ai_os/trace_sink.py · ai_os/server.py:462",
+        prove: async () => {
+          const idx = await jget("/traces");
+          if (!idx.ids || !idx.ids.length) return { note: "ring is empty — run a chat/RAG request first", data: idx };
+          const id = idx.ids[idx.ids.length - 1];
+          const tr = await fetchTrace(id, 2);
+          return {
+            note: "latest trace " + id + " — " + (tr.spans || []).length + " spans, " + (tr.events || []).length + " events, no payload text",
+            data: {
+              trace_id: tr.trace_id, operation: tr.operation, status: tr.status, duration_ms: tr.duration_ms,
+              attributes: tr.attributes, totals: tr.totals,
+              spans: (tr.spans || []).map(s => ({ name: s.name, kind: s.kind, span_kind: s.span_kind, status: s.status, duration_ms: s.duration_ms, remote: s.remote, events: (s.events || []).map(e => e.name) })),
+              continuation: tr.continuation || null,
+            },
+          };
+        },
+      },
+      {
+        id: "metrics", day: "Day 24 §8 · WS7/WS9 · metrics.py",
+        title: "Metrics: JSON snapshot, Prometheus text, guarded",
+        mech: "GET /metrics returns a JSON snapshot by default and ?format=prometheus the text exposition: cumulative histogram buckets (_bucket/_sum/_count with le labels), route+status label sets, route_requests_denied_total (WS9), span/trace/ledger families, and eval gauges fed from data/eval_latest.json — an absent file renders NO series (unknown), never a passing 0. The route label is templated (/traces/{id}) so ids can never mint series.",
+        where: "ai_os/metrics.py (render_prometheus, record_route, WS7 gauge) · prometheus/prometheus.yml",
+        prove: async () => {
+          const d = await jget("/metrics");
+          const denials = (d.counters || []).filter(c => c.name === "route_requests_denied_total");
+          const fams = [...new Set([...(d.counters || []), ...(d.histograms || []), ...(d.gauges || [])].map(x => x.name))];
+          return {
+            note: d.series + " series live · " + fams.length + " metric families · denied " + denials.reduce((s, c) => s + c.value, 0),
+            data: { series: d.series, families: fams, denied: denials, gauges: d.gauges, note: d.note },
+          };
+        },
+      },
+      {
+        id: "logs", day: "Day 24 §8 · structured_logging.py",
+        title: "Logs greppable by trace id",
+        mech: "Structured ring buffer: GET /logs?trace_id= returns exactly one request's lines — the same identity the trace and the browser carry. Honest current state: the ring fills only after structured_logging.setup() runs in this process; an empty ring says so instead of pretending.",
+        where: "ai_os/structured_logging.py · ai_os/server.py:/logs",
+        prove: async () => {
+          const d = await jget("/logs?limit=5");
+          return {
+            note: d.lines && d.lines.length ? d.lines.length + " lines in ring" : (d.hint || "ring empty"),
+            data: d,
+          };
+        },
+      },
+    ],
+  },
+  {
+    group: "Security & governance — Day 25/26/27 · WS3/WS4",
+    items: [
+      {
+        id: "injection", day: "Day 25 §6-8 · injection.py",
+        title: "Injection firewall: signals, never payloads",
+        mech: "Bounded, offline detection with a per-request ring: findings carry class + field path + sha256 + offsets — the payload itself is never stored, so the metadata-safe default does not relax for hostile input. GET /attacks?trace_id= narrows to one request.",
+        where: "ai_os/injection.py · ai_os/server.py:/attacks",
+        prove: async () => {
+          const d = await jget("/attacks");
+          return { note: d.count + " findings in ring (size " + d.ring_size + ") — payloads absent by construction", data: d };
+        },
+      },
+      {
+        id: "audit", day: "Day 26 §8 · audit.py",
+        title: "Decision log: hash chain, truncation-honest",
+        mech: "Decisions recorded with principal, tool, effect/data class, decision+code, args hash + shape and result shape — values are never stored — linked in a hash chain. /audit/verify returns chain_ok + first_broken_seq (edits, reorders, interior deletions all break it) and the docstring states the honest limit: a chain cannot see its own tail truncated; that anchor is Day 29's.",
+        where: "ai_os/audit.py · ai_os/server.py:/audit,/audit/verify",
+        prove: async () => {
+          const [entries, verify] = await Promise.all([jget("/audit"), jget("/audit/verify")]);
+          return {
+            note: entries.total + " decisions on record · chain_ok=" + verify.chain_ok,
+            data: { count: entries.count, total: entries.total, sample: (entries.entries || []).slice(-3),
+                    chain_ok: verify.chain_ok, first_broken_seq: verify.first_broken_seq, entries_len: verify.entries },
+          };
+        },
+      },
+      {
+        id: "approvals", day: "Day 27 §6 · WS3/WS4 · approval.py",
+        title: "Approval desk: shapes masked, fail-closed writes",
+        mech: "Argument VALUES are replaced by their shape unless ?reveal=1 — and reveal is auth-required and attributed to the caller. decide/apply is a digest-bound state machine; the write path itself stays fail-closed in this deploy (write_tables_allow: [] — WS3 excluded, so approvals decide but apply has nothing to mutate).",
+        where: "ai_os/approval.py · ai_os/server.py:/approvals · config WRITE_TABLES_ALLOW",
+        prove: async () => {
+          const d = await jget("/approvals");
+          return {
+            note: d.note ? d.note : d.count + " requests on the desk",
+            data: d,
+          };
+        },
+      },
+      {
+        id: "bodycap", day: "server.py:138 · nginx edge",
+        title: "Two-layer body cap (413 before any handler)",
+        mech: "The public edge allows 50 MB (nginx/nginx.conf:27), so the ACTIVE layer through the public route is the app: Content-Length is checked BEFORE identity and over MAX_BODY_BYTES=1048576 returns JSON {error, max_body_bytes} (server.py:138-147) — the loopback port that bypasses nginx asserts the same handler. Both layers run before any provider is touched: no tokens, no bill.",
+        where: "ai_os/server.py:136-147 · nginx (edge) · MAX_BODY_BYTES=1048576",
+        prove: async () => {
+          const body = JSON.stringify({ messages: [{ role: "user", content: "x".repeat(1100 * 1024) }] });
+          const r = await fetch("/chat/stream", { method: "POST", headers: authHeaders(), body });
+          const text = (await r.text()).slice(0, 260);
+          return {
+            note: "1.1 MB POST → HTTP " + r.status + " (" + (r.headers.get("content-type") || "?") + ") — rejected before a single token",
+            data: { status: r.status, content_type: r.headers.get("content-type"), body_sample: text,
+                    layers: ["app MAX_BODY_BYTES JSON 413 — this fired (server.py:138)", "nginx edge client_max_body_size 50M (nginx.conf:27)"] },
+          };
+        },
+      },
+    ],
+  },
+  {
+    group: "Eval & operations — WS6-9 · deploy",
+    items: [
+      {
+        id: "eval", day: "WS6-9 · eval_harness.py + alerts",
+        title: "Nightly evals → gauges → alert rules",
+        mech: "tools/eval_harness.py runs nightly in its own container and writes data/eval_latest.json; the app republishes eval_pass_rate and eval_result_age_seconds as gauges — absent file → no series at all, which Prometheus reads as *unknown*, never as a passing 0. Alert rules on the stack: EvalDrop, EvalStale, QuotaExhaustion, AuthDenials, SinkLag, RouteP95High.",
+        where: "tools/eval_harness.py · ai_os/server.py:_publish_eval_gauges · prometheus/alerts.yaml · compose eval-nightly",
+        prove: async () => {
+          const d = await jget("/metrics");
+          const evals = (d.gauges || []).filter(g => g.name.startsWith("eval_"));
+          return {
+            note: evals.length ? "live gauges: " + evals.map(g => g.name + "=" + g.value).join(", ")
+                               : "no eval gauges yet — nightly sidecar hasn't written data/eval_latest.json (absence = unknown, not 0)",
+            data: { eval_gauges: evals, family_present: evals.length > 0 },
+          };
+        },
+      },
+      {
+        id: "readyz", day: "deploy.sh · compose",
+        title: "Readiness table + one-command deploy",
+        mech: "GET /readyz runs named checks (gateway, store, database, state) and returns a table with 200/503 — never a bare boolean. ./scripts/deploy.sh --ip brings the whole stack up (nginx, app, Postgres, Redis, Prometheus, Grafana, Jaeger, eval-nightly, trace-retention), mints the scrape token, seeds the code store idempotently, and gates on 17 live verification checks.",
+        where: "ai_os/health.py · ai_os/server.py:/readyz · scripts/deploy.sh",
+        prove: async () => {
+          const r = await fetch("/readyz");
+          const d = await r.json();
+          return { note: "HTTP " + r.status + " — " + (Array.isArray(d.checks) ? d.checks.length + " checks" : "named checks table"), data: d };
+        },
+      },
+    ],
+  },
+];
+
+function renderConcepts() {
+  const box = $("concepts");
+  box.textContent = "";
+  for (const g of CONCEPTS) {
+    const sec = el("div", "cgroup");
+    sec.appendChild(el("h2", null, g.group));
+    const grid = el("div", "cgrid");
+    for (const item of g.items) grid.appendChild(conceptCard(item));
+    sec.appendChild(grid);
+    box.appendChild(sec);
+  }
+}
+function conceptCard(item) {
+  const card = el("div", "card");
+  const h = el("h3");
+  h.appendChild(el("span", "day", item.day));
+  h.appendChild(document.createTextNode(item.title));
+  card.appendChild(h);
+  card.appendChild(el("p", "mech", item.mech));
+  card.appendChild(el("div", "where", item.where));
+  const actions = el("div", "actions");
+  const btn = el("button", "ghost", "prove ▸ live call");
+  const note = el("div", "ev-note");
+  const ev = el("pre", "ev hidden");
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    btn.textContent = "calling…";
+    note.textContent = ""; note.className = "ev-note";
+    ev.classList.add("hidden");
+    const t0 = performance.now();
+    try {
+      const out = await item.prove();
+      note.textContent = (out.note || "ok") + " · " + Math.round(performance.now() - t0) + "ms";
+      note.className = "ev-note ok";
+      ev.textContent = JSON.stringify(out.data, null, 2);
+      ev.classList.remove("hidden");
+      refreshOps();
+    } catch (e) {
+      note.textContent = "⚠ " + (e.message || e) + (e.status ? " (HTTP " + e.status + ")" : "");
+      note.className = "ev-note";
+      if (e.data !== undefined) {
+        ev.textContent = JSON.stringify(e.data, null, 2);
+        ev.classList.remove("hidden");
+      }
+      if (e.status === 401) showMintHint(true);
+    }
+    btn.disabled = false;
+    btn.textContent = "prove ▸ live call";
+  });
+  actions.appendChild(btn);
+  card.appendChild(actions);
+  card.appendChild(note);
+  card.appendChild(ev);
+  return card;
 }
 
 /* ---------------- wiring ---------------- */
@@ -486,7 +1385,15 @@ function setMode(mode) {
     t.classList.toggle("active", t.dataset.mode === mode));
   $("pane-chat").classList.toggle("hidden", mode !== "chat");
   $("pane-rag").classList.toggle("hidden", mode !== "rag");
+  $("pane-trace").classList.toggle("hidden", mode !== "trace");
+  $("pane-concepts").classList.toggle("hidden", mode !== "concepts");
   $("composer").classList.toggle("hidden", mode !== "chat");
+  $("rail").classList.toggle("hidden", mode === "concepts");
+  if (mode === "trace") {
+    if (state.lastTraceId || (state.traceList && state.traceList.length)) selectTrace(state.lastTraceId || state.traceList[0], true);
+    else refreshTraceList();
+  }
+  if (mode === "concepts") renderConcepts();
 }
 
 document.querySelectorAll(".tab").forEach(t =>
@@ -501,12 +1408,27 @@ $("rag-q").addEventListener("keydown", (e) => {
 });
 $("btn-rag").addEventListener("click", askRag);
 
+$("btn-trace-refresh").addEventListener("click", () => refreshTraceList(state.lastTraceId));
+$("trace-sel").addEventListener("change", () => selectTrace($("trace-sel").value, false));
+$("btn-trace-json").addEventListener("click", () => {
+  if (!state.currentTrace) return;
+  const body = $("trace-body");
+  const existing = body.querySelector("details[open]");
+  const raw = body.querySelector("details:last-child");
+  if (raw) { raw.open = !raw.open; if (raw.open) raw.scrollIntoView({ behavior: "smooth" }); }
+});
+$("btn-rail-refresh").addEventListener("click", () => {
+  if (state.last && state.last.traceId) state.last.trace = null;
+  renderStages();
+  attachTrace().then(refreshOps);
+});
+
 $("btn-token").addEventListener("click", () => {
   state.token = $("token").value.trim();
   if (state.token) localStorage.setItem(STORE_TOKEN, state.token);
   else localStorage.removeItem(STORE_TOKEN);
   showMintHint(false);
-  probe();
+  probe(); refreshOps(); renderIdentity();
 });
 $("token").addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("btn-token").click();
@@ -520,12 +1442,20 @@ $("btn-clear").addEventListener("click", () => {
   state.messages = [];
   saveLog(); renderLog();
   $("rag-result").textContent = "";
+  state.last = null; state.wire = null;
+  $("rail-stages").textContent = "";
+  $("rail-stages").appendChild(el("div", "stage")).appendChild(Object.assign(el("span", "sname"), { textContent: "cleared — send a request" }));
+  renderWire();
 });
 
 $("token").value = state.token;
 renderLog();
+renderConcepts();
+renderIdentity();
 setMode("chat");
 probe();
+refreshOps();
+refreshTraceList();
 setInterval(probe, 30000);
 if (!state.token) showMintHint(true);
 </script>
