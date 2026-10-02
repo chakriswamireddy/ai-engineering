@@ -1,0 +1,34 @@
+{
+  "title": "ai-layer WS9 — latency, cost, refusals",
+  "uid": "ai-layer-ws9",
+  "timezone": "utc",
+  "panels": [
+    {
+      "title": "request latency p50/p95 by route",
+      "description": "From route_latency_ms histogram (WS7 per-route series, Prometheus histogram_quantile).",
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (route, le) (rate(route_latency_ms_bucket[5m])))"},
+        {"expr": "histogram_quantile(0.95, sum by (route, le) (rate(route_latency_ms_bucket[5m])))"}
+      ]
+    },
+    {
+      "title": "cost per run (ledger)",
+      "description": "From ledger_cost_usd_total (WS7 sink-adjacent series, incremented at span close).",
+      "targets": [
+        {"expr": "sum by (operation) (rate(ledger_cost_usd_total[5m]))"}
+      ]
+    },
+    {
+      "title": "refusal rate",
+      "description": "Policy stops (and injection blocks) as a share of decisions; source: audit log + span_errors_total{error_kind}.",
+      "targets": [
+        {"expr": "sum by (error_kind) (rate(span_errors_total[5m]))"}
+      ]
+    },
+    {
+      "title": "approval queue age",
+      "description": "Not a Prometheus series: scrape GET /approvals (records carry requested_at) — metrics cannot name instances, the queue can. Alert: approval_queue_oldest_seconds > 3600 (see prometheus/alerts.yaml).",
+      "targets": []
+    }
+  ]
+}

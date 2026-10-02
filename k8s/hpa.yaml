@@ -1,0 +1,17 @@
+# WS9 — HPA 2–10: survive traffic, not just serve it.
+# Scales on CPU (primary) and on the WS7 per-route p95 proxy
+# (route_latency_ms histogram via Prometheus adapter, optional).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ai-layer
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: ai-layer}
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: 70}}
+  behavior:
+    scaleDown: {stabilizationWindowSeconds: 300}
+    scaleUp: {stabilizationWindowSeconds: 60}

@@ -1,0 +1,36 @@
+# WS9 — alerts: eval drop, quota exhaustion, sink lag. Every alert names the
+# runbook section (docs/runbook.md) that owns the response.
+groups:
+  - name: ai-layer-ws9
+    rules:
+      - alert: EvalDrop
+        expr: avg_overnight_eval_pass_rate < 0.95
+        for: 15m
+        labels: {severity: page}
+        annotations:
+          summary: "nightly eval_harness --live --sample below threshold"
+          runbook: "docs/runbook.md#slo--error-budget"
+
+      - alert: QuotaExhaustion
+        expr: increase(route_requests_denied_total[5m]) > 50
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: "per-tenant quotas refusing (429 with Retry-After)"
+          runbook: "docs/runbook.md#rateabuse"
+
+      - alert: SinkLag
+        expr: time() - max(trace_sink_last_write_epoch) > 300
+        for: 10m
+        labels: {severity: page}
+        annotations:
+          summary: "trace sink not written for 5m (S6 window going blind)"
+          runbook: "docs/runbook.md#trace-sink--retention"
+
+      - alert: RouteP95High
+        expr: histogram_quantile(0.95, sum by (route, le) (rate(route_latency_ms_bucket[5m]))) > 2000
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "route p95 above 2s for 10m"
+          runbook: "docs/runbook.md#slo--error-budget"

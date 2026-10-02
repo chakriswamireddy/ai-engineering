@@ -1,0 +1,12 @@
+# WS9 — PDB: voluntary disruptions (deploys, node drains, the chaos drill
+# killing 1 replica mid-demo) never take the last writer. minAvailable 1 with
+# minReplicas 2 means a kill leaves a serving pod — the drill's zero-data-loss
+# premise, in one number.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ai-layer
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: ai-layer}

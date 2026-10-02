@@ -1,0 +1,62 @@
+# WS9 — Deploy: the ai-layer Deployment + Service.
+#
+# - Rolling update (maxUnavailable 0, maxSurge 1): the old pod serves until the
+#   new one's /readyz passes — zero-downtime deploys, not recreate kill-first.
+# - Readiness /readyz checks gateway+store+DB+state (named checks; a missing
+#   env fails 503 with the check name — see survive_smoke S2). Liveness
+#   /healthz touches nothing external.
+# - One writer per chain: STATE_ADVISORY_DSN points at managed Postgres, so the
+#   advisory lock (not the file flock) spans replicas. Without it the file lock
+#   stands and replicas must stay 1 (see HPA + PDB beside this file).
+# - Secrets come from External Secrets (external-secrets.yaml), never .env in
+#   the image (docs/deployment.yaml `absent` section asserts this at build).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-layer
+  labels: {app: ai-layer}
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels: {app: ai-layer}
+  template:
+    metadata:
+      labels: {app: ai-layer}
+    spec:
+      securityContext: {runAsNonRoot: true, runAsUser: 999, fsGroup: 999}
+      containers:
+        - name: ai-layer
+          image: ai-layer:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{containerPort: 8000, name: http}]
+          envFrom:
+            - secretRef: {name: ai-layer-secrets}   # Vault via External Secrets
+          env:
+            - {name: ALLOW_ANON, value: "0"}
+            - {name: TRACE_SINK, value: postgres}
+            - {name: STATE_ADVISORY_DSN, valueFrom: {secretKeyRef: {name: ai-layer-secrets, key: STATE_ADVISORY_DSN}}}
+            - {name: REDIS_URL, valueFrom: {secretKeyRef: {name: ai-layer-secrets, key: REDIS_URL}}}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 30
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 15
+            timeoutSeconds: 2
+          resources:
+            requests: {cpu: "250m", memory: 384Mi}
+            limits: {cpu: "1000m", memory: 1Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-layer
+  labels: {app: ai-layer}
+spec:
+  selector: {app: ai-layer}
+  ports: [{name: http, port: 80, targetPort: http}]
