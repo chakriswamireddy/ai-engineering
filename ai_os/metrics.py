@@ -124,6 +124,27 @@ class Histogram:
                 "count": self.count, "mean": round(self.mean, 3)}
 
 
+class Gauge:
+    """WS7 — an absolute value that goes up *and* down (`last_write_epoch`, rates).
+
+    Distinct from a counter on purpose: a gauge is state (when the sink last
+    wrote), a counter is history. `set` replaces; it never accumulates.
+    """
+
+    def __init__(self, name: str, labels: Mapping[str, Any]):
+        self.name = name
+        self.labels = dict(labels)
+        self.value = 0.0
+
+    def set(self, value: float) -> "Gauge":
+        self.value = float(value)
+        return self
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"type": "gauge", "name": self.name, "labels": self.labels,
+                "value": self.value}
+
+
 # ----------------------------------------------------------------- registry
 
 class Registry:
@@ -131,6 +152,7 @@ class Registry:
         self._lock = threading.Lock()
         self._counters: "OrderedDict[tuple, Counter]" = OrderedDict()
         self._histograms: "OrderedDict[tuple, Histogram]" = OrderedDict()
+        self._gauges: "OrderedDict[tuple, Gauge]" = OrderedDict()
 
     def counter(self, name: str, **labels: Any) -> Counter:
         check_labels(labels)
@@ -153,6 +175,16 @@ class Registry:
                                    buckets if buckets is not None
                                    else DEFAULT_LATENCY_BUCKETS)
                 self._histograms[key] = series
+            return series
+
+    def gauge(self, name: str, **labels: Any) -> Gauge:
+        check_labels(labels)
+        key = (name, _key(labels))
+        with self._lock:
+            series = self._gauges.get(key)
+            if series is None:
+                series = Gauge(name, labels)
+                self._gauges[key] = series
             return series
 
     # -------------------------------------------------------- derivation
@@ -186,10 +218,12 @@ class Registry:
         with self._lock:
             counters = [c.as_dict() for c in self._counters.values()]
             histograms = [h.as_dict() for h in self._histograms.values()]
+            gauges = [g.as_dict() for g in self._gauges.values()]
         return {
             "counters": counters,
             "histograms": histograms,
-            "series": len(counters) + len(histograms),
+            "gauges": gauges,
+            "series": len(counters) + len(histograms) + len(gauges),
             "note": ("a local development surface, not a production metrics "
                      "stack; metrics cannot name an instance — use the trace"),
         }
@@ -206,18 +240,48 @@ class Registry:
         with self._lock:
             self._counters.clear()
             self._histograms.clear()
+            self._gauges.clear()
+
+    @staticmethod
+    def _labels_text(labels: Mapping[str, Any]) -> str:
+        def esc(v: Any) -> str:
+            return (str(v).replace("\\", "\\\\").replace('"', '\\"')
+                    .replace("\n", "\\n"))
+        if not labels:
+            return ""
+        return "{" + ",".join(f'{k}="{esc(v)}"'
+                              for k, v in labels.items()) + "}"
 
     def render_prometheus(self) -> str:
-        """The documented optional text exposition (no vendor dependency)."""
+        """The documented optional text exposition (no vendor dependency).
+
+        WS7 amendment — a histogram is *three* families in the text format
+        (`_bucket` cumulative with `le`, `_sum`, `_count`). The old renderer
+        emitted only `_sum`/`_count`, so `histogram_quantile()` in
+        `prometheus/alerts.yaml` could never match: the p95 alert was dead on
+        arrival. Buckets are cumulative here (the registry stores per-bucket
+        increments, the exposition requires running totals).
+        """
         lines: list[str] = []
         snap = self.snapshot()
         for series in snap["counters"]:
-            labels = ",".join(f'{k}="{v}"' for k, v in series["labels"].items())
-            lines.append(f'{series["name"]}{{{labels}}} {series["value"]}')
+            lines.append(f'{series["name"]}{self._labels_text(series["labels"])} '
+                         f'{series["value"]}')
+        for series in snap["gauges"]:
+            lines.append(f'{series["name"]}{self._labels_text(series["labels"])} '
+                         f'{series["value"]}')
         for series in snap["histograms"]:
-            labels = ",".join(f'{k}="{v}"' for k, v in series["labels"].items())
-            lines.append(f'{series["name"]}_sum{{{labels}}} {series["sum"]}')
-            lines.append(f'{series["name"]}_count{{{labels}}} {series["count"]}')
+            base = dict(series["labels"])
+            cumulative = 0
+            for edge, count in series["buckets"].items():
+                cumulative = count if edge == "+Inf" else cumulative + count
+                labels = dict(base, le=edge)
+                lines.append(f'{series["name"]}_bucket'
+                             f'{self._labels_text(labels)} {cumulative}')
+            lines.append(f'{series["name"]}_sum{self._labels_text(base)} '
+                         f'{series["sum"]}')
+            lines.append(f'{series["name"]}_count{self._labels_text(base)} '
+                         f'{series["count"]}')
         return "\n".join(lines)
 
 
@@ -286,6 +350,28 @@ def observe_route(route: str, latency_ms: float, *,
                         status=status).observe(max(0.0, float(latency_ms)))
     _REGISTRY.counter("route_requests_total", route=route,
                       status=status).inc()
+
+
+def observe_denied(route: str, reason: str = "unauthorized") -> None:
+    """WS9 — `route_requests_denied_total{route,status}` (401 from the identity
+    middleware, 429 from the quota manager).
+
+    Emitted at the refusal site, not at response close: a denied request never
+    reaches the handler, so the span-close hook never fires for it. `status` is
+    the enumerable pair (`unauthorized` | `rate_limited`); `reason` stays in the
+    JSON body, never in a label.
+    """
+    if not metrics_enabled():
+        return
+    _REGISTRY.counter("route_requests_denied_total", route=route,
+                      status=reason).inc()
+
+
+def set_gauge(name: str, value: float, **labels: Any) -> None:
+    """Fail-open absolute-value write (sink epoch, eval pass rate)."""
+    if not metrics_enabled():
+        return
+    _REGISTRY.gauge(name, **labels).set(value)
 
 
 def derive_from_trace(trace: Any) -> dict[str, Any]:

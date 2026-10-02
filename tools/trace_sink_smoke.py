@@ -90,6 +90,22 @@ def t5_prometheus() -> None:
     text = metrics_mod.registry().render_prometheus()
     check("T5 Prometheus exposition renders _sum/_count per route",
           "route_latency_ms_sum" in text and "route_latency_ms_count" in text)
+    # WS7 amendment: without `_bucket` lines `histogram_quantile()` in
+    # prometheus/alerts.yaml has nothing to read — the p95 alert was dead.
+    check("T5 renders cumulative _bucket lines incl. +Inf (p95 alerts readable)",
+          "route_latency_ms_bucket" in text and 'le="+Inf"' in text)
+    # t4 observed 12.5 (<=25) and 200 (<=250): cumulative count at le=250 = 2.
+    # A per-bucket renderer would print 1 here, which is the bug this catches.
+    check("T5 buckets are cumulative, not per-bucket counts",
+          'le="250"} 2' in text,
+          [ln for ln in text.splitlines() if 'le="250"' in ln])
+    metrics_mod.set_gauge("trace_sink_last_write_epoch", 1727000000.0)
+    text2 = metrics_mod.registry().render_prometheus()
+    check("T5 gauges render as absolute values (SinkLag reads the epoch)",
+          "trace_sink_last_write_epoch 1727000000.0" in text2
+          or "trace_sink_last_write_epoch 1727000000" in text2,
+          [ln for ln in text2.splitlines() if "epoch" in ln])
+
 
 
 def t6_ring_cap() -> None:

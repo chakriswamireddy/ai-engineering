@@ -78,6 +78,7 @@ SUITES: list[tuple[str, str, list[str]]] = [
     ("C1–C9 permission boundary", "tools/permission_smoke.py", []),
     ("H1–H9 human approval", "tools/approval_smoke.py", []),
     ("U1–U7 auth identity", "tools/auth_smoke.py", []),
+    ("L1–L5 API limits (WS2)", "tools/limits_smoke.py", []),
     ("W1–W6 write path", "tools/write_smoke.py", []),
     ("F1–F7 approval execution", "tools/apply_smoke.py", []),
     ("C1–C5 code store (WS5)", "tools/code_store_smoke.py", []),

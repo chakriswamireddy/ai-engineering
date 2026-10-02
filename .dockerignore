@@ -15,6 +15,7 @@
 !.env.example
 !requirements.txt
 !data/store.json
+!data/code_store.json
 
 # Explicit non-size exclusions (named because they are the ones that matter)
 .env
@@ -27,3 +28,4 @@
 .aws/
 data/*
 !data/store.json
+!data/code_store.json

@@ -1,30 +1,53 @@
-# WS9 — alerts: eval drop, quota exhaustion, sink lag. Every alert names the
-# runbook section (docs/runbook.md) that owns the response.
+# WS9 — alerts: eval drop, quota exhaustion, sink lag, route latency. Every
+# alert names the runbook section (docs/runbook.md) that owns the response.
+#
+# Each expr is checked against what the app actually renders on
+# `GET /metrics?format=prometheus` (WS7 amendment: the old file named three
+# series that were never emitted — `avg_overnight_eval_pass_rate`,
+# `route_requests_denied_total`, `trace_sink_last_write_epoch` — and a
+# histogram rule over `_bucket` when the renderer emitted no buckets at all.
+# An alert that can never fire is a blanker, not a safety net).
 groups:
   - name: ai-layer-ws9
     rules:
       - alert: EvalDrop
-        expr: avg_overnight_eval_pass_rate < 0.95
+        expr: eval_pass_rate < 0.95
         for: 15m
         labels: {severity: page}
         annotations:
           summary: "nightly eval_harness --live --sample below threshold"
           runbook: "docs/runbook.md#slo--error-budget"
 
+      - alert: EvalStale
+        expr: eval_result_age_seconds > 90000
+        for: 30m
+        labels: {severity: ticket}
+        annotations:
+          summary: "no eval result in ~25h — the nightly run is missing or failing"
+          runbook: "docs/runbook.md#slo--error-budget"
+
       - alert: QuotaExhaustion
-        expr: increase(route_requests_denied_total[5m]) > 50
+        expr: increase(route_requests_denied_total{status="rate_limited"}[5m]) > 50
         for: 5m
         labels: {severity: ticket}
         annotations:
           summary: "per-tenant quotas refusing (429 with Retry-After)"
           runbook: "docs/runbook.md#rateabuse"
 
-      - alert: SinkLag
-        expr: time() - max(trace_sink_last_write_epoch) > 300
-        for: 10m
-        labels: {severity: page}
+      - alert: AuthDenials
+        expr: increase(route_requests_denied_total{status="unauthorized"}[5m]) > 100
+        for: 5m
+        labels: {severity: ticket}
         annotations:
-          summary: "trace sink not written for 5m (S6 window going blind)"
+          summary: "sustained 401s on the guarded surface — probe or credential drift"
+          runbook: "docs/runbook.md#auth--identity"
+
+      - alert: SinkLag
+        expr: time() - trace_sink_last_write_epoch > 1800
+        for: 30m
+        labels: {severity: ticket}
+        annotations:
+          summary: "no trace written to the sink for 30m — either idle (check traffic) or the sink is broken"
           runbook: "docs/runbook.md#trace-sink--retention"
 
       - alert: RouteP95High

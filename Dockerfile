@@ -39,6 +39,7 @@ COPY policy.yaml .
 COPY .env.example .
 COPY requirements.txt .
 COPY data/store.json ./data/store.json
+COPY data/code_store.json ./data/code_store.json
 
 # Ensure data directory is writable by ai-os user (for state.json and lock file)
 RUN mkdir -p /app/data && chown -R ai-os:ai-os /app/data

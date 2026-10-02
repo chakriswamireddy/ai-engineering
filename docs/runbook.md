@@ -29,6 +29,23 @@ TimescaleDB via `TRACE_SINK_DSN` in staging. Retention job keeps 30d raw /
 90d aggregates (`run_retention()`); `GET /traces/{id}` resolves after restart
 through the sink fallback. `SinkLag` fires when the S6 window goes blind.
 
+## Auth / identity
+
+HS256 shared-secret JWT (`identity.py`, `joserfc`) — no IdP required.
+`ALLOW_ANON=0` makes every route in `_AUTH_PREFIXES` refuse anonymous with 401;
+the probes (`/healthz`, `/readyz`) stay open for the load balancer.
+
+- **Mint a token:** `docker compose exec ai-layer python tools/mint_token.py --sub your-name --ttl 3600`
+  (offline: `cd ai-layer && .venv/bin/python tools/mint_token.py --sub you`).
+- **Rotate the secret:** new value in root `.env` (`OIDC_HS256_SECRET`, mode 600)
+  → `docker compose up -d ai-layer`. Every token minted under the old secret
+  dies immediately — that is the rotation, not a side effect.
+- **`AuthDenials` alert** (100+ 401s in 5m) means a client has the wrong/absent
+  key or something is probing: check `GET /logs` and the identity reason codes
+  (`anonymous_denied:<route>`, `forged_token`, `expired_token`).
+- Evidence: `tools/auth_smoke.py` (U1–U7) covers forged, expired, cross-tenant,
+  and `ALLOW_ANON=0` refusal; deploy.sh asserts 401-without-token on every run.
+
 ## Secrets
 
 Vault via External Secrets (`k8s/external-secrets.yaml`, 15m rotation); the

@@ -1,34 +1,79 @@
 {
   "title": "ai-layer WS9 — latency, cost, refusals",
   "uid": "ai-layer-ws9",
+  "schemaVersion": 39,
   "timezone": "utc",
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
   "panels": [
     {
+      "id": 1,
+      "type": "timeseries",
       "title": "request latency p50/p95 by route",
       "description": "From route_latency_ms histogram (WS7 per-route series, Prometheus histogram_quantile).",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "fieldConfig": {"defaults": {"unit": "ms"}, "overrides": []},
       "targets": [
-        {"expr": "histogram_quantile(0.50, sum by (route, le) (rate(route_latency_ms_bucket[5m])))"},
-        {"expr": "histogram_quantile(0.95, sum by (route, le) (rate(route_latency_ms_bucket[5m])))"}
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (route, le) (rate(route_latency_ms_bucket[5m])))",
+          "legendFormat": "p50 {{route}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (route, le) (rate(route_latency_ms_bucket[5m])))",
+          "legendFormat": "p95 {{route}}"
+        }
       ]
     },
     {
+      "id": 2,
+      "type": "timeseries",
       "title": "cost per run (ledger)",
       "description": "From ledger_cost_usd_total (WS7 sink-adjacent series, incremented at span close).",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 0},
+      "fieldConfig": {"defaults": {"unit": "currencyUSD"}, "overrides": []},
       "targets": [
-        {"expr": "sum by (operation) (rate(ledger_cost_usd_total[5m]))"}
+        {
+          "refId": "A",
+          "expr": "sum by (operation) (rate(ledger_cost_usd_total[5m]))",
+          "legendFormat": "{{operation}}"
+        }
       ]
     },
     {
-      "title": "refusal rate",
-      "description": "Policy stops (and injection blocks) as a share of decisions; source: audit log + span_errors_total{error_kind}.",
+      "id": 3,
+      "type": "timeseries",
+      "title": "refusal / error rate",
+      "description": "Policy stops (and injection blocks) as a share of decisions; source: span_errors_total{error_kind} plus the identity/quota denials.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 0},
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
       "targets": [
-        {"expr": "sum by (error_kind) (rate(span_errors_total[5m]))"}
+        {
+          "refId": "A",
+          "expr": "sum by (error_kind) (rate(span_errors_total[5m]))",
+          "legendFormat": "error {{error_kind}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (status) (rate(route_requests_denied_total[5m]))",
+          "legendFormat": "denied {{status}}"
+        }
       ]
     },
     {
+      "id": 4,
+      "type": "text",
       "title": "approval queue age",
-      "description": "Not a Prometheus series: scrape GET /approvals (records carry requested_at) — metrics cannot name instances, the queue can. Alert: approval_queue_oldest_seconds > 3600 (see prometheus/alerts.yaml).",
-      "targets": []
+      "description": "Not a Prometheus series: scrape GET /approvals (records carry requested_at) — metrics cannot name instances, the queue can.",
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 8},
+      "options": {
+        "mode": "markdown",
+        "content": "**Approval queue age** is instance data, not a metric.\n\n`GET /approvals` (guarded, `Authorization: Bearer <token>`) lists the queue with `requested_at`; the oldest record's age is the queue age. Alert line: `> 3600s`."
+      }
     }
   ]
 }

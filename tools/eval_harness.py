@@ -858,6 +858,24 @@ def main() -> None:
         print(f"report written → {args.report}")
     print("\n" + ("ALL DAY 20 (MECH) CHECKS PASSED" if not wrong
                   else f"{len(wrong)} ROW(S) DRIFTED: {wrong}"))
+    # WS6 → WS9: publish the run where /metrics can find it. The nightly
+    # sidecar and the app share data/ — `server.metrics_endpoint` republishes
+    # this file as the `eval_pass_rate` / `eval_result_age_seconds` gauges the
+    # EvalDrop / EvalStale alerts read. Written *before* the exit code: a
+    # failing run is exactly the run the alert must see.
+    try:
+        _total = len(verdicts) or 1
+        Path("data").mkdir(exist_ok=True)
+        Path("data/eval_latest.json").write_text(json.dumps({
+            "pass_rate": round((len(verdicts) - len(wrong)) / _total, 4),
+            "ts": time.time(),
+            "rows": len(verdicts),
+            "drifted": wrong,
+            "mode": mode,
+            "sample": args.sample,
+        }), encoding="utf-8")
+    except Exception as exc:                       # noqa: BLE001 — never mask the verdict
+        print(f"eval_latest.json not written: {exc}")
     sys.exit(1 if wrong else 0)
 
 

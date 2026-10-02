@@ -1,0 +1,12 @@
+# WS9 — Grafana dashboard provisioning: load every json in the folder below.
+apiVersion: 1
+
+providers:
+  - name: ai-layer
+    orgId: 1
+    folder: ai-layer
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

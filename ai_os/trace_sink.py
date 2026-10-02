@@ -166,14 +166,24 @@ class PostgresSink:
 
 
 def build_sink_from_env() -> TraceSink | None:
-    """`TRACE_SINK=file|postgres|off`. `off`/unknown-without-DSN → None."""
+    """`TRACE_SINK=file|postgres|off`. `off`/unknown-without-DSN → None.
+
+    The postgres branch fails open to the file sink on *any* construction
+    error — driver missing, DSN wrong, database not up yet. The contract is
+    "never crash the app over a sink", and a boot-time `OperationalError`
+    (compose can start us before Postgres accepts connections) is exactly the
+    case the file sink exists for. The failure is logged, not silent.
+    """
     kind = sink_kind_from_env()
     if kind in ("off", "none", "0", "false", "no"):
         return None
     if kind in ("postgres", "postgresql", "timescale", "timescaledb"):
         try:
             return PostgresSink()
-        except RuntimeError:
+        except Exception as exc:                             # noqa: BLE001
+            import logging
+            logging.getLogger("ai_os.trace_sink").warning(
+                "postgres sink unavailable (%s) — falling back to file sink", exc)
             return FileSink()  # fail-open: durable file beats no sink
     return FileSink()
 

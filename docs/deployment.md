@@ -21,6 +21,7 @@ include:
   - path: .env.example      why: the configuration *contract*; never a value source
   - path: requirements.txt  why: four dependencies, resolved at build
   - path: data/store.json   why: 262,182,307 B · 11,061 chunks · dim 768
+  - path: data/code_store.json  why: 190,543,227 B · code corpus behind `POST /rag {"corpus":"code"}` (dim 768, same model)
 absent:
   - path: .env               why: secrets come from the run environment  (BUILT, ASSERTED)
   - path: .git/              why: history is not a runtime dependency

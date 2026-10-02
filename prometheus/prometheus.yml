@@ -1,0 +1,28 @@
+# WS9 — Prometheus scrape/alert config for the single-EC2 compose profile.
+# Mounted read-only by the `obs` profile service in docker-compose.yml.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+
+rule_files:
+  - /etc/prometheus/alerts.yaml
+
+scrape_configs:
+  # The app's own exposition (inside the compose network, never published).
+  # /metrics is a guarded route (it is operational surface), so the scraper
+  # authenticates like any other client: a long-lived HS256 token minted by
+  # deploy.sh into .secrets/metrics_token.
+  - job_name: ai-layer
+    metrics_path: /metrics
+    params:
+      format: [prometheus]
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/metrics_token
+    static_configs:
+      - targets: ["ai-layer:8000"]
+
+  # Self-scrape so a dead Prometheus is itself observable (`up == 0`).
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

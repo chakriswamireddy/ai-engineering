@@ -756,6 +756,16 @@ class TraceStore:
                 self.sink.put(tid, trace.as_dict())
             except Exception:                               # noqa: BLE001
                 pass            # sink is fail-open; the local ring is the fact
+            else:
+                # WS7 — the SinkLag alert reads this. Set on *successful* put
+                # only: a sink that throws must age toward the alert, not be
+                # papered over by an attempted write.
+                try:
+                    from ai_os import metrics as _m
+                    import time as _t
+                    _m.set_gauge("trace_sink_last_write_epoch", _t.time())
+                except Exception:                           # noqa: BLE001
+                    pass        # metrics are fail-open, same as the sink
 
     def get(self, trace_id: str) -> "Trace | NullTrace | None":
         with self._lock:

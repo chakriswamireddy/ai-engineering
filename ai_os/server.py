@@ -13,6 +13,7 @@ All knobs come from the env (see ai_os.config). Responses use the normalized
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -92,10 +93,58 @@ _AUTH_PREFIXES = (
     "/agent", "/sql",
 )
 
+# WS2 (landed) — the two limits the roadmap asked for, both env-tunable so an
+# operator can tighten them without a rebuild (documented in .env.example):
+#   MAX_BODY_BYTES   0 disables. Checked from `Content-Length` before the body
+#                    is read; nginx also caps the public edge (defense in
+#                    depth — the loopback port bypasses nginx).
+#   ROUTE_TIMEOUT_S  0 disables. Must stay >= LLM_TIMEOUT_S * attempts, or a
+#                    legitimate retry chain becomes a 504. Default 300 matches
+#                    nginx's `proxy_read_timeout 300s`.
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)).strip() or default)
+    except ValueError:
+        return default
+
+
+_MAX_BODY_BYTES = _int_env("MAX_BODY_BYTES", 1_048_576)
+_ROUTE_TIMEOUT_S = _int_env("ROUTE_TIMEOUT_S", 300)
+
+_APPROVALS_ID_RE = re.compile(r"^/approvals/[^/]+")
+
+
+def _route_template(path: str) -> str:
+    """The metric label for a path: ids → `{id}`, so labels stay enumerable.
+
+    Without this, `GET /traces/{trace_id}` would mint one histogram series per
+    trace id — a high-cardinality label dressed up as a route. `check_labels`
+    can only catch the *name*; the value discipline lives here.
+    """
+    if path.startswith("/approvals/"):
+        rest = _APPROVALS_ID_RE.sub("/approvals/{id}", path, count=1)
+        return rest
+    if path.startswith("/traces/"):
+        return "/traces/{id}"
+    return path
+
 
 @app.middleware("http")
 async def _identity_middleware(request: Request, call_next):
     import time as _time
+    # WS2 — input size cap. Checked from the header before a byte of body is
+    # read; nginx caps the public edge too, this is the assertion for the
+    # loopback port (127.0.0.1:8001) that bypasses nginx.
+    if _MAX_BODY_BYTES > 0:
+        try:
+            _clen = int(request.headers.get("content-length") or 0)
+        except ValueError:
+            _clen = -1
+        if _clen > _MAX_BODY_BYTES:
+            return JSONResponse(
+                {"error": "request body too large",
+                 "max_body_bytes": _MAX_BODY_BYTES},
+                status_code=413)
     principal = identity_mod.request_principal(request)
     request.state.principal = principal
     request.state.tenant = principal.tenant
@@ -105,6 +154,14 @@ async def _identity_middleware(request: Request, call_next):
         try:
             identity_mod.require_auth(request, route=request.url.path)
         except identity_mod.AuthError as exc:
+            # A denial never reaches the handler, so the span-close hook never
+            # fires for it — count it here or it is invisible in /metrics.
+            try:
+                from ai_os import metrics as _denied_metrics
+                _denied_metrics.observe_denied(_route_template(request.url.path),
+                                               "unauthorized")
+            except Exception:                               # noqa: BLE001
+                pass
             return JSONResponse({"error": exc.reason}, status_code=exc.status)
         # WS9 — per-tenant/principal quota (Redis when REDIS_URL is set,
         # memory fallback otherwise). Disabled by default (RATE_LIMIT=none),
@@ -115,6 +172,12 @@ async def _identity_middleware(request: Request, call_next):
             if _qm.enabled:
                 _decision = _qm.check(principal.tenant, principal.id)
                 if not _decision.allowed:
+                    try:
+                        from ai_os import metrics as _denied_metrics
+                        _denied_metrics.observe_denied(
+                            _route_template(request.url.path), "rate_limited")
+                    except Exception:                       # noqa: BLE001
+                        pass
                     return JSONResponse(
                         {"error": "rate limit exceeded", "retry_after_s": round(
                             _decision.retry_after, 2)},
@@ -124,16 +187,30 @@ async def _identity_middleware(request: Request, call_next):
             pass                    # quotas are fail-open; never break a request
     # WS7 — per-route latency histogram, fired at response close so metrics
     # and traces agree about the window. Route templates only (never ids).
+    # WS2 — the route timeout: `wait_for` cancels the handler at the deadline
+    # and the request answers 504 instead of holding a socket open.
     _t0 = _time.perf_counter()
+    _status = "error"
     try:
-        response = await call_next(request)
+        if _ROUTE_TIMEOUT_S > 0:
+            response = await asyncio.wait_for(call_next(request),
+                                               timeout=_ROUTE_TIMEOUT_S)
+        else:
+            response = await call_next(request)
+        _status = ("ok" if response.status_code < 400 else
+                   "client_error" if response.status_code < 500 else "error")
         return response
+    except (asyncio.TimeoutError, TimeoutError):
+        _status = "error"
+        return JSONResponse(
+            {"error": "route timeout", "timeout_s": _ROUTE_TIMEOUT_S},
+            status_code=504)
     finally:
         try:
             from ai_os import metrics as _metrics
-            route = request.url.path.rsplit("/", 1)[0] if request.url.path.startswith("/approvals/") else request.url.path
-            _metrics.observe_route(route,
-                                   (_time.perf_counter() - _t0) * 1000.0)
+            _metrics.observe_route(_route_template(request.url.path),
+                                   (_time.perf_counter() - _t0) * 1000.0,
+                                   status=_status)
         except Exception:                                   # noqa: BLE001
             pass                # metrics are fail-open; never break a response
 
@@ -454,10 +531,31 @@ def rag_endpoint(req: RagRequest, request: Request):
     return JSONResponse(result, headers=headers)
 
 
+def _publish_eval_gauges() -> None:
+    """WS6 → WS9 — republish the nightly eval run as gauges for the alerts.
+
+    `tools/eval_harness.py` writes `data/eval_latest.json` (`pass_rate`, `ts`);
+    the app shares that path with the nightly sidecar. Absent file → no
+    series at all, which Prometheus reads as *unknown* — never as a passing 0.
+    Fail-open: a missing/unparsable file must not take /metrics down.
+    """
+    try:
+        import time as _time
+        from ai_os import metrics as _m
+        with open("data/eval_latest.json", encoding="utf-8") as fh:
+            row = json.load(fh)
+        _m.set_gauge("eval_pass_rate", float(row["pass_rate"]))
+        _m.set_gauge("eval_result_age_seconds",
+                     max(0.0, _time.time() - float(row["ts"])))
+    except Exception:                                       # noqa: BLE001
+        pass
+
+
 @app.get("/metrics")
 def metrics_endpoint(format: str = "json"):
     """Day 24 §8 — the aggregated view (JSON snapshot, optional Prometheus text)."""
     from ai_os import metrics as metrics_mod
+    _publish_eval_gauges()
     if format == "prometheus":
         return PlainTextResponse(metrics_mod.registry().render_prometheus())
     return metrics_mod.registry().snapshot()
