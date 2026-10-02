@@ -150,8 +150,13 @@ class RagStore:
                 "compare vectors from different spaces")
         if not self.chunks or k <= 0:
             return []
-        ranked = sorted((dot(q, c.vector), c.chunk_id, c) for c in self.chunks)
-        return [(score, c) for score, _, c in ranked[-k:]][::-1]
+        # (score, chunk_id, ordinal) — the ordinal is a *unique* final
+        # tie-break: the Day-10 code store has duplicate chunk_ids
+        # (e.g. several `#Meta` chunks per module) and cosine ties are
+        # common, so sorted() must never fall through to comparing Chunks.
+        ranked = sorted((dot(q, c.vector), c.chunk_id, i, c)
+                        for i, c in enumerate(self.chunks))
+        return [(score, c) for score, _, _, c in ranked[-k:]][::-1]
 
     # ------------------------------------------------------------ persist
 
@@ -195,6 +200,19 @@ class RagStore:
         return store
 
 
+# One budget per corpus — the same pair tools.py keeps as
+# DEFAULT_DOC_BUDGET/DEFAULT_CODE_BUDGET (docs/evaluations/tool-day11.md).
+# A code body (median ~1500 chars in the Day-10 store) cannot fit the doc
+# budget: `k = 1200 // 1220 = 0` and the code corpus silently refuses.
+# `budget_chars=None` everywhere below means "use this corpus's default".
+CORPUS_BUDGETS: dict[str, int] = {"docs": 1200, "code": 4000}
+
+
+def default_budget_chars(corpus_label: str | None) -> int:
+    """`None` label (or unknown) → the doc-store budget (Day-6 behavior)."""
+    return CORPUS_BUDGETS.get(corpus_label or "docs", 1200)
+
+
 def k_from_budget(budget_chars: int, avg_chunk_len: float, n: int) -> int:
     """K is a *budget* decision, not a quality knob.
 
@@ -226,8 +244,9 @@ def build_context(results: list[tuple[float, Chunk]], budget_chars: int = 1200,
 
 
 def run_rag(gateway, store, question: str, *, k: int | None = None,
-            budget_chars: int = 1200, max_tokens: int = 2048,
-            temperature: float = 0.0) -> dict[str, Any]:
+            budget_chars: int | None = None, max_tokens: int = 2048,
+            temperature: float = 0.0,
+            corpus_label: str | None = None) -> dict[str, Any]:
     """The one-function pipeline from day-6.md §6.
 
     Returns answer + citations + retrieval/generation accounting. When no
@@ -239,7 +258,51 @@ def run_rag(gateway, store, question: str, *, k: int | None = None,
     prompt ref on the generation turn. Raw question and document text never
     enter the trace — only ids, counts, ranks, sizes, and hashes. The pipeline
     decisions (`k`, budget, gate, refusal) are exactly where they were.
+
+    `corpus_label` names the store for the caller's benefit: every citation
+    then carries `corpus: <label>` (additive — an unlabeled run keeps the
+    Day-6 shape exactly). `budget_chars=None` uses the corpus default
+    (`CORPUS_BUDGETS`: docs 1200, code 4000); an explicit int is the
+    caller's budget and wins.
     """
+    return _run_rag_common(gateway, [(corpus_label, store)], question,
+                           k=k, budget_chars=budget_chars,
+                           max_tokens=max_tokens, temperature=temperature)
+
+
+def run_rag_multi(gateway, stores: list[tuple[str, Any]], question: str,
+                  *, k: int | None = None, budget_chars: int | None = None,
+                  max_tokens: int = 2048,
+                  temperature: float = 0.0) -> dict[str, Any]:
+    """Auto mode — ask NAMED stores in ONE pipeline (the `/rag` `auto` corpus).
+
+    One embed, per-store retrieval merged into a single score-ordered
+    candidate list, ONE generation: the model never routes a corpus (no
+    classifier chat, no extra bill — the deterministic twin of
+    `agent.route_question`'s "0 chats" virtue), and the answer cites
+    whichever store actually held the evidence. Citations carry
+    `corpus: <label>`; `retrieval.stores` reports each store's
+    k/candidates/budget.
+
+    `k` is per store (k=4 over docs+code → up to 8 candidates). Budget is
+    ALSO per store: `budget_chars=None` → `CORPUS_BUDGETS` per label (each
+    store's context slice is built under its own budget, so a code body is
+    never crowded out of the doc budget); one explicit int applies the
+    caller's budget to every store. Stores may not be None — the caller
+    filters and discloses skips (`result["skipped"]`).
+    """
+    named = [(label, store) for label, store in stores if store is not None]
+    if not named:
+        raise ValueError("run_rag_multi: no stores to query")
+    if any(not label for label, _ in named):
+        raise ValueError("run_rag_multi: every store needs a label")
+    return _run_rag_common(gateway, named, question,
+                           k=k, budget_chars=budget_chars,
+                           max_tokens=max_tokens, temperature=temperature)
+
+
+def _run_rag_common(gateway, stores, question: str, *, k, budget_chars,
+                    max_tokens, temperature) -> dict[str, Any]:
     q = question.strip()
     if not q:
         raise ValueError("question must not be empty")
@@ -255,7 +318,8 @@ def run_rag(gateway, store, question: str, *, k: int | None = None,
         tr.add_event("request", route="/rag",
                      question_sha256=obs.sha256_text(q), question_chars=len(q))
     try:
-        result = _run_rag_traced(gateway, store, q, k=k, budget_chars=budget_chars,
+        result = _run_rag_traced(gateway, stores, q, k=k,
+                                 budget_chars=budget_chars,
                                  max_tokens=max_tokens, temperature=temperature,
                                  tr=tr)
     except BaseException as exc:
@@ -276,55 +340,116 @@ def _ev(span, event: str, **attrs: Any) -> None:
         span.add_event(event, **attrs)
 
 
-def _run_rag_traced(gateway, store, q: str, *, k, budget_chars, max_tokens,
+def _run_rag_traced(gateway, stores, q: str, *, k, budget_chars, max_tokens,
                     temperature, tr) -> dict[str, Any]:
+    """Retrieval over 1..N named stores → per-store budgeted context → one chat.
+
+    `stores` is `[(label | None, store), ...]` — single-store callers keep
+    the Day-6 accounting exactly; labeled runs add `corpus` per citation and
+    a `retrieval.stores` breakdown.
+    """
     embeddings = gateway.embed([q])
     qvec = embeddings[0].vector
-    if store.dimension and len(qvec) != store.dimension:
-        raise DimensionMismatch(
-            f"query dim {len(qvec)} != store dim {store.dimension} — "
-            "query was embedded by a different model")
 
-    if k is None:
-        k = k_from_budget(budget_chars, store.avg_chunk_len(), len(store))
+    # (label, store, k_i, budget_i) — k AND budget are per store: the caller
+    # may pass one int for all (explicit override) or None → corpus default.
+    planned: list[tuple[str | None, Any, int, int]] = []
+    for label, store in stores:
+        if store.dimension and len(qvec) != store.dimension:
+            raise DimensionMismatch(
+                f"query dim {len(qvec)} != store dim {store.dimension} — "
+                "query was embedded by a different model"
+                + (f" [{label} store]" if label else ""))
+        budget_i = (budget_chars if budget_chars is not None
+                    else default_budget_chars(label))
+        k_i = (k if k is not None else
+               k_from_budget(budget_i, store.avg_chunk_len(), len(store)))
+        planned.append((label, store, k_i, budget_i))
+
+    labels = [label for label, _, _, _ in planned if label]
+    models = list(dict.fromkeys(st.embedding_model for _, st, _, _ in planned))
+    dims = list(dict.fromkeys(st.dimension for _, st, _, _ in planned))
+    total_budget = sum(b for _, _, _, b in planned)
+    span_k = k if k is not None else max((k_i for _, _, k_i, _ in planned),
+                                         default=0)
     with tr.span(obs.KIND_RETRIEVAL, "retrieval", component="rag",
                  span_kind=obs.SPAN_INTERNAL, attributes={
-                     "query_sha256": obs.sha256_text(q), "k": k,
-                     "store": store.embedding_model, "store_dim": store.dimension,
+                     "query_sha256": obs.sha256_text(q), "k": span_k,
+                     "store": ",".join(models), "store_dim": dims[0] if dims else 0,
+                     "corpora": ",".join(labels) if labels else None,
+                     "store_count": len(planned),
                      "store_version": STORE_VERSION, "store_kind": "local_file",
-                     "budget_chars": budget_chars}) as rspan:
-        results = store.retrieve(qvec, k)
-        context, used, kept = build_context(results, budget_chars)
+                     "budget_chars": total_budget}) as rspan:
+        merged: list[tuple[float, Any, str | None]] = []
+        per_store: list[tuple[str | None, int, list[tuple[float, Any]]]] = []
+        store_stats: dict[str, Any] = {}
+        for label, store, k_i, budget_i in planned:
+            results = store.retrieve(qvec, k_i)
+            per_store.append((label, budget_i, results))
+            if label:
+                store_stats[label] = {"k": k_i, "candidates": len(results),
+                                      "budget_chars": budget_i}
+            merged.extend((score, chunk, label) for score, chunk in results)
+        # Tie-break on chunk_id: equal scores must not fall through to
+        # comparing Chunk objects (TypeError — ties are common across stores).
+        merged.sort(key=lambda t: (-t[0], t[1].chunk_id, t[2] or ""))
+        if len(per_store) == 1:
+            # Day-6 path unchanged: one store, one budget, rank order.
+            _, budget_0, results_0 = per_store[0]
+            context, used, kept = build_context(results_0, budget_0)
+        else:
+            # Auto: each store fills its OWN slice (docs 1200 / code 4000 by
+            # default) — a 1500-char code body must not be crowded out by
+            # higher-scoring 200-char doc paragraphs.
+            slices: list[str] = []
+            used = 0
+            kept = []
+            for _, budget_i, results_i in per_store:
+                ctx_i, used_i, kept_i = build_context(results_i, budget_i)
+                if ctx_i:
+                    slices.append(ctx_i)
+                    used += used_i
+                    kept.extend(kept_i)
+            context = "\n\n".join(slices)
         kept_ids = {c.chunk_id for _, c in kept}
-        for rank, (score, chunk) in enumerate(results, 1):
+        for rank, (score, chunk, label) in enumerate(merged, 1):
             _ev(rspan, "document", doc_id=chunk.doc_id, chunk_id=chunk.chunk_id,
                 rank=rank, score=round(float(score), 4), chars=len(chunk.text),
                 text_sha256=obs.sha256_text(chunk.text),
+                corpus=label,
                 kept=chunk.chunk_id in kept_ids,
                 drop_reason=(None if chunk.chunk_id in kept_ids else "budget"))
         if rspan is not None:
-            rspan.update(candidates=len(results), context_chars=used,
-                         kept=len(kept), dropped=len(results) - len(kept))
+            rspan.update(candidates=len(merged), context_chars=used,
+                         kept=len(kept), dropped=len(merged) - len(kept))
 
     retrieval = {
         "model": embeddings[0].model,
         "input_tokens": embeddings[0].usage.input_tokens,
-        "k": k,
-        "candidates": len(results),
+        "k": span_k,
+        "candidates": len(merged),
         "context_chars": used,
         "cost_usd": round(gateway.ledger.cost(embeddings[0].model,
                                              embeddings[0].usage), 8),
     }
+    if labels:
+        retrieval["stores"] = store_stats
+
+    def _cite(score, chunk, label):
+        entry = citation(chunk, score)
+        if label:
+            entry["corpus"] = label
+        return entry
 
     if not context or not kept:
         tr.add_event("gate_refused", reason="empty context after budget",
-                     candidates=len(results))
+                     candidates=len(merged))
         tr.add_event("final_answer", refused=True, answer_chars=len(NOT_COVERED),
                      answer_sha256=obs.sha256_text(NOT_COVERED),
-                     citations=len(results), model=None)
+                     citations=len(merged), model=None)
         return {
             "answer": NOT_COVERED,
-            "citations": [citation(c, s) for s, c in results],
+            "citations": [_cite(s, c, lbl) for s, c, lbl in merged],
             "retrieval": retrieval,
             "generation": None,
             "refused": True,
@@ -339,13 +464,13 @@ def _run_rag_traced(gateway, store, q: str, *, k, budget_chars, max_tokens,
     tr.add_event("final_answer", refused=False,
                  answer_sha256=obs.sha256_text(completion.text),
                  answer_chars=len(completion.text),
-                 citations=len(results), model=completion.model,
+                 citations=len(merged), model=completion.model,
                  finish_reason=completion.finish_reason,
                  prompt_version=RAG_PROMPT_REF.version)
 
     return {
         "answer": completion.text,
-        "citations": [citation(c, s) for s, c in results],
+        "citations": [_cite(s, c, lbl) for s, c, lbl in merged],
         "retrieval": retrieval,
         "generation": {
             "model": completion.model,

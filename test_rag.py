@@ -20,7 +20,7 @@ from ai_os.contract import Completion, Embedding, Usage  # noqa: E402
 from ai_os.ledger import Ledger  # noqa: E402
 from ai_os.rag import (  # noqa: E402
     Chunk, RagStore, DimensionMismatch, StoreVersionError,
-    build_context, citation, k_from_budget, run_rag,
+    build_context, citation, k_from_budget, run_rag, run_rag_multi,
 )
 
 FAILS = 0
@@ -47,8 +47,10 @@ class FakeGateway:
         self.last_attempts = 1
         self.last_latency_ms = 1.0
         self.last_provider = "fake"
+        self.embed_calls = 0
 
     def embed(self, inputs: list[str]) -> list[Embedding]:
+        self.embed_calls += 1
         out = []
         for t in inputs:
             key = next((k for k in self.vectors if k.lower() in t.lower()), "")
@@ -221,6 +223,119 @@ def test_lost_in_middle_mechanics():
     check("retrieve is deterministic", store.retrieve(q, k=8) == results)
 
 
+def test_run_rag_multi():
+    """`corpus: auto` — both stores asked in ONE pipeline, zero extra chats."""
+    with tempfile.TemporaryDirectory() as d:
+        docs = make_store(Path(d))
+        code = RagStore(embedding_model="text-embedding-3-small")
+        code.add(Chunk("g0", "ai_os/gateway", "ai_os/gateway.py", "Gateway", 0,
+                       "The gateway retries and falls through to the next provider.",
+                       [0.9, 0.1, 0.0]))
+        code.add(Chunk("r0", "ai_os/rag", "ai_os/rag.py", "run_rag", 0,
+                       "run_rag retrieves under a budget.", [0.7, 0.3, 0.0]))
+        gw = FakeGateway({"checkout": [1.0, 0.2, 0.0]}, answer="merged answer")
+
+        res = run_rag_multi(gw, [("docs", docs), ("code", code)],
+                            "how do I create a checkout?", budget_chars=1000)
+        check("multi: one embed serves both stores",
+              gw.embed_calls == 1, str(gw.embed_calls))
+        labels = {c.get("corpus") for c in res["citations"]}
+        check("multi: citations tagged from both corpora",
+              labels == {"docs", "code"}, str(labels))
+        check("multi: retrieval accounts per store",
+              res["retrieval"]["stores"]["docs"]["candidates"] == len(docs)
+              and res["retrieval"]["stores"]["code"]["candidates"] == len(code)
+              and res["retrieval"]["candidates"] == len(docs) + len(code),
+              str(res["retrieval"]))
+        check("multi: one generation over the merged context",
+              res["answer"] == gw.answer
+              and res["generation"]["model"] == "gpt-4o-mini")
+
+        labeled = run_rag(gw, docs, "checkout", corpus_label="docs")
+        check("labeled single tags its citations",
+              all(c.get("corpus") == "docs" for c in labeled["citations"]))
+        plain = run_rag(gw, docs, "checkout")
+        check("unlabeled single keeps the Day-6 citation shape",
+              "corpus" not in plain["citations"][0])
+
+        try:
+            run_rag_multi(gw, [("docs", None), ("code", None)], "q")
+            check("multi with no stores raises", False)
+        except ValueError:
+            check("multi with no stores raises", True)
+
+        tiny = RagStore(embedding_model="text-embedding-3-small")
+        tiny.add(Chunk("t0", "d", "s", "h", 0, "dim two", [1.0, 0.0]))
+        try:
+            run_rag_multi(gw, [("docs", docs), ("broken", tiny)], "checkout")
+            check("dimension mismatch names the offending store", False)
+        except DimensionMismatch as exc:
+            check("dimension mismatch names the offending store",
+                  "[broken store]" in str(exc), str(exc))
+
+
+def test_corpus_budget_defaults():
+    """Code bodies (median ~1500 chars) need the code budget, not the doc one.
+
+    With the old single 1200-char default, `k = 1200 // 1220 = 0` — the code
+    corpus silently refused every default request. Budgets are per corpus
+    now (docs 1200 / code 4000, matching tools.py's DEFAULT_* pair).
+    """
+    gw = FakeGateway({"checkout": [1.0, 0.2, 0.0]}, answer="ok")
+    big = RagStore(embedding_model="text-embedding-3-small")
+    for i in range(3):
+        text = f"CODE_MARKER_{i} " + "y" * (1500 - 15)
+        big.add(Chunk(f"b{i}", "mod", "mod.py", f"fn_{i}", 0, text,
+                      [1.0, 0.1, 0.0]))
+    with tempfile.TemporaryDirectory() as d:
+        docs = make_store(Path(d))
+
+        res = run_rag(gw, big, "checkout", corpus_label="code")
+        check("code default budget retrieves (was k=0 → refusal)",
+              res["refused"] is False and res["retrieval"]["k"] == 2
+              and res["retrieval"]["context_chars"] > 1200,
+              str(res["retrieval"]))
+
+        plain = run_rag(gw, big, "checkout")
+        check("doc default budget on a code-sized store refuses honestly",
+              plain["refused"] is True and plain["retrieval"]["k"] == 0,
+              str(plain["retrieval"]))
+
+        auto = run_rag_multi(gw, [("docs", docs), ("code", big)], "checkout")
+        st = auto["retrieval"]["stores"]
+        check("auto applies per-corpus budgets and k",
+              st["docs"]["budget_chars"] == 1200
+              and st["code"]["budget_chars"] == 4000
+              and st["code"]["k"] == 2 and st["docs"]["k"] > 0, str(st))
+        check("auto context carries both slices (code body kept)",
+              auto["refused"] is False
+              and auto["retrieval"]["context_chars"] > 2000,
+              str(auto["retrieval"]))
+
+        over = run_rag_multi(gw, [("docs", docs), ("code", big)], "checkout",
+                             budget_chars=1000)
+        check("explicit budget overrides every corpus default",
+              over["retrieval"]["stores"]["code"]["budget_chars"] == 1000
+              and over["retrieval"]["stores"]["code"]["k"] == 0
+              and over["refused"] is False, str(over["retrieval"]))
+
+
+def test_retrieve_duplicate_ids_and_score_ties():
+    """The real code store has dup chunk_ids (`#Meta` ×5) + cosine ties —
+    sorting must never fall through to comparing Chunk objects."""
+    store = RagStore(embedding_model="text-embedding-3-small")
+    for i in range(4):
+        # identical vectors (score tie) AND identical ids (id tie)
+        store.add(Chunk("mod.py#Meta", "mod", "mod.py", "Meta", 0,
+                        f"meta body {i}", [1.0, 0.0, 0.0]))
+    got = store.retrieve([1.0, 0.0, 0.0], k=3)
+    check("retrieve survives score+id ties", len(got) == 3, str(len(got)))
+    gw = FakeGateway({"checkout": [1.0, 0.0, 0.0]}, answer="ok")
+    res = run_rag_multi(gw, [("code", store)], "checkout")
+    check("pipeline survives duplicate ids", res["refused"] is False,
+          str(res["retrieval"]))
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as _tmp:
         test_store()
@@ -230,5 +345,7 @@ if __name__ == "__main__":
         test_run_rag()
         test_refusal()
         test_lost_in_middle_mechanics()
+        test_run_rag_multi()
+        test_corpus_budget_defaults()
     print("\n" + ("ALL RAG CHECKS PASSED" if not FAILS else f"{FAILS} CHECK(S) FAILED"))
     sys.exit(1 if FAILS else 0)

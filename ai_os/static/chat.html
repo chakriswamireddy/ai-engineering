@@ -125,6 +125,8 @@
     padding: 9px 11px; font-size: 13px; position: relative; overflow: hidden;
   }
   .cite .src { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
+  .cite .badge { display: inline-block; font-size: 10.5px; text-transform: uppercase; letter-spacing: .6px; color: var(--accent); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; margin-bottom: 4px; }
+  .note { font-size: 12.5px; color: var(--warn); }
   .cite .head { color: var(--text); margin-top: 2px; }
   .cite .score { color: var(--muted); font-size: 11.5px; margin-top: 3px; }
   .cite .bar { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--accent); opacity: .8; }
@@ -172,6 +174,7 @@
     <div class="ragbar">
       <input id="rag-q" type="text" placeholder="Ask the corpus — e.g. Where is bearer auth enforced?">
       <select id="rag-corpus">
+        <option value="auto" selected>auto — search docs + code, cite what fits</option>
         <option value="docs">docs — project docs store</option>
         <option value="code">code — 190 MB, 5 domains</option>
       </select>
@@ -298,6 +301,7 @@ function metaNode(meta) {
   };
   add("", meta.model);
   add("", meta.provider);
+  if (meta.corpus) add("corpus", meta.corpus);
   if (meta.ttft_ms != null) add("ttft", Math.round(meta.ttft_ms) + "ms");
   if (meta.latency_ms != null) add("lat", Math.round(meta.latency_ms) + "ms");
   if (meta.cost_usd != null) add("$", meta.cost_usd);
@@ -401,7 +405,8 @@ async function askRag() {
   out.textContent = "";
   const loading = el("div", "answer");
   loading.appendChild(el("span", "spin"));
-  loading.appendChild(document.createTextNode("retrieving from " + corpus + " …"));
+  loading.appendChild(document.createTextNode(
+    "retrieving from " + (corpus === "auto" ? "docs + code" : corpus) + " …"));
   out.appendChild(loading);
   setBusy(true);
 
@@ -432,10 +437,17 @@ async function askRag() {
   const gen = data.generation || {};
   const m = {
     model: gen.model, provider: gen.provider, latency_ms: gen.latency_ms,
-    cost_usd: gen.cost_usd, output_tokens: gen.output_tokens, trace_id: traceId,
+    cost_usd: gen.cost_usd, output_tokens: gen.output_tokens,
+    corpus: data.corpus, trace_id: traceId,
   };
   const mn = metaNode(m);
   if (mn) out.appendChild(mn);
+
+  if (data.skipped && Object.keys(data.skipped).length) {
+    out.appendChild(el("div", "note",
+      "auto: skipped " + Object.keys(data.skipped).join(", ") +
+      " (" + Object.values(data.skipped).join("; ") + ")"));
+  }
 
   const cites = data.citations || [];
   if (cites.length) {
@@ -443,6 +455,7 @@ async function askRag() {
     const grid = el("div", "cites");
     for (const c of cites) {
       const card = el("div", "cite");
+      if (c.corpus) card.appendChild(el("div", "badge", c.corpus));
       card.appendChild(el("div", "src", c.symbol ? c.symbol : (c.source || c.doc_id || "?")));
       if (c.heading) card.appendChild(el("div", "head", c.heading));
       else if (c.source && c.symbol) card.appendChild(el("div", "head", c.source));

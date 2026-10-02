@@ -32,7 +32,7 @@ from ai_os.contract import (
 from ai_os.health import liveness, readiness
 from ai_os.rag import (
     RagStore, DimensionMismatch, StoreVersionError,
-    code_store_path_from_env, run_rag, store_path_from_env,
+    code_store_path_from_env, run_rag, run_rag_multi, store_path_from_env,
 )
 from ai_os.state import (
     state_store_path_from_env,
@@ -264,9 +264,9 @@ class ChatRequest(BaseModel):
 class RagRequest(BaseModel):
     question: str
     k: int | None = None
-    budget_chars: int = 1200
+    budget_chars: int | None = None   # None → corpus default (docs 1200, code 4000)
     max_tokens: int = 2048
-    corpus: str = "docs"          # "docs" (Day 6) | "code" (Day 10)
+    corpus: str = "docs"          # "docs" (Day 6) | "code" (Day 10) | "auto"
 
 
 def _error_response(err: ProviderError) -> dict[str, Any]:
@@ -516,29 +516,67 @@ def rag_endpoint(req: RagRequest, request: Request):
     Day 10 adds `corpus` ("docs" | "code"): a second store behind the same
     endpoint, so a code citation is still `cited ⊆ retrieved`.
 
+    `corpus: "auto"` (the UI's default) asks BOTH stores in one pipeline —
+    one embed, one generation, citations tagged with the store they came
+    from (`citations[].corpus`, `retrieval.stores`, `skipped` when a store
+    is missing). No routing model call: the evidence decides, not a
+    classifier. An unknown corpus is a 400, never a silent docs fallback.
+
+    `budget_chars` omitted (None) → the corpus default — docs 1200, code
+    4000 chars (the Day-10 bodies are ~1500 chars and do not fit the doc
+    budget); `auto` applies each default to its own store.
+
     Day 24 §7 — the inbound edge runs first: a valid `traceparent` continues
     the trace, so this request and everything it calls (embed, retrieval,
     provider) share one identity across the wire.
     """
     if gateway is None:
         return _unavailable(_build_error)
-    store = _rag_store(req.corpus)
-    if store is None:
-        which = (code_store_path_from_env() if req.corpus == "code"
-                 else store_path_from_env())
+    if req.corpus not in ("docs", "code", "auto"):
         return JSONResponse(
-            {"error": f"no RAG store at {which}",
-             "hint": "run `python tools/build_rag_store.py` (docs) or "
-                     "`python tools/build_code_store.py` (code) first"},
-            status_code=503)
+            {"error": f"unknown corpus {req.corpus!r}",
+             "hint": "corpus must be docs | code | auto"},
+            status_code=400)
+    skipped: dict[str, str] = {}
+    if req.corpus == "auto":
+        named = [(name, _rag_store(name)) for name in ("docs", "code")]
+        stores = [(name, s) for name, s in named if s is not None]
+        skipped = {name: "store missing" for name, s in named if s is None}
+        if not stores:
+            return JSONResponse(
+                {"error": "no RAG store at data/store.json or "
+                          "data/code_store.json",
+                 "hint": "run `python tools/build_rag_store.py` (docs) or "
+                         "`python tools/build_code_store.py` (code) first"},
+                status_code=503)
+    else:
+        store = _rag_store(req.corpus)
+        if store is None:
+            which = (code_store_path_from_env() if req.corpus == "code"
+                     else store_path_from_env())
+            return JSONResponse(
+                {"error": f"no RAG store at {which}",
+                 "hint": "run `python tools/build_rag_store.py` (docs) or "
+                         "`python tools/build_code_store.py` (code) first"},
+                status_code=503)
+        stores = [(req.corpus, store)]
     trace, extract = obs.start_server_trace("rag", _headers_of(request), attributes={
         "route": "/rag", "component": "api", "corpus": req.corpus,
         "question_sha256": obs.sha256_text(req.question)})
     headers = obs.response_trace_headers(trace)
     try:
-        result = run_rag(gateway, store, req.question, k=req.k,
-                         budget_chars=req.budget_chars,
-                         max_tokens=req.max_tokens)
+        if req.corpus == "auto":
+            result = run_rag_multi(gateway, stores, req.question, k=req.k,
+                                   budget_chars=req.budget_chars,
+                                   max_tokens=req.max_tokens)
+            if skipped:
+                result["skipped"] = skipped
+        else:
+            result = run_rag(gateway, stores[0][1], req.question, k=req.k,
+                             budget_chars=req.budget_chars,
+                             max_tokens=req.max_tokens,
+                             corpus_label=req.corpus)
+        result["corpus"] = req.corpus
     except ProviderError as e:
         obs.finish_trace(trace, status=obs.status_for_error(e), error=obs.error_fact(e))
         return _error_json(e, headers)
