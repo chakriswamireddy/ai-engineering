@@ -217,6 +217,52 @@ def _auth_error_of(exc: Exception) -> AuthError:
     return AuthError(f"invalid_token:{name}")
 
 
+def mint_token(sub: str, *, ttl_s: int = 3600, tenant: str = "",
+               roles: "tuple[str, ...] | list[str]" = (),
+               issuer: str = "", audience: str = "",
+               secret: str | None = None) -> str:
+    """Issue the HS256 access token that `verify_token` accepts.
+
+    Verification without issuance is a lock without a key: the CLI
+    (`tools/mint_token.py`) and the console login (`POST /ui/login`) both
+    sign through this one function, so claims are written in exactly one
+    place and the shared secret is read in exactly one place. RS256 stays
+    the IdP's path (verify_token handles both); this is the no-IdP
+    installation's key.
+
+    `exp` is essential to the verifier's registry, so a token is always born
+    with one — an immortal token would be a bug no caller could patch.
+    Raises ValueError when sub is empty, ttl is not positive, or no signing
+    secret is configured: an empty key must never sign.
+    """
+    from joserfc import jwt as _jwt
+    from joserfc.jwk import OctKey
+
+    sub = (sub or "").strip()
+    if not sub:
+        raise ValueError("sub must not be empty")
+    if ttl_s <= 0:
+        raise ValueError("ttl_s must be a positive number of seconds")
+    signing_secret = ((secret or "").strip()
+                      or os.getenv(OIDC_HS256_SECRET_ENV, "").strip())
+    if not signing_secret:
+        raise ValueError(
+            f"no signing secret — set ${OIDC_HS256_SECRET_ENV} "
+            "(generate one with: python tools/mint_token.py --gen-secret)")
+    now = int(time.time())
+    claims: dict[str, Any] = {"sub": sub, "iat": now, "exp": now + int(ttl_s)}
+    if tenant:
+        claims["tenant"] = tenant
+    if roles:
+        claims["roles"] = [str(r).strip() for r in roles if str(r).strip()]
+    if issuer:
+        claims["iss"] = issuer
+    if audience:
+        claims["aud"] = audience
+    return _jwt.encode({"alg": "HS256", "typ": "JWT"}, claims,
+                       OctKey.import_key(signing_secret))
+
+
 # ------------------------------------------------------- request resolution
 
 def _file_tenant(name: str) -> str:

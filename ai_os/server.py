@@ -5,6 +5,7 @@
 
     POST /chat            -> {message, usage, latency_ms, model, finish_reason, provider, attempts}
     POST /chat/stream     -> SSE stream with ttft_ms on the first chunk
+    POST /ui/login        -> {token, sub, exp} for the console (admin credentials)
     GET  /ledger          -> token/cost accounting for every call
     GET  /health          -> provider chain + knobs
 
@@ -14,9 +15,12 @@ All knobs come from the env (see ai_os.config). Responses use the normalized
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
+import logging
 import os
 import re
+import time
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -383,6 +387,100 @@ def chat_ui() -> HTMLResponse:
             "<p>ai_os/static/chat.html is missing from this image.</p>",
             status_code=404)
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+
+# ------------------------------------------------------- POST /ui/login
+class UiLoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+# The console's one unauthenticated write. It exists so the page can gate
+# itself behind a real credential instead of asking a human to paste a JWT,
+# and it holds itself to the rules the rest of the surface does:
+#
+#   1. The password is compared in constant time and failures land in a
+#      bounded per-IP window (5 in 5 minutes → 429): a public login route is
+#      the obvious brute-force target, and this one mints spend-capable
+#      tokens. The failure path also burns a fixed 250ms, so online guessing
+#      learns nothing from response timing.
+#   2. The token is minted by identity.mint_token — the exact function
+#      tools/mint_token.py calls. Same claims, same secret, same verifier:
+#      a login can never grant anything the CLI could not hand out, and
+#      there is exactly one writer of claims.
+#   3. Credentials are read per call from UI_ADMIN_USER / UI_ADMIN_PASSWORD /
+#      UI_LOGIN_TTL_S (defaults: admin / admin@1234 / 12h) — env-tunable
+#      because a password baked into an image is a password in the image's
+#      history. The shipped default is demo posture and is flagged in the
+#      log the first time it is used.
+#
+# Deliberately NOT in _AUTH_PREFIXES: guarding /ui/login would demand the
+# very token the route exists to mint. The per-tenant quota manager does not
+# apply either — it keys on the principal a token names, which this route
+# has not issued yet — hence the failure window above as its substitute.
+_LOGIN_FAIL_LIMIT = 5
+_LOGIN_FAIL_WINDOW_S = 300.0
+_login_fails: dict[str, list[float]] = {}
+_login_default_warned = False
+
+
+def _ui_login_settings() -> tuple[str, str, int]:
+    """(user, password, ttl) — read per call so tests and operators can
+    override without a module import order trick."""
+    user = os.getenv("UI_ADMIN_USER", "").strip() or "admin"
+    password = os.getenv("UI_ADMIN_PASSWORD", "") or "admin@1234"
+    ttl_s = max(60, _int_env("UI_LOGIN_TTL_S", 43200))
+    return user, password, ttl_s
+
+
+@app.post("/ui/login")
+def ui_login(req: UiLoginRequest, request: Request):
+    # No return annotation on purpose: like /chat, this hands back either a
+    # plain dict (200) or a JSONResponse (401/429/500), and FastAPI must not
+    # try to synthesize a response model from that union.
+    global _login_default_warned
+    user, password, ttl_s = _ui_login_settings()
+    ip = ((request.headers.get("x-real-ip") or "").strip()
+          or (request.client.host if request.client else "?"))
+    now = time.time()
+    fails = [t for t in _login_fails.get(ip, ())
+             if now - t < _LOGIN_FAIL_WINDOW_S]
+    _login_fails[ip] = fails
+    if len(fails) >= _LOGIN_FAIL_LIMIT:
+        return JSONResponse(
+            {"error": "too many failed attempts — try again in 5 minutes"},
+            status_code=429,
+            headers={"Retry-After": str(int(_LOGIN_FAIL_WINDOW_S))})
+    user_ok = hmac.compare_digest(req.username.strip().encode(),
+                                  user.encode())
+    pass_ok = hmac.compare_digest(req.password.encode(), password.encode())
+    if not (user_ok and pass_ok):
+        _login_fails[ip].append(now)
+        time.sleep(0.25)
+        return JSONResponse({"error": "invalid username or password"},
+                            status_code=401)
+    _login_fails.pop(ip, None)
+    if not _login_default_warned and password == "admin@1234":
+        _login_default_warned = True
+        logging.getLogger("ai_os.server").warning(
+            "POST /ui/login is using the shipped demo credentials — set "
+            "UI_ADMIN_PASSWORD (and UI_ADMIN_USER) before exposing this "
+            "installation")
+    try:
+        token = identity_mod.mint_token(
+            user, ttl_s=ttl_s, roles=("admin",),
+            issuer=os.getenv("OIDC_ISSUER", "").strip(),
+            audience=os.getenv("OIDC_AUDIENCE", "").strip())
+        claims = identity_mod.verify_token(token)
+    except Exception as exc:                                   # noqa: BLE001
+        # No verifier configured, or the mint was rejected by our own
+        # verifier: report the configuration problem, never a stack trace.
+        return JSONResponse({"error": f"cannot mint token: {exc}"},
+                            status_code=500)
+    exp = int(claims.get("exp") or (time.time() + ttl_s))
+    return {"token": token, "sub": str(claims.get("sub", user)),
+            "exp": exp, "expires_in": max(0, exp - int(time.time())),
+            "roles": list(claims.get("roles", []) or [])}
 
 
 @app.post("/chat")

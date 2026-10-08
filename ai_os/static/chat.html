@@ -217,6 +217,161 @@
   .card .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .card .ev-note { font-size: 12.5px; color: var(--warn); }
   .card .ev-note.ok { color: var(--ok); }
+  /* ---- login gate (POST /ui/login) ---- */
+  .login-wrap {
+    position: fixed; inset: 0; z-index: 60; background: rgba(9, 11, 15, .88);
+    backdrop-filter: blur(3px); display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+  }
+  .login-card {
+    width: min(390px, 100%); background: var(--panel); border: 1px solid var(--border);
+    border-radius: 14px; padding: 26px 26px 20px; display: flex; flex-direction: column; gap: 12px;
+    box-shadow: 0 18px 60px rgba(0, 0, 0, .45);
+  }
+  .login-brand { font-size: 19px; font-weight: 650; letter-spacing: .3px; }
+  .login-sub { font-size: 12.5px; color: var(--muted); font-family: var(--mono); margin-top: -6px; }
+  .login-field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); font-family: var(--mono); letter-spacing: .4px; }
+  .login-field input {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 9px 11px; font: inherit; letter-spacing: normal;
+  }
+  .login-field input:focus { outline: none; border-color: var(--accent); }
+  .login-err {
+    font-size: 13px; color: var(--bad); border: 1px solid #5c2620; background: #241614;
+    border-radius: 7px; padding: 7px 10px; white-space: pre-wrap;
+  }
+  .login-note { font-size: 11.5px; color: var(--muted); font-family: var(--mono); line-height: 1.55; }
+  /* ---- RAG pipeline: live internal steps ---- */
+  .pipe {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 12px 14px; display: flex; flex-direction: column; gap: 6px;
+  }
+  .pipe-h {
+    display: flex; justify-content: space-between; gap: 10px; align-items: baseline; flex-wrap: wrap;
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+    border-bottom: 1px solid var(--border); padding-bottom: 8px; margin-bottom: 2px;
+  }
+  .pipe-h b { color: var(--cyan); font-weight: 600; }
+  .pipe-step {
+    display: flex; gap: 10px; align-items: flex-start; padding: 7px 8px;
+    border-radius: 8px; border: 1px solid transparent;
+  }
+  .pipe-step:hover { border-color: var(--border); background: var(--panel2); }
+  .pipe-step .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: #3a4152; margin-top: 5px; }
+  .pipe-step.st-ok .dot { background: var(--ok); }
+  .pipe-step.st-err .dot { background: var(--bad); }
+  .pipe-step.st-run .dot { background: transparent; border: 2px solid var(--border); border-top-color: var(--accent); animation: sp .7s linear infinite; }
+  .pipe-main { flex: 1; min-width: 0; }
+  .pipe-title { font-family: var(--mono); font-size: 12.5px; font-weight: 600; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .pipe-title .n { color: var(--muted); font-weight: 400; min-width: 12px; }
+  .pipe-title .live { color: var(--accent); font-weight: 400; font-size: 11.5px; }
+  .pipe-title .t { color: var(--muted); font-weight: 400; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .pipe-desc { font-size: 12.5px; color: var(--muted); margin-top: 2px; line-height: 1.45; }
+  .pipe-facts { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+  .pipe-facts li {
+    font-family: var(--mono); font-size: 11.5px; color: var(--text); background: #12151c;
+    border: 1px solid var(--border); border-radius: 5px; padding: 3px 7px;
+    word-break: break-word; line-height: 1.5;
+  }
+  .pipe-facts li.warn { color: var(--warn); border-color: #5a4a1c; }
+  .pipe-facts li.bad { color: var(--bad); border-color: #5c2620; }
+  .pipe-facts li.good { color: var(--ok); border-color: #234d2f; }
+  .pipe-total {
+    font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+    border-top: 1px dashed var(--border); padding-top: 8px; display: flex; gap: 12px; flex-wrap: wrap;
+  }
+  .pipe-total a { color: var(--accent); text-decoration: none; }
+  .pipe-total a:hover { text-decoration: underline; }
+  /* ---- markdown preview of an answer (applied styling, not raw md) ---- */
+  .md { white-space: normal; word-break: break-word; line-height: 1.58; font-size: 14px; }
+  .md > :first-child { margin-top: 0; }
+  .md > :last-child { margin-bottom: 0; }
+  .md p { margin: 0 0 9px; }
+  .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 {
+    margin: 13px 0 7px; line-height: 1.3; color: var(--text); font-weight: 650;
+  }
+  .md h1 { font-size: 18px; } .md h2 { font-size: 16.5px; } .md h3 { font-size: 15px; }
+  .md h4, .md h5, .md h6 { font-size: 14px; color: var(--muted); }
+  .md ul, .md ol { margin: 4px 0 10px; padding-left: 22px; }
+  .md li { margin: 3px 0; }
+  .md li::marker { color: var(--accent); font-size: 12px; }
+  .md li > ul, .md li > ol { margin: 3px 0 4px; }
+  .md code {
+    font-family: var(--mono); font-size: 12.5px; background: #12151c;
+    border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px;
+  }
+  .md pre {
+    margin: 8px 0 11px; background: #0d1016; border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 12px; overflow-x: auto;
+    font-family: var(--mono); font-size: 12px; line-height: 1.5; color: var(--text);
+  }
+  .md pre code { background: none; border: none; padding: 0; font-size: inherit; }
+  .md blockquote {
+    margin: 8px 0 10px; padding: 3px 11px; border-left: 3px solid var(--accent);
+    background: var(--panel); border-radius: 0 7px 7px 0; color: var(--muted);
+  }
+  .md blockquote > :last-child { margin-bottom: 0; }
+  .md hr { border: none; border-top: 1px solid var(--border); margin: 13px 0; }
+  .md a { color: var(--accent); }
+  .md strong, .md b { font-weight: 650; color: #eef2f8; }
+  .md em, .md i { font-style: italic; }
+  .md del { color: var(--muted); }
+  .md table { border-collapse: collapse; margin: 8px 0 11px; font-size: 13px; display: block; overflow-x: auto; }
+  .md th, .md td { border: 1px solid var(--border); padding: 5px 9px; text-align: left; }
+  .md th { background: var(--panel); color: var(--muted); font-weight: 600; }
+  .md .md-br { display: block; height: 0; content: ""; }
+  .md-toggle { float: right; margin: -2px 0 6px 10px; }
+  /* citation marker 【{...}】 → superscript chip → the retrieved chunk card */
+  .cite-ref {
+    display: inline-block; font-family: var(--mono); font-size: 10.5px; line-height: 1.4;
+    vertical-align: super; color: var(--accent); background: #132033;
+    border: 1px solid #2a4260; border-radius: 5px; padding: 0 4px; margin: 0 1px;
+    cursor: pointer; text-decoration: none; user-select: none;
+  }
+  .cite-ref:hover { background: var(--accent); color: #0b1220; border-color: var(--accent); }
+  /* a prose marker the renderer could not pin to a chunk — still an aside, never raw text */
+  .cite-note {
+    font-size: 12.5px; color: var(--muted); background: #12151c;
+    border: 1px dashed var(--border); border-radius: 5px; padding: 0 5px;
+    margin: 0 2px; word-break: break-word;
+  }
+  .cite.flash { animation: citeflash 1.4s ease-out 2; }
+  @keyframes citeflash {
+    0%, 100% { border-color: var(--border); box-shadow: none; }
+    30% { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(96, 165, 250, .25); }
+  }
+  /* ---- ground layer: what each pipeline step actually does ---- */
+  .pipe-under { background: transparent; border: none; border-top: 1px dashed var(--border); border-radius: 0; padding: 5px 0 0; margin-top: 6px; }
+  .pipe-under summary { font-size: 11px; letter-spacing: .5px; text-transform: uppercase; font-family: var(--mono); color: var(--muted); }
+  .pipe-under summary:hover { color: var(--accent); }
+  .pipe-under[open] summary { color: var(--accent); margin-bottom: 5px; }
+  .pipe-deep { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+  .pipe-deep li {
+    font-family: var(--mono); font-size: 11px; color: var(--muted); line-height: 1.5;
+    padding: 3px 7px 3px 9px; border-left: 2px solid var(--border); background: #10131a;
+    border-radius: 0 5px 5px 0; word-break: break-word;
+  }
+  .pipe-deep li b { color: var(--cyan); font-weight: 600; }
+  .pipe-deep li .v { color: var(--text); }
+  .pipe-deep li.warn { border-left-color: var(--warn); color: var(--warn); }
+  .pipe-deep li.bad { border-left-color: var(--bad); color: var(--bad); }
+  .pipe-deep li.good { border-left-color: var(--ok); color: var(--ok); }
+  .pipe-deep li.code-path { border-left-color: #3a4152; color: #7c889b; }
+  /* ---- 30-day plan concepts attached to a step ---- */
+  .pipe-days { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 6px; }
+  .daychip {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .3px; cursor: pointer;
+    background: #132033; color: var(--cyan); border: 1px solid #2a4260;
+    border-radius: 20px; padding: 1px 8px;
+  }
+  .daychip:hover, .daychip.on { background: var(--cyan); color: #0b1220; border-color: var(--cyan); }
+  .daynote {
+    font-size: 12px; color: var(--text); line-height: 1.5; margin-top: 6px;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px;
+  }
+  .daynote .dtitle { color: var(--accent); font-weight: 650; }
+  .daynote .dsrc { display: block; margin-top: 5px; font-family: var(--mono); font-size: 10.5px; color: var(--muted); word-break: break-all; }
+  .days-sum { color: var(--muted); }
   @media (max-width: 1100px) {
     .shell { flex-direction: column; }
     #rail { width: auto; border-left: none; border-top: 1px solid var(--border); max-height: 45vh; }
@@ -225,6 +380,25 @@
 </style>
 </head>
 <body>
+<div id="login-screen" class="login-wrap hidden">
+  <form id="login-form" class="login-card" autocomplete="on">
+    <div class="login-brand">ai-engineering</div>
+    <div class="login-sub">/ ai-layer · developer console</div>
+    <label class="login-field">username
+      <input id="login-user" type="text" value="admin" autocomplete="username" spellcheck="false">
+    </label>
+    <label class="login-field">password
+      <input id="login-pass" type="password" autocomplete="current-password">
+    </label>
+    <div id="login-err" class="login-err hidden"></div>
+    <button class="primary" id="btn-login" type="submit">Sign in</button>
+    <div class="login-note">
+      POST /ui/login → HS256 bearer (localStorage) · guarded routes reject with 401<br>
+      <button class="ghost" id="btn-login-token" type="button">paste a minted token instead</button>
+    </div>
+  </form>
+</div>
+
 <header>
   <div class="brand">ai-engineering <span class="sub">/ ai-layer · developer console</span></div>
   <div class="pills">
@@ -249,6 +423,7 @@
   <button class="tab" data-mode="concepts">Concepts</button>
   <div class="spacer"></div>
   <button class="ghost" id="btn-clear">Clear</button>
+  <button class="ghost" id="btn-logout">Sign out</button>
   <label class="tok">token
     <input id="token" type="password" placeholder="paste bearer token (localStorage)" autocomplete="off">
     <button class="ghost" id="btn-token">Use</button>
@@ -332,7 +507,7 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
 const MINT_CMD = "docker compose exec -T ai-layer python tools/mint_token.py --sub you --ttl 3600 | tr -d '\\r'";
-const STORE_TOKEN = "ai_ui_token", STORE_LOG = "ai_ui_log";
+const STORE_TOKEN = "ai_ui_token", STORE_LOG = "ai_ui_log", STORE_USER = "ai_ui_user";
 
 const state = {
   token: localStorage.getItem(STORE_TOKEN) || "",
@@ -344,6 +519,8 @@ const state = {
   lastTraceId: null,
   traceList: [],
   currentTrace: null,
+  loginDismissed: false,
+  ragPipe: null,
 };
 
 /* ---------------- helpers ---------------- */
@@ -364,6 +541,224 @@ function pill(id, text, cls) {
   p.textContent = text;
   p.className = "pill" + (cls ? " " + cls : "");
 }
+/* ---------------- markdown preview ----------------
+   The model answers in markdown; the console used to print that source
+   verbatim. This renders it instead — headings, lists, code fences, inline
+   code, bold/italic, links, tables — and turns the model's citation markers
+   (the JSON 【{...}】 form) into superscript chips that jump to the retrieved
+   chunk card below the answer. Everything is escaped first: a preview of
+   TEXT, never an HTML sink. */
+const MD_CITE_JSON = /【\s*\{[^】]{0,400}?\}\s*】/g;
+const MD_CITE_PLAIN = /【\s*(\d{1,3})\s*】/g;
+const MD_TICK = "\u0001";
+const MD_STASH = "\u0002";
+function mdEscape(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+/* Citation markers are pulled out BEFORE escaping/inline so the JSON inside
+   them can never be re-parsed as markup. Three shapes arrive in practice:
+   the JSON form `【{"id":0,"cursor":0}】`, the numeric form `【2】`, and the
+   model's own prose form `【source heading …】`. The first two are jump chips;
+   a prose marker becomes a chip too WHEN its text names a retrieved chunk
+   (see mdCiteIndex), otherwise it stays an inline note — styled, never raw. */
+function mdExtractCites(src, index) {
+  const cites = [];
+  const lookup = (body) => {
+    if (!index) return null;
+    const b = String(body).trim().toLowerCase();
+    if (b.length < 3) return null;
+    if (index[b] != null) return index[b];
+    for (const k in index) if (b.indexOf(k) !== -1) return index[k];
+    return null;
+  };
+  const keep = (c) => { cites.push(c); return MD_TICK + (cites.length - 1) + MD_TICK; };
+  const text = String(src).replace(MD_CITE_JSON, (m) => {
+    let cur = null;
+    try {
+      const o = JSON.parse(m.replace(/[【】]/g, "").trim());
+      if (o && typeof o === "object") cur = (o.cursor != null ? o.cursor : o.id);
+    } catch { cur = null; }
+    if (cur == null || isNaN(Number(cur))) return " ";
+    return keep({ idx: Number(cur) });
+  }).replace(MD_CITE_PLAIN, (m, g) => keep({ idx: Number(g) }))
+    .replace(/【([^】\n]{1,300})】/g, (m, body) => {
+      const hit = lookup(body);
+      return keep(hit != null ? { idx: Number(hit) } : { note: body });
+    });
+  return { text, cites };
+}
+/* heading / symbol / doc_id → citation index, so a prose marker that names a
+   retrieved chunk can still jump to it. Keys are normalized and de-duplicated. */
+function mdCiteIndex(citations) {
+  if (!citations || !citations.length) return null;
+  const idx = {};
+  const add = (v, i) => {
+    if (v == null) return;
+    const s = String(v).trim().toLowerCase();
+    if (s.length < 4 || s in idx) return;
+    idx[s] = i;
+  };
+  citations.forEach((c, i) => { add(c.heading, i); add(c.symbol, i); add(c.doc_id, i); });
+  return idx;
+}
+function mdCiteChip(c) {
+  if (c.note != null)
+    return '<span class="cite-note" title="inline source note from the answer — no numbered chunk matched">【' +
+           mdInline(mdEscape(c.note)) + "】</span>";
+  const n = isNaN(Number(c.idx)) ? 0 : Number(c.idx);
+  return '<sup class="cite-ref" data-idx="' + n + '" title="citation ' + (n + 1) +
+         ' — click to open the retrieved chunk">' + (n + 1) + "</sup>";
+}
+function mdInline(esc) {
+  let s = esc;
+  const stash = [];
+  const keep = (html) => { stash.push(html); return MD_STASH + (stash.length - 1) + MD_STASH; };
+  s = s.replace(/`([^`\n]+)`/g, (m, c) => keep("<code>" + c + "</code>"));
+  s = s.replace(/\[([^\]\n]{1,200})\]\(([^)\s]{1,300})\)/g, (m, t, u) => {
+    const url = u.replace(/&quot;.*$/, "").trim();
+    if (!/^(https?:|\/|#|mailto:)/i.test(url)) return m;
+    return keep('<a href="' + url + '" target="_blank" rel="noopener">' + t + "</a>");
+  });
+  s = s.replace(/\*\*\*([^*\n]{1,400})\*\*\*/g, "<strong><em>$1</em></strong>");
+  s = s.replace(/\*\*([^*\n]{1,400})\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[^*\w])\*([^*\n]{1,400})\*(?=[^*\w]|$)/g, "$1<em>$2</em>");
+  s = s.replace(/(^|[^_\w])_([^_\n]{1,400})_(?=[^_\w]|$)/g, "$1<em>$2</em>");
+  s = s.replace(/~~([^~\n]{1,400})~~/g, "<del>$1</del>");
+  s = s.replace(/\n/g, "<br>");
+  s = s.replace(/\u0002(\d+)\u0002/g, (m, i) => stash[Number(i)] != null ? stash[Number(i)] : m);
+  return s;
+}
+function mdRestoreCites(html, cites) {
+  return html.replace(/\u0001(\d+)\u0001/g, (m, i) => {
+    const c = cites[Number(i)];
+    return c ? mdCiteChip(c) : "";
+  });
+}
+function mdBlocks(text) {
+  const blocks = [];
+  const lines = text.split("\n");
+  let cur = [];
+  const flush = () => { if (cur.length) blocks.push(cur.join("\n")); cur = []; };
+  for (let i = 0; i < lines.length; i++) {
+    const L = lines[i];
+    if (/^\s*$/.test(L)) { flush(); continue; }
+    if (/^\s*```/.test(L)) {
+      flush();
+      const lang = L.replace(/^\s*```/, "").trim();
+      const body = [];
+      i++;
+      while (i < lines.length && !/^\s*```/.test(lines[i])) { body.push(lines[i]); i++; }
+      blocks.push({ code: body.join("\n"), lang });
+      continue;
+    }
+    if (/^\s{0,3}(#{1,6})\s+/.test(L) || /^\s{0,3}(-{3,}|\*{3,}|_{3,})\s*$/.test(L)) {
+      flush(); blocks.push(L); continue;
+    }
+    cur.push(L);
+  }
+  flush();
+  return blocks;
+}
+function mdRenderList(lines) {
+  const ordered = /^\s*\d+[.)]\s+/.test(lines[0]);
+  const tag = ordered ? "ol" : "ul";
+  const re = ordered ? /^\s*(\d+)[.)]\s+(.*)$/ : /^\s*[-*+]\s+(.*)$/;
+  const items = [];
+  let sub = [];
+  let cur = null;
+  const flush = () => {
+    if (cur == null) return;
+    items.push(mdInline(mdEscape(cur)));
+    cur = null;
+  };
+  for (const L of lines) {
+    const nested = (/^\s{2,}[-*+]\s+/.test(L) || /^\s{2,}\d+[.)]\s+/.test(L)) && items.length;
+    const m = L.match(re);
+    if (nested) { sub.push(L.replace(/^\s+/, "  ")); continue; }
+    flush();
+    if (m) cur = ordered ? m[2] : m[1];
+    else if (cur != null) cur += " " + L.trim();
+    else cur = L.trim();
+  }
+  flush();
+  let html = "<" + tag + ">";
+  for (let i = 0; i < items.length; i++) {
+    html += "<li>" + items[i] + (sub.length && i === items.length - 1 ? mdRenderList(sub) : "") + "</li>";
+  }
+  return html + "</" + tag + ">";
+}
+/* `ref` is either the heading→index map from mdCiteIndex (a fresh render) or
+   an already-extracted {__cites, text, cites} state (recursion into a block). */
+function renderMarkdown(src, ref) {
+  if (src == null) return "";
+  const picked = (ref && ref.__cites) ? ref : mdExtractCites(src, ref || null);
+  const text = picked.text, cites = picked.cites;
+  let html = "";
+  for (const b of mdBlocks(text)) {
+    if (b && b.code !== undefined) {
+      html += "<pre><code" + (b.lang ? ' class="lang-' + mdEscape(b.lang.slice(0, 24)) + '"' : "") +
+              ">" + mdEscape(b.code) + "</code></pre>";
+      continue;
+    }
+    const t = b;
+    let m;
+    if ((m = t.match(/^\s{0,3}(#{1,6})\s+(.*)$/))) {
+      const lv = Math.min(4, m[1].length);
+      html += "<h" + lv + ">" + mdInline(mdEscape(m[2].trim())) + "</h" + lv + ">";
+    } else if (/^\s{0,3}(-{3,}|\*{3,}|_{3,})\s*$/.test(t)) {
+      html += "<hr>";
+    } else if (/^\s*>/.test(t)) {
+      const ql = t.split("\n").filter(l => /^\s*>/.test(l));
+      const rest = t.split("\n").filter(l => !/^\s*>/.test(l)).join("\n");
+      html += "<blockquote>" + renderMarkdown(ql.join("\n"), { __cites: true, text: ql.join("\n"), cites: cites }) + "</blockquote>";
+      if (rest.trim()) html += renderMarkdown(rest, { __cites: true, text: rest, cites: cites });
+    } else if (/^\s*([-*+]|\d+[.)])\s+/.test(t)) {
+      html += mdRenderList(t.split("\n"));
+    } else if (/^\s*\|.*\|\s*$/.test(t) && t.split("\n").length > 1) {
+      const rows = t.split("\n").filter(r => !/^\s*\|[\s:|-]+\|\s*$/.test(r));
+      const cells = r => r.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map(c => c.trim());
+      let out = "<table>";
+      rows.forEach((r, i) => {
+        const tag = i === 0 ? "th" : "td";
+        out += "<tr>" + cells(r).map(c => "<" + tag + ">" + mdInline(mdEscape(c)) + "</" + tag + ">").join("") + "</tr>";
+      });
+      html += out + "</table>";
+    } else {
+      // a block can hold a paragraph AND a list with no blank line between
+      // them — split there instead of printing the markers as prose.
+      const lines = t.split("\n");
+      const cut = lines.findIndex((l, i) => i > 0 &&
+        (/^\s*([-*+]|\d+[.)])\s+/.test(l) || /^\s*>/.test(l) || /^\s{0,3}#{1,6}\s+/.test(l)));
+      if (cut > 0) {
+        const head = lines.slice(0, cut).join("\n");
+        const tail = lines.slice(cut).join("\n");
+        html += "<p>" + mdInline(mdEscape(head)) + "</p>";
+        html += renderMarkdown(tail, { __cites: true, text: tail, cites: cites });
+      } else {
+        html += "<p>" + mdInline(mdEscape(t)) + "</p>";
+      }
+    }
+  }
+  return '<div class="md">' + mdRestoreCites(html, cites) + "</div>";
+}
+function jumpToCite(idx) {
+  const card = document.querySelector('#rag-result .cite[data-idx="' + idx + '"]') ||
+               document.querySelector("#rag-result .cite");
+  if (!card) return;
+  card.scrollIntoView({ behavior: "smooth", block: "center" });
+  card.classList.remove("flash");
+  void card.offsetWidth;
+  card.classList.add("flash");
+  setTimeout(() => card.classList.remove("flash"), 3200);
+}
+document.addEventListener("click", (e) => {
+  const t = e.target && e.target.closest ? e.target.closest(".cite-ref") : null;
+  if (!t) return;
+  e.preventDefault();
+  jumpToCite(Number(t.dataset.idx || 0));
+});
+
 function scrollLog() {
   const p = $("pane-chat");
   p.scrollTop = p.scrollHeight;
@@ -373,6 +768,81 @@ function saveLog() {
 }
 function showMintHint(show = true) {
   $("mint-banner").classList.toggle("hidden", !show);
+}
+/* ---- console login gate: POST /ui/login → localStorage bearer ---- */
+function showLogin(msg) {
+  const s = $("login-screen");
+  const wasHidden = s.classList.contains("hidden");
+  s.classList.remove("hidden");
+  const err = $("login-err");
+  if (msg) { err.textContent = msg; err.classList.remove("hidden"); }
+  else if (wasHidden) { err.textContent = ""; err.classList.add("hidden"); }
+  if (wasHidden) setTimeout(() => ($("login-pass").value ? $("login-user") : $("login-pass")).focus(), 40);
+}
+function hideLogin() {
+  $("login-screen").classList.add("hidden");
+  $("login-err").classList.add("hidden");
+  $("login-pass").value = "";
+}
+function sessionLost(msg) {
+  const wasHidden = $("login-screen").classList.contains("hidden");
+  if (state.token) {
+    localStorage.removeItem(STORE_TOKEN);
+    state.token = "";
+    $("token").value = "";
+    renderIdentity();
+  }
+  if (state.loginDismissed) { showMintHint(true); return; }
+  if (wasHidden) showLogin(msg || "session expired — sign in again");
+}
+async function doLogin(e) {
+  if (e) e.preventDefault();
+  const u = $("login-user").value.trim();
+  const p = $("login-pass").value;
+  const err = $("login-err"), btn = $("btn-login");
+  if (!u || !p) {
+    err.textContent = "username and password are required";
+    err.classList.remove("hidden");
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = "signing in…";
+  err.classList.add("hidden");
+  try {
+    const r = await fetch("/ui/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: u, password: p }),
+    });
+    const d = await r.json().catch(() => null);
+    if (!r.ok) {
+      err.textContent = errText(r.status, d);
+      err.classList.remove("hidden");
+      return;
+    }
+    state.token = d.token;
+    state.loginDismissed = false;
+    localStorage.setItem(STORE_TOKEN, d.token);
+    localStorage.setItem(STORE_USER, u);
+    $("token").value = d.token;
+    hideLogin();
+    showMintHint(false);
+    probe(); refreshOps(); renderIdentity();
+  } catch (ex) {
+    err.textContent = "⚠ " + String(ex && ex.message || ex);
+    err.classList.remove("hidden");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Sign in";
+  }
+}
+function signOut() {
+  localStorage.removeItem(STORE_TOKEN);
+  state.token = "";
+  $("token").value = "";
+  state.loginDismissed = false;
+  renderIdentity();
+  showMintHint(false);
+  showLogin();
 }
 function fmtMs(v) {
   if (v == null) return "—";
@@ -412,7 +882,7 @@ async function probe() {
     } else if (r.status === 401) {
       pill("pill-auth", "401 — token missing/expired", "bad");
       pill("pill-traces", "traces 401", "bad");
-      showMintHint(true);
+      sessionLost("401 — token missing or expired");
     } else { pill("pill-auth", "auth " + r.status, "warn"); }
   } catch { pill("pill-auth", "auth ✗", "bad"); }
   renderIdentity();
@@ -432,7 +902,7 @@ async function readError(res) {
   let body = null;
   try { body = await res.json(); } catch { /* non-JSON edge */ }
   let msg = errText(res.status, body);
-  if (res.status === 401) showMintHint(true);
+  if (res.status === 401) sessionLost("401 — token missing or expired");
   if (res.status === 429) {
     const ra = res.headers.get("Retry-After");
     if (ra) msg += "\nretry after " + ra + "s";
@@ -661,7 +1131,11 @@ function renderLog() {
 function msgNode(role, text, meta) {
   const wrap = el("div", "msg " + role);
   wrap.appendChild(el("div", "who", role === "user" ? "you" : "assistant"));
-  wrap.appendChild(el("div", "bubble", text));
+  const bubble = el("div", "bubble");
+  // the model writes markdown — render it; the human's own text stays verbatim
+  if (role === "assistant" && text) bubble.innerHTML = renderMarkdown(text);
+  else bubble.textContent = text || "";
+  wrap.appendChild(bubble);
   if (meta) wrap.appendChild(metaNode(meta));
   return wrap;
 }
@@ -777,7 +1251,7 @@ async function sendMessage() {
           renderWire();
           const bubble = node.querySelector(".bubble");
           if (errMsg) break;
-          bubble.textContent = acc || bubble.textContent;
+          if (acc) bubble.innerHTML = renderMarkdown(acc);
           scrollLog();
         }
         if (errMsg) break;
@@ -820,6 +1294,735 @@ function setBusy(b) {
   $("btn-rag").disabled = b;
 }
 
+/* ---------------- 30-day plan concepts ----------------
+   docs/AI_Engineering_OS_30_Day_Apprenticeship.md — every step of the RAG
+   pipeline is one or more days of that plan. The chip under a step names the
+   day; opening it quotes the concept it contributes to THIS run. */
+const PLAN_DOC = "ai-layer/docs/AI_Engineering_OS_30_Day_Apprenticeship.md";
+/* `t` is the day's EXACT heading in that document (the chip's note quotes it),
+   `c` is the concept it contributes to THIS flow — only days that genuinely
+   touch a step of this pipeline are listed, not the whole curriculum. */
+const PLAN_DAYS = {
+  1: { t: "Project Setup and Reality Check", c: "Saleor and AI Engineering OS running side by side behind one nginx edge — the console answering you is served out of that stack, and /rag crosses the same container network the architecture sketch on Day 1 drew." },
+  2: { t: "Understand Saleor as an AI Environment", c: "the corpus IS this environment: products, orders, checkout and the GraphQL schema are the documents being retrieved, and User → API → Saleor → DB → Response is the flow the answers describe." },
+  3: { t: "LLM Fundamentals", c: "prompts, tokens, latency, cost and model behaviour — every knob the panel reports (temperature, max_tokens, ttft, finish_reason) starts here." },
+  4: { t: "Model Gateway", c: "one gateway owns retries, exponential backoff, ordered provider fallback and the cost ledger; each try is its own model.<op>.attempt span, so a failure is visible instead of swallowed." },
+  5: { t: "Embeddings", c: "text → vector → cosine / nearest-neighbour: dimensions, semantic similarity, and the identity lock between the embedding model and the store (a different model is refused, not approximated)." },
+  6: { t: "Build the First RAG Pipeline", c: "docs → parse → chunk → embed → store → retrieve → context → LLM, with top-K retrieval, context construction and the refusal path when the corpus cannot answer." },
+  7: { t: "RAG Debugging", c: "why naive RAG fails: irrelevant retrieval, missing retrieval, excessive or duplicated context, hallucination — and questions the corpus simply cannot answer." },
+  8: { t: "Retrieval Improvements", c: "hybrid keyword + semantic retrieval, metadata filtering, query rewriting and multi-query retrieval — the recall side of the same pipeline." },
+  9: { t: "Reranking and Context Construction", c: "rerankers, relevance scoring, context ordering and compression, and the lost-in-the-middle problem: what the model finally sees is a built artifact, not a dump." },
+  10: { t: "Code RAG", c: "a second corpus over Saleor's own source — AST symbols, interface-vs-body embedding, identifier tokenisation — answering \"where is it implemented?\" with module#Symbol citations." },
+  13: { t: "Agent Failure Modes", c: "fail honestly: an empty context returns NOT_COVERED with a reason and generation: null instead of an invented answer — the refusal is a return value, not a silent gap." },
+  20: { t: "Evaluation Fundamentals", c: "a metric, a fixture and a threshold before any claim — citation correctness and groundedness on this panel are measurements with a dataset behind them, never vibes." },
+  21: { t: "RAG Evaluation", c: "Recall@K, Precision@K, MRR, plus citation correctness and groundedness: the claim cited ⊆ retrieved is measured, never asserted." },
+  23: { t: "AI Observability", c: "capture request → model → retrieval → documents → answer with latency, tokens, cost, model and prompt version on each span — the panel you are reading is this day." },
+  24: { t: "Distributed AI Observability", c: "correlation IDs across components: the browser mints the traceparent, the app continues the same trace id, and logs/metrics/traces share one identity." },
+  25: { t: "Prompt Injection", c: "retrieved text is untrusted input: chunks are quoted into the prompt as DATA under a fenced system prompt, so an instruction hidden in a document cannot promote itself to a command." },
+  26: { t: "Agent Security", c: "deny-by-default: the bearer is verified against signed HS256 claims before a single retrieval runs, so an unauthenticated /rag costs zero tokens and zero retrieval work." },
+  29: { t: "Deployment", c: "one image, one compose stack: the console ships inside ai-layer:local, so a UI change only reaches a real user after the image is rebuilt and the container recreated." },
+};
+
+/* Which days of that plan THIS run actually exercised — derived from the
+   response's own facts, not from the whole pipeline. A refused run never
+   lists the generation days; a run that never embedded never lists Day 5. */
+function flowDaysFor(data) {
+  const r = data.retrieval || {};
+  const days = new Set([1, 23, 24, 26, 29]);     // stack up · observability · traceparent · auth · deploy
+  if (r.model || r.input_tokens != null) [5, 4].forEach(d => days.add(d));          // embed
+  if (r.k != null || r.candidates != null) [6, 8, 10, 2].forEach(d => days.add(d)); // retrieve
+  if (r.context_chars != null) [9, 7].forEach(d => days.add(d));                    // budget + debugging
+  if (data.refused) [6, 7, 13].forEach(d => days.add(d));                           // gate refusal
+  else if (r.context_chars != null) days.add(6);
+  if (data.generation) [3, 21, 20, 25].forEach(d => days.add(d));                   // prompt → answer → eval · untrusted context
+  return [...days].sort((a, b) => a - b);
+}
+/* The chips under an answer: click a day, read the concept it contributed. */
+function renderFlowDays(container, days) {
+  container.appendChild(el("div", "cite-h",
+    "30-day plan concepts exercised by this flow — " + days.map(d => "Day " + d).join(" · ") +
+    " · click a chip (docs/AI_Engineering_OS_30_Day_Apprenticeship.md)"));
+  const row = el("div", "pipe-days");
+  const note = el("div", "daynote hidden");
+  for (const d of days) dayChipFor(d, row, note);
+  container.appendChild(row);
+  container.appendChild(note);
+}
+
+/* ---------------- RAG: live pipeline (every state comes from the trace) --- */
+const RAG_STEPS = [
+  { k: "request", n: "1", title: "request", run: "in flight",
+    desc: "POST /rag — the browser mints a W3C traceparent, so the trace id exists before the answer lands; the server continues that trace (Day 24) and records route, corpus, question hash.",
+    mech: "ai_os/server.py:/rag → identity middleware → obs.start_server_trace → _run_rag_common",
+    days: [24, 23, 26, 1, 29] },
+  { k: "embed", n: "2", title: "embed", run: "calling provider…",
+    desc: "model.embed — the question is embedded once. Provider, model, tokens and every retry/fallback come from the model.embed.attempt spans.",
+    mech: "gateway.embed([q]) → provider /embeddings → one vector → dimension check vs store",
+    days: [5, 4] },
+  { k: "retrieve", n: "3", title: "retrieve", run: "searching…",
+    desc: "retrieval span — cosine search across each store; every candidate is a document event carrying rank, score, corpus and kept.",
+    mech: "k_from_budget → store.retrieve(qvec, k) → merged.sort(-score, chunk_id, label)",
+    days: [6, 8, 10, 2] },
+  { k: "budget", n: "4", title: "budget", run: "filling context…",
+    desc: "context build inside the retrieval span — each store fills its own char budget; leftovers are dropped with drop_reason=budget.",
+    mech: "build_context(results, budget) in rank order → per-store slices for corpus=auto → drop_reason=budget",
+    days: [9, 7, 25] },
+  { k: "gate", n: "5", title: "gate", run: "deciding…",
+    desc: "empty context after budget ⇒ gate_refused event and the model is never called for an uncovered question.",
+    mech: "if not context: gate_refused + NOT_COVERED (generation: null) · else SYSTEM_PROMPT.format(context)",
+    days: [6, 7, 13] },
+  { k: "generate", n: "6", title: "generate", run: "chatting…",
+    desc: "model.chat — kept context + question become one completion; attempts, tokens, ttft and finish reason are span attributes.",
+    mech: "gateway.chat(messages) → attempt spans → ledger row → final_answer event (sha256, chars, citations, prompt v1)",
+    days: [4, 3, 21, 20] },
+];
+
+function pipeStop(P) {
+  if (!P) return;
+  P.stopped = true;
+  if (P.tick) clearInterval(P.tick);
+  if (P.poll) clearInterval(P.poll);
+  P.tick = null;
+  P.poll = null;
+}
+function makePipeline(corpus) {
+  const box = el("div", "pipe");
+  const head = el("div", "pipe-h");
+  const left = el("span");
+  left.appendChild(el("b", null, "pipeline"));
+  left.appendChild(document.createTextNode("  POST /rag corpus=" + corpus));
+  const spin = el("span", "spin");
+  left.appendChild(spin);
+  const right = el("span", null, "minting traceparent…");
+  const rightWrap = el("span", "pipe-right");
+  rightWrap.appendChild(right);
+  const deepBtn = el("button", "ghost deep-toggle", "hide under-the-hood");
+  deepBtn.type = "button";
+  deepBtn.title = "collapse/expand the ground layer under every step";
+  rightWrap.appendChild(deepBtn);
+  head.appendChild(left);
+  head.appendChild(rightWrap);
+  box.appendChild(head);
+  // one switch for the ground layer under all six steps
+  deepBtn.addEventListener("click", () => {
+    const list = Array.from(box.querySelectorAll("details.pipe-under"));
+    const open = !(list[0] && list[0].open);
+    for (const d of list) d.open = open;
+    deepBtn.textContent = open ? "hide under-the-hood" : "show under-the-hood";
+  });
+  const dayList = [...new Set(RAG_STEPS.flatMap(s => s.days || []))].sort((a, b) => a - b);
+  box.appendChild(el("div", "days-sum",
+    "30-day plan in play — " + dayList.map(d => "Day " + d).join(" · ") +
+    " · open a step's chip to read the concept it contributes (docs/AI_Engineering_OS_30_Day_Apprenticeship.md)"));
+
+  const P = {
+    box, right, spin, corpus,
+    order: RAG_STEPS.map(s => s.k),
+    steps: {},
+    t0: performance.now(), traceId: null,
+    poll: null, tick: null, miss: 0, done: false,
+    start: {}, ctx: null,
+  };
+  for (const s of RAG_STEPS) {
+    const row = el("div", "pipe-step");
+    row.appendChild(el("span", "dot"));
+    const main = el("div", "pipe-main");
+    const title = el("div", "pipe-title");
+    title.appendChild(el("span", "n", s.n));
+    title.appendChild(document.createTextNode(s.title));
+    const live = el("span", "live", "");
+    const t = el("span", "t", "");
+    title.appendChild(live);
+    title.appendChild(t);
+    main.appendChild(title);
+    main.appendChild(el("div", "pipe-desc", s.desc));
+    // ---- 30-day plan: which days of the apprenticeship this step IS ----
+    const daysRow = el("div", "pipe-days");
+    const dayNote = el("div", "daynote hidden");
+    for (const d of (s.days || [])) dayChipFor(d, daysRow, dayNote);
+    if ((s.days || []).length) { main.appendChild(daysRow); main.appendChild(dayNote); }
+    const ul = el("ul", "pipe-facts");
+    main.appendChild(ul);
+    // ---- ground layer: what this step actually executes, line by line ----
+    const under = document.createElement("details");
+    under.className = "pipe-under";
+    under.open = true;
+    const sum = document.createElement("summary");
+    sum.textContent = "under the hood — what actually runs";
+    under.appendChild(sum);
+    const deep = el("ul", "pipe-deep");
+    under.appendChild(deep);
+    main.appendChild(under);
+    row.appendChild(main);
+    box.appendChild(row);
+    P.steps[s.k] = { row, live, t, ul, st: null, deep, mech: s.mech };
+  }
+  const total = el("div", "pipe-total hidden");
+  box.appendChild(total);
+  P.total = total;
+  return P;
+}
+function pipeDeep(P, k, lines) {
+  const s = P.steps[k];
+  if (!s || !s.deep) return;
+  const sig = lines.map(l => (l.cls || "") + l.txt).join("\n");
+  if (sig === s.deep.dataset.sig) return;
+  s.deep.dataset.sig = sig;
+  s.deep.textContent = "";
+  for (const l of lines) s.deep.appendChild(el("li", l.cls || null, l.txt));
+}
+/* One "Day N · title" chip that opens the concept that day contributes here.
+   `row` collects the chips, `note` is the shared panel under them. */
+function dayChipFor(d, row, note) {
+  const meta = PLAN_DAYS[d];
+  const chip = el("button", "daychip", "Day " + d + " · " + (meta ? meta.t : "?"));
+  chip.type = "button";
+  chip.title = "30-day plan concept — click to read what this step takes from Day " + d;
+  chip.addEventListener("click", () => {
+    const already = note.dataset.day === String(d) && !note.classList.contains("hidden");
+    row.querySelectorAll(".daychip").forEach(c => c.classList.remove("on"));
+    if (already) { note.classList.add("hidden"); return; }
+    chip.classList.add("on");
+    note.textContent = "";
+    note.appendChild(el("span", "dtitle", "Day " + d + " — " + (meta ? meta.t : "?")));
+    note.appendChild(document.createTextNode(": " + (meta ? meta.c : "concept not indexed")));
+    note.appendChild(el("span", "dsrc", PLAN_DOC + " → \"# DAY " + d + " — " + (meta ? meta.t : "") + "\""));
+    note.dataset.day = String(d);
+    note.classList.remove("hidden");
+  });
+  row.appendChild(chip);
+  return chip;
+}
+function pipeSet(P, k, st, live, ms) {
+  const s = P.steps[k];
+  if (!s) return;
+  s.row.classList.remove("st-ok", "st-err", "st-run");
+  if (st) s.row.classList.add("st-" + st);
+  if (st === "run" && s.st !== "run") P.start[k] = performance.now();
+  s.st = st;
+  if (live !== undefined) s.live.textContent = live || "";
+  if (ms != null) s.t.textContent = fmtMs(ms);
+  else if (st !== "run") s.t.textContent = st ? "" : "";
+}
+function pipeFacts(P, k, facts) {
+  const s = P.steps[k];
+  if (!s) return;
+  s.ul.textContent = "";
+  for (const f of facts || []) s.ul.appendChild(el("li", f[1] || null, f[0]));
+}
+function pipeFact(P, k, text, cls) {
+  const s = P.steps[k];
+  if (s) s.ul.appendChild(el("li", cls || null, text));
+}
+function pipeTicker(P) {
+  P.tick = setInterval(() => {
+    if (P.stopped) return;
+    const now = performance.now();
+    for (const k of P.order) {
+      const s = P.steps[k];
+      if (s.st === "run" && P.start[k]) s.t.textContent = fmtMs(now - P.start[k]);
+    }
+    P.right.textContent = "live · " + fmtMs(now - P.t0) + " elapsed";
+  }, 100);
+}
+function pipePoll(P, traceId) {
+  P.traceId = traceId;
+  if (P.poll) return;
+  P.poll = setInterval(async () => {
+    if (P.stopped) return;
+    let d = null;
+    try {
+      const r = await fetch("/traces/" + P.traceId, { headers: authHeaders(false) });
+      if (r.status === 401) { pipeStop(P); sessionLost("401 — token missing or expired"); return; }
+      if (r.status === 404) { if (++P.miss > 40) pipeStop(P); return; }
+      if (!r.ok) return;
+      d = await r.json();
+    } catch { return; }
+    P.miss = 0;
+    if (!d || !d.trace_id) return;
+    renderSteps(P, d, P.ctx);
+    if (d.ended_at) pipeStop(P);
+  }, 350);
+}
+async function pipeSettle(P, ctx) {
+  if (!ctx.traceId) return;
+  for (let i = 0; i < 5; i++) {
+    let d = null;
+    try {
+      const r = await fetch("/traces/" + ctx.traceId, { headers: authHeaders(false) });
+      if (r.status === 401) { sessionLost("401 — token missing or expired"); return; }
+      if (r.status === 404) { await new Promise(s => setTimeout(s, 250)); continue; }
+      if (r.ok) d = await r.json();
+    } catch { return; }
+    if (d) {
+      renderSteps(P, d, ctx);
+      ctx.spans = (d.spans || []).length;
+      ctx.events = (d.events || []).length;
+      if (d.ended_at) return;
+    }
+    await new Promise(s => setTimeout(s, 250));
+  }
+}
+/* Derive one step's {started, done, err, skip, facts, ms, live} from spans + events. */
+function stepView(k, tr, E) {
+  const { spans, evs, root, retr, embed, chat, docs, gateRef, finalAns } = E;
+  const A = (s) => (s && s.attributes) || {};
+  const open = !tr.ended_at;
+  const ta = tr.attributes || {};
+  const run = RAG_STEPS.find(s => s.k === k).run;
+  const reqEv = evs.find(e => e.name === "request");
+  if (k === "request") {
+    const f = [[(ta.route || "/rag") + (ta.corpus ? " · corpus " + ta.corpus : "")]];
+    const chars = ta.question_chars != null ? ta.question_chars : (reqEv ? A(reqEv).question_chars : null);
+    if (chars != null)
+      f.push(["question " + chars + " chars · sha256 " +
+              String(ta.question_sha256 || (reqEv && A(reqEv).question_sha256) || "").slice(0, 16) + "…"]);
+    if (tr.continuation)
+      f.push([tr.continuation.continued ? "continuation — client traceparent adopted"
+                                        : "continuation — fresh root (" + (tr.continuation.reason || "?") + ")"]);
+    f.push([spans.length + " spans · " + evs.length + " events"]);
+    if (tr.status && tr.status !== "ok")
+      f.push(["status " + tr.status + (tr.error ? " — " + JSON.stringify(tr.error) : ""), "bad"]);
+    return { started: true,
+             done: !!(root && root.duration_ms != null),
+             err: !!(root && root.duration_ms != null && root.status !== "ok" && spans.length <= 1),
+             facts: f, ms: tr.duration_ms, live: open ? run : "" };
+  }
+  if (k === "embed") {
+    const atts = spans.filter(s => s.name === "model.embed.attempt");
+    const la = A(atts[atts.length - 1]) || A(embed);
+    const f = [];
+    if (embed) {
+      if (la.provider || la.model)
+        f.push(["provider " + (la.provider || "—") + " · model " + (la.actual_model || la.model || "—")]);
+      if (la.attempt != null)
+        f.push(["attempt " + la.attempt + (la.fallback_depth ? " · fallback depth " + la.fallback_depth : "")]);
+      if (la.latency_ms != null)
+        f.push([fmtMs(la.latency_ms) + " · " + (la.input_tokens != null ? la.input_tokens + " input tok" : "tokens —")
+                + (la.inputs != null ? " · " + la.inputs + " input" : "")]);
+      for (const a of atts) {
+        if (a.status !== "ok")
+          f.push(["attempt " + A(a).attempt + " failed: " + (A(a).error_kind || "error") +
+                  (A(a).retryable ? " · retryable" : ""), "bad"]);
+      }
+      for (const e of evs) {
+        if (e.name === "retry_scheduled" && spans.some(s => s.span_id === e.span_id && s.name.indexOf("model.embed") === 0))
+          f.push(["retry in " + (A(e).delay_s != null ? A(e).delay_s + "s" : "?") + " (" + (A(e).reason || "") + ")", "warn"]);
+      }
+    } else f.push(["queued — the question has not been embedded yet"]);
+    return { started: !!embed,
+             done: !!(embed && embed.duration_ms != null),
+             err: !!(embed && embed.duration_ms != null && embed.status !== "ok"),
+             facts: f, ms: embed ? embed.duration_ms : null,
+             live: embed ? (embed.duration_ms != null ? "" : run) : "" };
+  }
+  if (k === "retrieve") {
+    const a = A(retr);
+    const f = [];
+    if (retr) {
+      f.push(["k=" + (a.k != null ? a.k : "…") + " · candidates=" + (a.candidates != null ? a.candidates : "…") +
+              (a.corpora ? " · " + a.corpora : "")]);
+      f.push([a.store + " · dim " + a.store_dim + " · " + a.store_count + " store(s)" +
+              (a.store_version ? " · store v" + a.store_version : "")]);
+      const r1 = docs.find(d => A(d).rank === 1);
+      if (r1) f.push(["rank 1 · score " + A(r1).score + " · " + (A(r1).corpus || "docs") + " · " + A(r1).chars + "ch"]);
+      if (docs.length) f.push([docs.length + " document events (rank · score · kept · drop_reason)"]);
+    } else f.push(["queued — waiting for the query vector"]);
+    return { started: !!retr,
+             done: !!(retr && retr.duration_ms != null),
+             err: !!(retr && retr.duration_ms != null && retr.status !== "ok"),
+             facts: f, ms: retr ? retr.duration_ms : null,
+             live: retr ? (retr.duration_ms != null ? "" : run) : "" };
+  }
+  if (k === "budget") {
+    const a = A(retr);
+    const f = [];
+    if (retr) {
+      if (a.context_chars == null) f.push(["filling per-store slices…"]);
+      else {
+        f.push(["budget " + a.budget_chars + " ch · context " + a.context_chars + " ch"]);
+        f.push(["kept " + (a.kept != null ? a.kept : "…") + " · dropped " + (a.dropped != null ? a.dropped : "…") +
+                " · candidates " + (a.candidates != null ? a.candidates : "…"),
+                (a.dropped || 0) > 0 ? "warn" : null]);
+        f.push(["no separate span — timed inside retrieval"]);
+      }
+      const per = {};
+      for (const d of docs) {
+        const c = A(d).corpus || "docs";
+        per[c] = per[c] || { n: 0, k: 0 };
+        per[c].n++;
+        if (A(d).kept) per[c].k++;
+      }
+      const keys = Object.keys(per);
+      if (keys.length > 1)
+        f.push(["per store: " + keys.map(c => c + " " + per[c].k + "/" + per[c].n + " kept").join(" · ")]);
+      const dropped = docs.filter(d => A(d).kept === false);
+      if (dropped.length)
+        f.push([dropped.length + " dropped (drop_reason=" + (A(dropped[0]).drop_reason || "?") + ") — " +
+                dropped.slice(0, 3).map(d => "rank " + A(d).rank).join(", ") + (dropped.length > 3 ? ", …" : ""), "warn"]);
+    } else f.push(["queued — the budget is applied while retrieval runs"]);
+    return { started: !!retr,
+             done: !!(retr && retr.duration_ms != null && a.context_chars != null),
+             err: !!(retr && retr.duration_ms != null && retr.status !== "ok"),
+             facts: f, ms: null,
+             live: retr ? (a.context_chars != null ? "" : run) : "" };
+  }
+  if (k === "gate") {
+    const a = A(retr);
+    const refused = !!(gateRef || (finalAns && A(finalAns).refused));
+    const passed = !!(chat || (!refused && finalAns));
+    const f = [];
+    if (refused) {
+      const g = gateRef || finalAns;
+      f.push(["REFUSED — " + (A(g).reason || "empty context after budget"), "warn"]);
+      f.push([(A(g).candidates != null ? A(g).candidates + " candidates → " : "") + "model never called", "warn"]);
+      return { started: true, done: true, err: false, facts: f, ms: null, live: "REFUSED" };
+    }
+    if (passed) {
+      f.push(["PASSED — " + (a.kept != null ? a.kept : "?") + " chunks / " + (a.context_chars != null ? a.context_chars + " ch" : "context") +
+              " handed to the model", "good"]);
+      return { started: true, done: true, err: false, facts: f, ms: null, live: "passed" };
+    }
+    if (retr && retr.duration_ms != null) f.push(["deciding — context is in hand"]);
+    else f.push(["queued — runs right after the budget"]);
+    return { started: !!(retr && retr.duration_ms != null) || !!gateRef, done: false, err: false,
+             facts: f, ms: null, live: retr ? run : "" };
+  }
+  // generate
+  const atts = spans.filter(s => s.name === "model.chat.attempt");
+  const la = A(atts[atts.length - 1]) || A(chat);
+  const refused = !!(gateRef || (finalAns && A(finalAns).refused));
+  const f = [];
+  if (chat || atts.length) {
+    if (la.provider || la.model)
+      f.push(["provider " + (la.provider || "—") + " · model " + (la.actual_model || la.model || "—")]);
+    if (la.attempt != null)
+      f.push(["attempt " + la.attempt + (la.fallback_depth ? " · fallback depth " + la.fallback_depth : "")]);
+    if (la.latency_ms != null) f.push(["latency " + fmtMs(la.latency_ms) + (la.ttft_ms != null ? " · ttft " + fmtMs(la.ttft_ms) : "")]);
+    if (la.input_tokens != null || la.output_tokens != null)
+      f.push(["in " + (la.input_tokens != null ? la.input_tokens : "…") + " tok · out " +
+              (la.output_tokens != null ? la.output_tokens : "…") + " tok · finish " + (la.finish_reason || "—")]);
+    for (const a of atts) {
+      if (a.status !== "ok")
+        f.push(["attempt " + A(a).attempt + " failed: " + (A(a).error_kind || "error") +
+                (A(a).retryable ? " · retryable" : ""), "bad"]);
+    }
+    for (const e of evs) {
+      if (e.name === "retry_scheduled" && spans.some(s => s.span_id === e.span_id && s.name.indexOf("model.chat") === 0))
+        f.push(["retry in " + (A(e).delay_s != null ? A(e).delay_s + "s" : "?") + " (" + (A(e).reason || "") + ")", "warn"]);
+    }
+  }
+  if (finalAns) {
+    const fa = A(finalAns);
+    f.push([(fa.refused ? "refused" : "answer") + " · " + (fa.answer_chars != null ? fa.answer_chars + " chars" : "") +
+            " · " + (fa.citations != null ? fa.citations + " citations" : "") +
+            (fa.model ? " · " + fa.model : "") + (fa.prompt_version ? " · prompt " + fa.prompt_version : ""),
+            fa.refused ? "warn" : "good"]);
+  }
+  if (refused && !chat && !atts.length)
+    f.push(["skipped — the gate refused before the model was called", "warn"]);
+  else if (!chat && !atts.length)
+    f.push([retr ? "queued — waiting for the gate" : "queued"]);
+  return { started: !!(chat || atts.length),
+           done: !!(chat && chat.duration_ms != null),
+           err: !!(chat && chat.duration_ms != null && chat.status !== "ok"),
+           skip: refused && !chat && !atts.length,
+           facts: f, ms: chat ? chat.duration_ms : null,
+           live: chat ? (chat.duration_ms != null ? "" : run) : "" };
+}
+/* Ground layer: one line per thing that ACTUALLY ran inside a step — span
+   lifecycles, event payloads, the code path behind them. Derived from the
+   trace only (no new instrumentation): the same facts the waterfall shows,
+   read at the resolution of a single call. */
+function deepView(k, tr, E) {
+  const { spans, evs, retr, embed, chat, docs, gateRef, finalAns } = E;
+  const A = s => (s && s.attributes) || {};
+  const open = !tr.ended_at;
+  const ta = tr.attributes || {};
+  const L = (txt, cls) => ({ txt, cls: cls || null });
+  const ms = v => (v == null ? "" : " · " + fmtMs(v));
+  const att = (name) => spans.filter(s => s.name === name);
+
+  if (k === "request") {
+    const cont = tr.continuation || {};
+    const reqEv = evs.find(e => e.name === "request");
+    const lines = [
+      L("edge → handler: nginx → FastAPI → POST " + (ta.route || "/rag") + " (corpus " + (ta.corpus || "docs") + ") · ai_os/server.py:rag_endpoint"),
+      L("body cap MAX_BODY_BYTES is checked BEFORE identity — a 413 costs zero tokens"),
+      L("identity: bearer → HS256 verify → Principal(sub, tenant, roles); deny-by-default for /rag, /chat*, /traces*"),
+      L("trace: " + (cont.continued
+          ? "client traceparent CONTINUED — same trace id, fresh span id, remote parent"
+          : "fresh root span (" + (cont.reason || "no inbound traceparent") + ")")),
+      L("root span 'rag' opens with route/corpus/question_sha256 — the question text never enters the trace"),
+    ];
+    if (reqEv) {
+      const a = A(reqEv);
+      lines.push(L("request event → question_chars=" + a.question_chars +
+                   " · sha256=" + String(a.question_sha256 || "").slice(0, 16) + "…"));
+    }
+    lines.push(L("span tree so far: " + (spans.map(s => s.name).join(" → ") || "root only") + " · " + evs.length + " events"));
+    lines.push(L(open
+      ? "…in flight — this panel re-reads GET /traces/<id> every 350ms"
+      : "root closed status=" + (tr.status || "ok") + ms(tr.duration_ms) + " → response_sent + X-Trace-Id back to the browser",
+      open ? "warn" : "good"));
+    return lines;
+  }
+
+  if (k === "embed") {
+    const atts = att("model.embed.attempt");
+    const lines = [L("gateway.embed([question]) — Day-4 gateway owns retry / backoff / fallback; the provider only knows its own wire format")];
+    if (!embed) return lines.concat([L("queued — the question has not left this process yet", "warn")]);
+    if (!atts.length)
+      lines.push(L("model.embed span open" + ms(embed.duration_ms) + " — attempt detail lands on model.embed.attempt", "warn"));
+    for (const s of atts) {
+      const x = A(s);
+      const bad = !!x.error_kind || s.status === "error";
+      lines.push(L("attempt #" + (x.attempt != null ? x.attempt : "?") + " → " + (x.provider || "?") +
+                   " · " + (x.actual_model || x.model || "?") + " · depth " + (x.fallback_depth || 0) +
+                   (x.inputs != null ? " · inputs " + x.inputs : "") +
+                   (x.input_tokens != null ? " · " + x.input_tokens + " tok" : "") +
+                   (x.latency_ms != null ? " · " + fmtMs(x.latency_ms) : ""),
+                   bad ? "bad" : null));
+      if (bad)
+        lines.push(L("rejected: " + (x.error_kind || "error") +
+                     (x.retryable ? " → retryable — the gateway's ladder takes the next rung"
+                                  : " → non-retryable — break to the next provider in the chain"), "bad"));
+    }
+    for (const e of evs) {
+      if (e.name === "retry_scheduled" && spans.some(s => s.span_id === e.span_id && s.name.indexOf("model.embed") === 0))
+        lines.push(L("retry_scheduled → sleep " + (A(e).delay_s != null ? A(e).delay_s + "s" : "?") +
+                     " before the next attempt (" + (A(e).reason || "") + ")", "warn"));
+    }
+    lines.push(L("dimension gate: len(qvec) == store.dimension else DimensionMismatch — a foreign embedding model is refused, never approximated"));
+    lines.push(L(embed.duration_ms != null
+      ? "span " + (embed.status || "ok") + ms(embed.duration_ms) + " → 768-d query vector handed to retrieval"
+      : "awaiting the vector…", embed.duration_ms != null && embed.status !== "ok" ? "bad" : null));
+    return lines;
+  }
+
+  if (k === "retrieve") {
+    if (!retr) return [L("queued — waiting for the query vector", "warn")];
+    const a = A(retr);
+    const lines = [
+      L("store open: " + (a.store || "—") + " · dim " + a.store_dim + " · " + a.store_count + " store(s) · v" + a.store_version + " (" + (a.store_kind || "local_file") + ")"),
+      L("k = k_from_budget(budget, avg_chunk_len, n) → k=" + (a.k != null ? a.k : "…") + " — k is a budget decision, not a quality knob"),
+      L("store.retrieve(qvec, k) — brute-force cosine over every row; no ANN index, no library"),
+    ];
+    const shown = docs.slice()
+      .sort((x, y) => (A(x).rank || 0) - (A(y).rank || 0)).slice(0, 6);
+    for (const d of shown) {
+      const x = A(d);
+      lines.push(L("rank " + x.rank + " · score " + x.score + " · " + (x.corpus || "docs") + " · " + x.chars + "ch · " +
+                   x.doc_id + " · " + (x.kept ? "kept" : "dropped (" + (x.drop_reason || "budget") + ")"),
+                   x.kept ? null : "warn"));
+    }
+    if (docs.length > shown.length)
+      lines.push(L("… " + (docs.length - shown.length) + " more document events (rank · score · kept · drop_reason) — every candidate is in the trace"));
+    lines.push(L("merged.sort(key=(-score, chunk_id, label)) — ties across stores must not compare Chunk objects"));
+    lines.push(L("candidates=" + (a.candidates != null ? a.candidates : "…") + " · corpora " + (a.corpora || "—") +
+                 " · query_sha256=" + String(a.query_sha256 || "").slice(0, 12) + "…",
+                 retr.duration_ms != null ? null : "warn"));
+    return lines;
+  }
+
+  if (k === "budget") {
+    if (!retr) return [L("queued — the budget is applied inside the retrieval span (no separate span, by design)", "warn")];
+    const a = A(retr);
+    const lines = [
+      L((a.store_count || 1) === 1
+          ? "one store → build_context(results, budget) walks candidates in rank order until the floor"
+          : "auto → each store fills its OWN slice (docs 1200ch / code 4000ch) then the slices join with \\n\\n"),
+    ];
+    if (a.context_chars == null) return lines.concat([L("filling per-store slices…", "warn")]);
+    lines.push(L("budget_chars=" + a.budget_chars + " · context_chars=" + a.context_chars +
+                 " · kept=" + a.kept + " · dropped=" + a.dropped,
+                 (a.dropped || 0) > 0 ? "warn" : "good"));
+    const per = {};
+    for (const d of docs) {
+      const c = A(d).corpus || "docs";
+      per[c] = per[c] || { n: 0, k: 0 };
+      per[c].n++;
+      if (A(d).kept) per[c].k++;
+    }
+    for (const c of Object.keys(per))
+      lines.push(L(c + " → " + per[c].k + "/" + per[c].n + " candidates kept inside its slice"));
+    const dropped = docs.filter(d => A(d).kept === false);
+    if (dropped.length)
+      lines.push(L("cut " + dropped.length + " on drop_reason=" + (A(dropped[0]).drop_reason || "budget") + ": " +
+                   dropped.slice(0, 4).map(d => "#" + A(d).rank).join(", ") +
+                   (dropped.length > 4 ? ", …" : ""), "warn"));
+    lines.push(L("evidence is ORDERED before it is cut — the model sees a built context, not a dump"));
+    return lines;
+  }
+
+  if (k === "gate") {
+    const refused = !!(gateRef || (finalAns && A(finalAns).refused));
+    if (refused) {
+      const g = gateRef || finalAns;
+      return [
+        L("gate_refused event → reason \"" + (A(g).reason || "empty context after budget") +
+          "\" · candidates=" + A(g).candidates, "warn"),
+        L("NOT_COVERED returned with generation: null — the model is never called, the bill never starts", "warn"),
+        L("the corpus cannot answer this question; refusal is a return value, not a guess", "warn"),
+      ];
+    }
+    const a = A(retr);
+    const lines = [];
+    if (retr && retr.duration_ms != null && a.context_chars != null) {
+      lines.push(L("context non-empty (" + a.context_chars + "ch from " + (a.kept != null ? a.kept : "?") + " chunks) → gate passes", "good"));
+      lines.push(L("system = SYSTEM_PROMPT.format(used, not_covered, context) — one system + one user message, prompt ref rag-answer v1"));
+      lines.push(L("the answer will be graded against THIS context: cited ⊆ retrieved is set membership"));
+    } else {
+      lines.push(L(retr ? "deciding — the budget is still filling" : "queued — runs the moment the budget closes", "warn"));
+    }
+    return lines;
+  }
+
+  // generate
+  const atts = att("model.chat.attempt");
+  const lines = [L("gateway.chat(messages, temperature, max_tokens, prompt_ref) — retries / backoff / fallback live in the gateway, not in the prompt")];
+  if (!chat && !atts.length) {
+    const refused = !!(gateRef || (finalAns && A(finalAns).refused));
+    lines.push(L(refused ? "skipped — the gate refused before any model call"
+                         : "queued — waiting for the gate", "warn"));
+    return lines;
+  }
+  for (const s of atts) {
+    const x = A(s);
+    const bad = !!x.error_kind || s.status === "error";
+    lines.push(L("attempt #" + (x.attempt != null ? x.attempt : "?") + " → " + (x.provider || "?") +
+                 " · " + (x.actual_model || x.model || "?") + " · depth " + (x.fallback_depth || 0) +
+                 (x.latency_ms != null ? " · " + fmtMs(x.latency_ms) : "") +
+                 (x.finish_reason ? " · finish " + x.finish_reason : "") +
+                 (x.input_tokens != null ? " · in " + x.input_tokens + " tok" : "") +
+                 (x.output_tokens != null ? " · out " + x.output_tokens + " tok" : ""),
+                 bad ? "bad" : null));
+    if (bad)
+      lines.push(L("rejected: " + (x.error_kind || "error") +
+                   (x.retryable ? " → retryable, back off and retry" : " → non-retryable, break to the next provider"), "bad"));
+  }
+  for (const e of evs) {
+    if (e.name === "retry_scheduled" && spans.some(s => s.span_id === e.span_id && s.name.indexOf("model.chat") === 0))
+      lines.push(L("retry_scheduled → " + (A(e).delay_s != null ? A(e).delay_s + "s" : "?") + " wait (" + (A(e).reason || "") + ")", "warn"));
+  }
+  lines.push(L(chat
+    ? "model.chat span " + (chat.status || "ok") + ms(chat.duration_ms) + " — ttft / tokens / finish_reason are span attributes"
+    : "model.chat span open…", chat && chat.status !== "ok" ? "bad" : null));
+  if (finalAns) {
+    const x = A(finalAns);
+    lines.push(L("final_answer event → refused=" + !!x.refused + " · chars=" + x.answer_chars +
+                 " · citations=" + x.citations + " · sha256=" + String(x.answer_sha256 || "").slice(0, 12) +
+                 "… · prompt " + (x.prompt_version || "—"), x.refused ? "warn" : "good"));
+    lines.push(L("tokens + cost appended to the ledger (GET /ledger); the answer text itself never enters the trace"));
+  }
+  lines.push(L("response_sent → SSE/JSON out → the console renders the markdown and turns 【{...}】 markers into jump links",
+               finalAns ? "good" : "warn"));
+  return lines;
+}
+
+function renderSteps(P, tr, ctx) {
+  if (!tr || P.done) return;
+  const spans = tr.spans || [];
+  const evs = tr.events || [];
+  const E = {
+    spans, evs,
+    root: spans.find(s => s.kind === "request") || spans[0] || null,
+    retr: spans.find(s => s.name === "retrieval") || null,
+    embed: spans.find(s => s.name === "model.embed") || null,
+    chat: spans.find(s => s.name === "model.chat") || null,
+    docs: evs.filter(e => e.name === "document"),
+    gateRef: evs.find(e => e.name === "gate_refused") || null,
+    finalAns: evs.find(e => e.name === "final_answer") || null,
+  };
+  const open = !tr.ended_at;
+  let upstreamErr = false;
+  for (const step of RAG_STEPS) {
+    const k = step.k;
+    const v = stepView(k, tr, E);
+    let st, facts = v.facts, live;
+    if (upstreamErr) {
+      st = null;
+      facts = [["not reached — an upstream step failed", "warn"]];
+      live = "";
+    } else if (v.err) {
+      st = "err";
+      upstreamErr = true;
+      live = "error";
+    } else if (v.done) {
+      st = "ok";
+      live = v.live;
+    } else if (v.started && !open) {
+      st = "err";
+      upstreamErr = true;
+      live = "stalled";
+      facts = v.facts.concat([["never finished — the trace closed while this step ran", "bad"]]);
+    } else if (v.started) {
+      st = "run";
+      live = step.run;
+    } else {
+      st = null;
+      live = v.skip ? "skipped" : "";
+      if (!open && !v.skip) facts = v.facts.concat([["never ran — the pipeline ended here", "warn"]]);
+    }
+    pipeSet(P, k, st, live, v.ms);
+    pipeFacts(P, k, facts);
+    const deepLines = [{ txt: step.mech, cls: "code-path" }]
+      .concat(upstreamErr ? [{ txt: "stopped — an upstream step failed before this code path was reached", cls: "warn" }]
+                          : deepView(k, tr, E));
+    pipeDeep(P, k, deepLines);
+  }
+  if (open) P.right.textContent = "live · " + fmtMs(performance.now() - P.t0) + " elapsed";
+}
+function pipeApplyResponse(P, data, ctx) {
+  const r = data.retrieval || {};
+  if (r.model)
+    pipeFact(P, "embed", "embed " + r.model + " · " +
+      (r.input_tokens != null ? r.input_tokens + " input tok" : "") + " · " + fmtUsd(r.cost_usd));
+  if (r.stores)
+    for (const [name, s] of Object.entries(r.stores))
+      pipeFact(P, "budget", name + ": k=" + s.k + " · budget=" + s.budget_chars + "ch · candidates=" + s.candidates);
+  const g = data.generation;
+  if (g)
+    pipeFact(P, "generate", "generation " + fmtUsd(g.cost_usd) + " · " + fmtMs(g.latency_ms) +
+      " · corpus " + (data.corpus || "—") +
+      (g.output_tokens != null ? " · " + g.output_tokens + " out tok" : ""));
+  if (data.refused) pipeFact(P, "generate", "refused — the model was never called", "warn");
+}
+function pipeStepError(P, msg) {
+  for (const k of P.order) {
+    const s = P.steps[k];
+    if (s.st === "ok" || s.st === "err") continue;
+    pipeSet(P, k, "err", "error");
+    pipeFacts(P, k, [["⚠ " + msg, "bad"]]);
+    return;
+  }
+}
+function pipeFinalize(P, ctx) {
+  if (P.done) return;
+  P.done = true;
+  const wall = ctx.wall != null ? ctx.wall : (performance.now() - P.t0);
+  pipeStop(P);
+  P.spin.classList.add("hidden");
+  P.right.textContent = "done in " + fmtMs(wall) + (ctx.http != null ? " · HTTP " + ctx.http : "");
+  for (const k of P.order) {
+    const s = P.steps[k];
+    if (s.st === "run") pipeSet(P, k, null, "");
+  }
+  const t = P.total;
+  t.textContent = "";
+  const add = (txt) => t.appendChild(el("span", null, txt));
+  add("wall " + fmtMs(wall));
+  if (ctx.http != null) add("HTTP " + ctx.http);
+  if (ctx.spans != null) add(ctx.spans + " spans · " + (ctx.events != null ? ctx.events : 0) + " events");
+  if (ctx.traceId) {
+    const a = el("a", null, "trace " + ctx.traceId.slice(0, 12) + "… → open waterfall");
+    a.href = "#";
+    a.addEventListener("click", (e) => { e.preventDefault(); setMode("trace"); refreshTraceList(ctx.traceId); });
+    t.appendChild(a);
+  }
+  t.classList.remove("hidden");
+}
+
 /* ---------------- RAG ---------------- */
 function ragStageSummary(data) {
   const r = data.retrieval || {};
@@ -850,30 +2053,49 @@ async function askRag() {
   const corpus = $("rag-corpus").value;
   const out = $("rag-result");
   out.textContent = "";
-  const loading = el("div", "answer");
-  loading.appendChild(el("span", "spin"));
-  loading.appendChild(document.createTextNode(
-    "POST /rag corpus=" + corpus + " — embed → retrieve → budget → gate → generate …"));
-  out.appendChild(loading);
+  if (state.ragPipe) pipeStop(state.ragPipe);
+
+  const P = makePipeline(corpus);
+  out.appendChild(P.box);
+  pipeTicker(P);
+  state.ragPipe = P;
+  const ctx = { t0: performance.now(), http: null, traceId: null, wall: null, spans: null, events: null };
+  P.ctx = ctx;
   setBusy(true);
   setLast("rag", "POST /rag corpus=" + corpus);
 
+  // W3C traceparent minted in the browser → the server continues THIS trace,
+  // so the panel can poll /traces/<id> before the answer even arrives.
+  const hex = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)),
+    b => b.toString(16).padStart(2, "0")).join("");
+  const traceparent = "00-" + hex(16) + "-" + hex(8) + "-01";
+  ctx.traceId = traceparent.split("-")[1];
+
   let data = null, errMsg = null, traceId = null;
-  const t0 = performance.now();
+  const fetching = fetch("/rag", {
+    method: "POST",
+    headers: Object.assign(authHeaders(), { traceparent: traceparent }),
+    body: JSON.stringify({ question: q, corpus: corpus }),
+  });
+  pipePoll(P, ctx.traceId);
   try {
-    const res = await fetch("/rag", {
-      method: "POST", headers: authHeaders(),
-      body: JSON.stringify({ question: q, corpus: corpus }),
-    });
-    traceId = res.headers.get("X-Trace-Id");
+    const res = await fetching;
+    ctx.http = res.status;
+    traceId = res.headers.get("X-Trace-Id") || ctx.traceId;
+    if (traceId && traceId !== ctx.traceId) { ctx.traceId = traceId; P.traceId = traceId; P.miss = 0; }
     stageClient("HTTP " + res.status + (traceId ? " · X-Trace-Id " + traceId.slice(0, 12) + "…" : ""),
-                res.ok ? "ok" : "err", fmtMs(performance.now() - t0));
+                res.ok ? "ok" : "err", fmtMs(performance.now() - ctx.t0));
     if (traceId) state.last.traceId = traceId;
     if (!res.ok) errMsg = await readError(res);
     else data = await res.json();
   } catch (e) { errMsg = String(e && e.message || e); }
 
-  out.textContent = "";
+  ctx.wall = performance.now() - ctx.t0;
+  await pipeSettle(P, ctx);
+  if (data) pipeApplyResponse(P, data, ctx);
+  if (errMsg) pipeStepError(P, errMsg);
+  pipeFinalize(P, ctx);
+
   if (errMsg) {
     out.appendChild(el("div", "answer err", "⚠ " + errMsg));
     renderStages();
@@ -882,11 +2104,32 @@ async function askRag() {
   }
 
   const r = ragStageSummary(data);
+  const cites = data.citations || [];
   const ans = el("div", "answer");
   if (data.refused) {
     ans.appendChild(el("span", "refused", "GATE: not covered by the corpus — empty context after budget, model never called"));
   }
-  ans.appendChild(document.createTextNode(data.answer || "(empty)"));
+  const rawAnswer = data.answer || "(empty)";
+  const mdToggle = el("button", "ghost md-toggle", "raw");
+  mdToggle.title = "switch between the rendered preview and the raw markdown source";
+  ans.appendChild(mdToggle);
+  const mdBox = el("div", "answer-md");
+  const citeIdx = mdCiteIndex(cites);
+  mdBox.innerHTML = renderMarkdown(rawAnswer, citeIdx);
+  ans.appendChild(mdBox);
+  let showingRaw = false;
+  mdToggle.addEventListener("click", () => {
+    showingRaw = !showingRaw;
+    if (showingRaw) {
+      mdBox.textContent = rawAnswer;
+      mdBox.style.whiteSpace = "pre-wrap";
+      mdToggle.textContent = "preview";
+    } else {
+      mdBox.innerHTML = renderMarkdown(rawAnswer, citeIdx);
+      mdBox.style.whiteSpace = "";
+      mdToggle.textContent = "raw";
+    }
+  });
   out.appendChild(ans);
 
   const gen = data.generation || {};
@@ -915,13 +2158,17 @@ async function askRag() {
       " (" + Object.values(data.skipped).join("; ") + ")"));
   }
 
-  const cites = data.citations || [];
+  // 30-day plan — only the days this particular run exercised (see flowDaysFor)
+  renderFlowDays(out, flowDaysFor(data));
+
   if (cites.length) {
-    out.appendChild(el("div", "cite-h", cites.length + " retrieved chunk" + (cites.length === 1 ? "" : "s") + " (cited ⊆ retrieved; kept/dropped marks come from the trace's document events)"));
+    out.appendChild(el("div", "cite-h", cites.length + " retrieved chunk" + (cites.length === 1 ? "" : "s") +
+      " (cited ⊆ retrieved; kept/dropped marks come from the trace's document events · click a [n] marker in the answer to jump here)"));
     const grid = el("div", "cites");
-    for (const c of cites) {
+    cites.forEach((c, i) => {
       const card = el("div", "cite");
       if (c.chunk_id) card.dataset.cid = c.chunk_id;
+      card.dataset.idx = String(i);
       if (c.corpus) card.appendChild(el("div", "badge", c.corpus));
       card.appendChild(el("div", "src", c.symbol ? c.symbol : (c.source || c.doc_id || "?")));
       if (c.heading) card.appendChild(el("div", "head", c.heading));
@@ -935,7 +2182,7 @@ async function askRag() {
         card.appendChild(bar);
       }
       grid.appendChild(card);
-    }
+    });
     out.appendChild(grid);
   }
 
@@ -1366,7 +2613,7 @@ function conceptCard(item) {
         ev.textContent = JSON.stringify(e.data, null, 2);
         ev.classList.remove("hidden");
       }
-      if (e.status === 401) showMintHint(true);
+      if (e.status === 401) sessionLost("401 — token missing or expired");
     }
     btn.disabled = false;
     btn.textContent = "prove ▸ live call";
@@ -1428,11 +2675,21 @@ $("btn-token").addEventListener("click", () => {
   if (state.token) localStorage.setItem(STORE_TOKEN, state.token);
   else localStorage.removeItem(STORE_TOKEN);
   showMintHint(false);
+  if (state.token) { state.loginDismissed = false; hideLogin(); }
+  else showLogin();
   probe(); refreshOps(); renderIdentity();
 });
 $("token").addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("btn-token").click();
 });
+$("login-form").addEventListener("submit", doLogin);
+$("btn-login-token").addEventListener("click", () => {
+  state.loginDismissed = true;
+  hideLogin();
+  showMintHint(true);
+  $("token").focus();
+});
+$("btn-logout").addEventListener("click", signOut);
 $("btn-copy-mint").addEventListener("click", () => {
   navigator.clipboard && navigator.clipboard.writeText(MINT_CMD);
   $("btn-copy-mint").textContent = "Copied!";
@@ -1441,6 +2698,7 @@ $("btn-copy-mint").addEventListener("click", () => {
 $("btn-clear").addEventListener("click", () => {
   state.messages = [];
   saveLog(); renderLog();
+  if (state.ragPipe) { pipeStop(state.ragPipe); state.ragPipe = null; }
   $("rag-result").textContent = "";
   state.last = null; state.wire = null;
   $("rail-stages").textContent = "";
@@ -1449,6 +2707,8 @@ $("btn-clear").addEventListener("click", () => {
 });
 
 $("token").value = state.token;
+const remembered = localStorage.getItem(STORE_USER);
+if (remembered) $("login-user").value = remembered;
 renderLog();
 renderConcepts();
 renderIdentity();
@@ -1457,7 +2717,8 @@ probe();
 refreshOps();
 refreshTraceList();
 setInterval(probe, 30000);
-if (!state.token) showMintHint(true);
+if (state.token) { hideLogin(); showMintHint(false); }
+else { showLogin(); }
 </script>
 </body>
 </html>

@@ -38,7 +38,6 @@ import argparse
 import os
 import secrets
 import sys
-import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -97,26 +96,22 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --ttl must be a positive number of seconds", file=sys.stderr)
         return 2
 
-    from joserfc import jwt as _jwt
-    from joserfc.jwk import OctKey
+    # The actual signing lives in ai_os.identity.mint_token — the same
+    # function the server's POST /ui/login uses — so there is exactly one
+    # writer of claims and one reader of the shared secret (CLI + login can
+    # never drift apart). This CLI keeps only arg validation and its exit
+    # codes above.
+    from ai_os.identity import mint_token
 
-    now = int(time.time())
-    claims: dict[str, object] = {
-        "sub": args.sub,
-        "iat": now,
-        "exp": now + args.ttl,
-    }
-    if args.tenant:
-        claims["tenant"] = args.tenant
-    if args.roles:
-        claims["roles"] = [r.strip() for r in args.roles.split(",") if r.strip()]
-    if args.issuer:
-        claims["iss"] = args.issuer
-    if args.audience:
-        claims["aud"] = args.audience
-
-    token = _jwt.encode({"alg": "HS256", "typ": "JWT"}, claims,
-                        OctKey.import_key(secret))
+    try:
+        token = mint_token(args.sub, ttl_s=args.ttl, tenant=args.tenant,
+                           roles=[r.strip() for r in args.roles.split(",")
+                                  if r.strip()],
+                           issuer=args.issuer, audience=args.audience,
+                           secret=secret)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     if not args.quiet:
         print(f"minted: sub={args.sub} ttl={args.ttl}s "
